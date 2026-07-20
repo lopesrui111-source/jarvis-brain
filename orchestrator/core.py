@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """
-JARVIS Core v2 — 24/7 Daemon MIT GEDAECHTNIS
-Neu gegenueber v1:
-- Tool-Use: remember (speichern), recall (suchen), vault_note (Markdown-Notiz)
-- OpenAI-Embeddings (text-embedding-3-small) + pgvector-Aehnlichkeitssuche
-- Auto-Recall: vor jeder Antwort wird das Langzeitgedaechtnis befragt
+JARVIS Core v3 — 24/7 Daemon MIT GEDAECHTNIS + NIGHTLY-KONSOLIDIERUNG
+Neu gegenueber v2:
+- Tages-Log: jedes Gespraech wird in Redis mitgeschnitten (7 Tage TTL)
+- Nightly-Job (03:00): extrahiert Fakten aus dem Tages-Log, dedupliziert
+  per Vektor-Suche, speichert ins Langzeitgedaechtnis, Vault-Tagesnotiz
+- Manueller Trigger: 'konsolidiere' in der CLI
 """
 
 import os
@@ -46,6 +47,10 @@ VAULT_DIR = "/app/vault"
 INBOX_KEY   = "jarvis:inbox"
 HISTORY_KEY = "jarvis:history"
 REPLY_KEY   = "jarvis:reply:{id}"
+DAYLOG_KEY  = "jarvis:daylog:{date}"      # Tages-Mitschnitt
+NIGHTLY_MARK = "jarvis:nightly:last"      # Datum des letzten Laufs
+NIGHTLY_HOUR = 3                          # 03:00 Europe/Berlin (TZ aus .env)
+DEDUP_DIST  = 0.15                        # Vektor-Distanz: darunter = Duplikat
 
 if not CLAUDE_KEY:
     print("FEHLER: ANTHROPIC_API_KEY fehlt in .env", flush=True)
@@ -278,6 +283,128 @@ def run_tool(name: str, inp: dict) -> str:
     return f"Unbekanntes Tool: {name}"
 
 
+# ── TAGES-LOG + NIGHTLY-KONSOLIDIERUNG ───────────────────────
+EXTRACT_MODEL = os.getenv("BOT_MODEL", "claude-haiku-4-5-20251001")
+
+EXTRACT_PROMPT = """Du bekommst den Gespraechsmitschnitt eines Tages zwischen Rui und JARVIS.
+Extrahiere NUR dauerhaft merkwuerdige Fakten ueber Rui und seine Projekte:
+Entscheidungen, Zahlen, Deadlines, Projektstaende, Vorlieben, wichtige Ereignisse.
+KEIN Smalltalk, KEINE Fragen, KEINE technischen Zwischenschritte, nichts Redundantes.
+
+Antworte NUR mit einem JSON-Array, ohne Markdown, ohne Erklaerung:
+[{"content": "praeziser Fakt", "project": "elements|buroflow|immo|frozen|stille|jarvis|privat|sonstiges", "title": "3-6 Woerter"}]
+
+Wenn nichts Merkwuerdiges dabei ist: []"""
+
+
+def log_exchange(r, user_text, answer):
+    """Schneidet jeden Austausch ins Tages-Log mit (7 Tage TTL)."""
+    try:
+        key = DAYLOG_KEY.format(date=datetime.now().strftime("%Y-%m-%d"))
+        r.rpush(key, json.dumps({"t": datetime.now().strftime("%H:%M"),
+                                 "du": user_text, "jarvis": answer}, ensure_ascii=False))
+        r.expire(key, 7 * 24 * 3600)
+    except Exception as e:
+        print(f"  [daylog] {e}", flush=True)
+
+
+def memory_is_duplicate(v) -> bool:
+    """True, wenn ein sehr aehnlicher Eintrag schon existiert."""
+    if v is None:
+        return False
+    try:
+        conn = pg_conn()
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT embedding <=> %s::vector AS dist FROM memory "
+                "WHERE embedding IS NOT NULL ORDER BY dist ASC LIMIT 1",
+                (vec_literal(v),))
+            row = cur.fetchone()
+        conn.close()
+        return row is not None and row[0] < DEDUP_DIST
+    except Exception as e:
+        print(f"  [dedup] {e}", flush=True)
+        return False
+
+
+def consolidate(r, date_str=None) -> str:
+    """Extrahiert Fakten aus dem Tages-Log und speichert Neues ins Gedaechtnis."""
+    date_str = date_str or datetime.now().strftime("%Y-%m-%d")
+    key = DAYLOG_KEY.format(date=date_str)
+    try:
+        raw_items = r.lrange(key, 0, -1)
+    except Exception as e:
+        return f"Fehler beim Lesen des Tages-Logs: {e}"
+    if not raw_items:
+        return f"Kein Tages-Log fuer {date_str} — nichts zu konsolidieren."
+
+    lines = []
+    for raw in raw_items:
+        try:
+            d = json.loads(raw)
+            lines.append(f"[{d.get('t','')}] Rui: {d.get('du','')}")
+            lines.append(f"[{d.get('t','')}] JARVIS: {d.get('jarvis','')}")
+        except Exception:
+            continue
+    transcript = "\n".join(lines)[-30000:]
+
+    try:
+        resp = client.messages.create(
+            model=EXTRACT_MODEL, max_tokens=2000, system=EXTRACT_PROMPT,
+            messages=[{"role": "user", "content": transcript}])
+        track_cost(EXTRACT_MODEL, resp.usage.input_tokens, resp.usage.output_tokens)
+        text = "".join(b.text for b in resp.content if b.type == "text")
+        text = re.sub(r"```json|```", "", text).strip()
+        facts = json.loads(text)
+        if not isinstance(facts, list):
+            facts = []
+    except Exception as e:
+        return f"Fehler bei der Extraktion: {e}"
+
+    saved, skipped = [], 0
+    for f_ in facts[:20]:
+        content = (f_.get("content") or "").strip()
+        if not content:
+            continue
+        v = embed(f"{f_.get('title','')}\n{content}")
+        if memory_is_duplicate(v):
+            skipped += 1
+            continue
+        res = tool_remember({"content": content,
+                             "project": f_.get("project", "sonstiges"),
+                             "title": f_.get("title", content[:40])})
+        if res.startswith("Gespeichert"):
+            saved.append(f_.get("title", content[:40]))
+
+    if saved:
+        tool_vault_note({
+            "folder": "daily",
+            "title": f"Konsolidierung {date_str}",
+            "content": "Neu gemerkt:\n" + "\n".join(f"- {t}" for t in saved) +
+                       (f"\n\nUebersprungen (schon bekannt): {skipped}" if skipped else ""),
+        })
+    summary = f"Konsolidierung {date_str}: {len(saved)} neu gespeichert, {skipped} Duplikate uebersprungen."
+    print(f"  [nightly] {summary}", flush=True)
+    return summary
+
+
+def nightly_thread(r):
+    """Laeuft im Hintergrund, stoesst die Konsolidierung taeglich um NIGHTLY_HOUR an."""
+    while True:
+        try:
+            now = datetime.now()
+            today = now.strftime("%Y-%m-%d")
+            last = r.get(NIGHTLY_MARK)
+            if now.hour >= NIGHTLY_HOUR and last != today:
+                from datetime import timedelta
+                yesterday = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+                consolidate(r, yesterday)
+                r.set(NIGHTLY_MARK, today)
+        except Exception as e:
+            print(f"  [nightly] {e}", flush=True)
+        time.sleep(60)
+
+
 # ── GEDAECHTNIS-VERWALTUNG (Redis Kurzzeitgedaechtnis) ───────
 def load_history(r):
     try:
@@ -358,10 +485,11 @@ def think(history, user_text):
 # ── HAUPTSCHLEIFE ────────────────────────────────────────────
 def main():
     print("=" * 58, flush=True)
-    print("  JARVIS CORE v2 — 24/7 Daemon MIT GEDAECHTNIS", flush=True)
+    print("  JARVIS CORE v3 — GEDAECHTNIS + NIGHTLY-KONSOLIDIERUNG", flush=True)
     print(f"  Modell    : {MODEL}", flush=True)
+    print(f"  Extraktion: {EXTRACT_MODEL}", flush=True)
     print(f"  Embeddings: {EMBED_MODEL if oai else 'DEAKTIVIERT (kein Key)'}", flush=True)
-    print(f"  Vault     : {VAULT_DIR}", flush=True)
+    print(f"  Nightly   : taeglich {NIGHTLY_HOUR:02d}:00", flush=True)
     print("=" * 58, flush=True)
 
     r = None
@@ -377,6 +505,7 @@ def main():
     if r is None:
         sys.exit(1)
 
+    threading.Thread(target=nightly_thread, args=(r,), daemon=True).start()
     print("  JARVIS laeuft. Warte auf Anfragen ueber den Bus.\n", flush=True)
 
     while True:
@@ -406,6 +535,12 @@ def main():
                 r.expire(reply_q, 120)
                 continue
 
+            if low in ("konsolidiere", "konsolidieren", "nightly"):
+                result = consolidate(r)
+                r.rpush(reply_q, result)
+                r.expire(reply_q, 120)
+                continue
+
             print(f"  Du: {text}", flush=True)
             history = load_history(r)
             try:
@@ -414,6 +549,7 @@ def main():
                 answer = f"Fehler beim Denken: {type(e).__name__}: {e}"
                 print(f"  [think] {answer}", flush=True)
             save_history(r, history)
+            log_exchange(r, text, answer)
             print(f"  JARVIS: {answer}\n", flush=True)
 
             r.rpush(reply_q, answer)
