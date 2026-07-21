@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 """
-JARVIS Core v3 — 24/7 Daemon MIT GEDAECHTNIS + NIGHTLY-KONSOLIDIERUNG
-Neu gegenueber v2:
-- Tages-Log: jedes Gespraech wird in Redis mitgeschnitten (7 Tage TTL)
-- Nightly-Job (03:00): extrahiert Fakten aus dem Tages-Log, dedupliziert
-  per Vektor-Suche, speichert ins Langzeitgedaechtnis, Vault-Tagesnotiz
-- Manueller Trigger: 'konsolidiere' in der CLI
+JARVIS Core v5 — GEDAECHTNIS + NIGHTLY + MAIL + STILPROFIL
+Neu gegenueber v4:
+- Stil-Analyse: 'stil ionos' / 'stil gmail' liest die letzten gesendeten
+  Mails (read-only), erstellt ein Schreibstil-Profil und speichert es
+  ins Langzeitgedaechtnis + Vault (skills/)
+- Gesendet-Ordner wird automatisch erkannt (\\Sent Flag, Fallback-Namen)
 """
 
 import os
@@ -18,6 +18,9 @@ import threading
 from datetime import datetime
 
 import redis
+import imaplib
+import email
+from email.header import decode_header
 import psycopg2
 import psycopg2.extras
 from anthropic import Anthropic
@@ -43,6 +46,22 @@ MAX_TOKENS  = 1024
 MAX_TOOL_ROUNDS = 5
 
 VAULT_DIR = "/app/vault"
+
+# Mail-Konten (read-only). Nur Konten mit gesetztem User+Pass sind aktiv.
+MAIL_ACCOUNTS = {
+    "ionos": {
+        "host": os.getenv("MAIL_IONOS_HOST", "imap.ionos.de"),
+        "user": os.getenv("MAIL_IONOS_USER", ""),
+        "pass": os.getenv("MAIL_IONOS_PASS", ""),
+        "label": "Bueroflow (IONOS)",
+    },
+    "gmail": {
+        "host": os.getenv("MAIL_GMAIL_HOST", "imap.gmail.com"),
+        "user": os.getenv("MAIL_GMAIL_USER", ""),
+        "pass": os.getenv("MAIL_GMAIL_PASS", ""),
+        "label": "Privat (Gmail)",
+    },
+}
 
 INBOX_KEY   = "jarvis:inbox"
 HISTORY_KEY = "jarvis:history"
@@ -71,6 +90,8 @@ DEIN GEDAECHTNIS (Tools):
 - remember: Speichere wichtige Fakten, Entscheidungen, Vorlieben dauerhaft. Nutze es proaktiv, wenn Rui dir etwas Wichtiges erzaehlt (Projekte, Zahlen, Entscheidungen, Deadlines).
 - recall: Durchsuche dein Langzeitgedaechtnis. Nutze es, wenn Rui nach frueheren Themen fragt oder dir Kontext fehlt.
 - vault_note: Lege eine Markdown-Notiz im Wissens-Vault ab (fuer laengere Inhalte: Zusammenfassungen, Plaene, Recherchen).
+- check_mail / read_mail: Lies Ruis Postfaecher (ionos = Bueroflow-Business, gmail = privat). STRIKT read-only. Du kannst Mails zusammenfassen und Antwort-ENTWUERFE vorschlagen, aber nie senden.
+- Bevor du Texte/Mails/Posts fuer Rui entwirfst: recall nach "Schreibstil" und wende das Profil an (buroflow = geschaeftlich, privat = persoenlich).
 - Vor jeder Antwort bekommst du automatisch relevante Gedaechtnis-Treffer als Kontext (AUTO-RECALL). Nutze sie, erwaehne sie nur wenn relevant.
 
 DEINE ROLLE:
@@ -130,7 +151,190 @@ TOOLS = [
             "required": ["folder", "title", "content"],
         },
     },
+    {
+        "name": "check_mail",
+        "description": "Listet die neuesten Mails eines Postfachs (read-only, nichts wird als gelesen markiert). Konten: 'ionos' (Bueroflow) oder 'gmail' (privat).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "account": {"type": "string", "description": "ionos oder gmail"},
+                "limit": {"type": "integer", "description": "Wieviele Mails (Standard 10, max 25)"},
+                "unread_only": {"type": "boolean", "description": "Nur ungelesene (Standard: true)"},
+            },
+            "required": ["account"],
+        },
+    },
+    {
+        "name": "read_mail",
+        "description": "Liest den Textinhalt einer Mail (read-only). uid stammt aus check_mail.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "account": {"type": "string", "description": "ionos oder gmail"},
+                "uid": {"type": "string", "description": "Mail-UID aus check_mail"},
+            },
+            "required": ["account", "uid"],
+        },
+    },
 ]
+
+
+# ── MAIL (READ-ONLY) ─────────────────────────────────────────
+def _dec(s):
+    """Mail-Header dekodieren (=?utf-8?...)."""
+    if not s:
+        return ""
+    parts = decode_header(s)
+    out = ""
+    for txt, enc in parts:
+        if isinstance(txt, bytes):
+            try:
+                out += txt.decode(enc or "utf-8", errors="replace")
+            except Exception:
+                out += txt.decode("utf-8", errors="replace")
+        else:
+            out += txt
+    return out.strip()
+
+
+def _imap_connect(account: str, mailbox: str = "INBOX"):
+    acc = MAIL_ACCOUNTS.get(account)
+    if not acc:
+        return None, f"Unbekanntes Konto '{account}'. Verfuegbar: ionos, gmail."
+    if not acc["user"] or not acc["pass"]:
+        return None, f"Konto '{account}' ist nicht konfiguriert (MAIL_{account.upper()}_USER/_PASS in .env fehlen)."
+    try:
+        M = imaplib.IMAP4_SSL(acc["host"], 993)
+        M.login(acc["user"], acc["pass"])
+        if mailbox == "SENT":
+            mailbox = _find_sent_folder(M)
+            if not mailbox:
+                try:
+                    M.logout()
+                except Exception:
+                    pass
+                return None, f"Gesendet-Ordner bei {acc['label']} nicht gefunden."
+        ok, _ = M.select(f'"{mailbox}"', readonly=True)   # readonly: doppelte Absicherung
+        if ok != "OK":
+            return None, f"Ordner '{mailbox}' liess sich nicht oeffnen ({acc['label']})."
+        return M, None
+    except Exception as e:
+        return None, f"IMAP-Fehler ({acc['label']}): {e}"
+
+
+def _find_sent_folder(M) -> str:
+    """Findet den Gesendet-Ordner: erst per \\Sent-Flag, dann ueber bekannte Namen."""
+    try:
+        ok, boxes = M.list()
+        if ok == "OK":
+            for raw in boxes:
+                line = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
+                if "\\Sent" in line:
+                    return line.rsplit('"', 2)[-2] if '"' in line else line.split()[-1]
+    except Exception:
+        pass
+    for name in ("[Gmail]/Gesendet", "[Gmail]/Sent Mail", "Gesendete Objekte", "Sent", "Sent Items", "INBOX.Sent"):
+        try:
+            ok, _ = M.select(f'"{name}"', readonly=True)
+            if ok == "OK":
+                return name
+        except Exception:
+            continue
+    return ""
+
+
+def _extract_body(msg) -> str:
+    """Textkoerper einer Mail extrahieren (plain bevorzugt, HTML gestrippt)."""
+    body = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            if part.get_content_type() == "text/plain" and "attachment" not in str(part.get("Content-Disposition", "")):
+                payload = part.get_payload(decode=True)
+                if payload:
+                    body = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
+                    break
+        if not body:
+            for part in msg.walk():
+                if part.get_content_type() == "text/html":
+                    payload = part.get_payload(decode=True)
+                    if payload:
+                        html = payload.decode(part.get_content_charset() or "utf-8", errors="replace")
+                        body = re.sub(r"<[^>]+>", " ", html)
+                        body = re.sub(r"\s+", " ", body)
+                        break
+    else:
+        payload = msg.get_payload(decode=True)
+        if payload:
+            raw = payload.decode(msg.get_content_charset() or "utf-8", errors="replace")
+            if msg.get_content_type() == "text/html":
+                raw = re.sub(r"<[^>]+>", " ", raw)
+                raw = re.sub(r"\s+", " ", raw)
+            body = raw
+    return (body or "").strip()
+
+
+def tool_check_mail(inp: dict) -> str:
+    account = (inp.get("account") or "").strip().lower()
+    limit = min(int(inp.get("limit") or 10), 25)
+    unread_only = inp.get("unread_only", True)
+    M, err = _imap_connect(account)
+    if err:
+        return err
+    try:
+        crit = "UNSEEN" if unread_only else "ALL"
+        ok, data = M.uid("search", None, crit)
+        if ok != "OK":
+            return "Suche fehlgeschlagen."
+        uids = data[0].split()
+        total = len(uids)
+        uids = uids[-limit:][::-1]  # neueste zuerst
+        if not uids:
+            return f"Keine {'ungelesenen ' if unread_only else ''}Mails im Posteingang ({MAIL_ACCOUNTS[account]['label']})."
+        lines = [f"{MAIL_ACCOUNTS[account]['label']} — {total} {'ungelesen' if unread_only else 'gesamt'}, zeige {len(uids)}:"]
+        for uid in uids:
+            ok, msg_data = M.uid("fetch", uid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
+            if ok != "OK" or not msg_data or msg_data[0] is None:
+                continue
+            msg = email.message_from_bytes(msg_data[0][1])
+            frm = _dec(msg.get("From"))[:60]
+            sub = _dec(msg.get("Subject"))[:80] or "(kein Betreff)"
+            dat = _dec(msg.get("Date"))[:31]
+            lines.append(f"[uid {uid.decode()}] {dat} | {frm} | {sub}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"Fehler beim Abrufen: {e}"
+    finally:
+        try:
+            M.logout()
+        except Exception:
+            pass
+
+
+def tool_read_mail(inp: dict) -> str:
+    account = (inp.get("account") or "").strip().lower()
+    uid = (inp.get("uid") or "").strip()
+    if not uid:
+        return "Fehler: uid fehlt."
+    M, err = _imap_connect(account)
+    if err:
+        return err
+    try:
+        ok, msg_data = M.uid("fetch", uid.encode(), "(BODY.PEEK[])")
+        if ok != "OK" or not msg_data or msg_data[0] is None:
+            return f"Mail uid {uid} nicht gefunden."
+        msg = email.message_from_bytes(msg_data[0][1])
+        frm = _dec(msg.get("From"))
+        sub = _dec(msg.get("Subject"))
+        dat = _dec(msg.get("Date"))
+        body = (_extract_body(msg) or "(kein Textinhalt)")[:4000]
+        return f"Von: {frm}\nDatum: {dat}\nBetreff: {sub}\n\n{body}"
+    except Exception as e:
+        return f"Fehler beim Lesen: {e}"
+    finally:
+        try:
+            M.logout()
+        except Exception:
+            pass
 
 # ── KOSTEN ───────────────────────────────────────────────────
 PRICING = {
@@ -280,7 +484,97 @@ def run_tool(name: str, inp: dict) -> str:
         return tool_recall(inp)
     if name == "vault_note":
         return tool_vault_note(inp)
+    if name == "check_mail":
+        return tool_check_mail(inp)
+    if name == "read_mail":
+        return tool_read_mail(inp)
     return f"Unbekanntes Tool: {name}"
+
+
+# ── STIL-ANALYSE (aus gesendeten Mails) ──────────────────────
+STYLE_PROMPT = """Du bekommst von Rui selbst geschriebene, gesendete E-Mails.
+Erstelle ein kompaktes SCHREIBSTIL-PROFIL, damit eine KI kuenftig Texte in exakt seinem Stil entwerfen kann.
+
+Analysiere: Tonalitaet (formell/locker), Anrede und Grussformeln (Du/Sie, typische Floskeln),
+Satzlaenge und -bau, Wortwahl und typische Formulierungen, Emojis/Sonderzeichen,
+Struktur (Absaetze, Listen), Unterschiede je Empfaengertyp falls erkennbar.
+
+Antworte NUR mit dem Profil als kompakter Fliesstext mit kurzen Stichpunkten, max 300 Woerter.
+Zitiere 3-5 typische Original-Formulierungen als Beispiele."""
+
+
+def _strip_quotes_sig(body: str) -> str:
+    """Zitierte Zeilen, Weiterleitungs-Header und Signatur entfernen."""
+    lines = []
+    for ln in body.splitlines():
+        s = ln.strip()
+        if s.startswith(">"):
+            continue
+        if re.match(r"^(Am .{5,60} schrieb|On .{5,60} wrote|Von: |From: |-{2,}\s*Original|_{5,})", s):
+            break
+        if s == "--":
+            break
+        lines.append(ln)
+    return "\n".join(lines).strip()
+
+
+def analyze_style(account: str, limit: int = 30) -> str:
+    """Liest gesendete Mails, erstellt Stilprofil, speichert es in Gedaechtnis + Vault."""
+    M, err = _imap_connect(account, mailbox="SENT")
+    if err:
+        return err
+    samples = []
+    try:
+        ok, data = M.uid("search", None, "ALL")
+        if ok != "OK":
+            return "Suche im Gesendet-Ordner fehlgeschlagen."
+        uids = data[0].split()[-limit:][::-1]
+        if not uids:
+            return f"Keine gesendeten Mails bei '{account}' gefunden."
+        for uid in uids:
+            ok, msg_data = M.uid("fetch", uid, "(BODY.PEEK[])")
+            if ok != "OK" or not msg_data or msg_data[0] is None:
+                continue
+            msg = email.message_from_bytes(msg_data[0][1])
+            body = _strip_quotes_sig(_extract_body(msg))
+            if len(body) < 40:          # leere/auto-Mails ueberspringen
+                continue
+            sub = _dec(msg.get("Subject"))[:60]
+            samples.append(f"--- Betreff: {sub} ---\n{body[:1500]}")
+            if sum(len(s) for s in samples) > 24000:
+                break
+    except Exception as e:
+        return f"Fehler beim Lesen der gesendeten Mails: {e}"
+    finally:
+        try:
+            M.logout()
+        except Exception:
+            pass
+
+    if not samples:
+        return f"Keine brauchbaren Text-Mails im Gesendet-Ordner von '{account}'."
+
+    try:
+        resp = client.messages.create(
+            model=MODEL, max_tokens=1500, system=STYLE_PROMPT,
+            messages=[{"role": "user", "content": "\n\n".join(samples)}])
+        track_cost(MODEL, resp.usage.input_tokens, resp.usage.output_tokens)
+        profile = "".join(b.text for b in resp.content if b.type == "text").strip()
+    except Exception as e:
+        return f"Fehler bei der Stil-Analyse: {e}"
+
+    label = "buroflow" if account == "ionos" else "privat"
+    tool_remember({
+        "content": f"SCHREIBSTIL-PROFIL ({label}, aus {len(samples)} gesendeten Mails): {profile}",
+        "project": label,
+        "title": f"Schreibstil {label}",
+    })
+    tool_vault_note({
+        "folder": "skills",
+        "title": f"Stilprofil {label}",
+        "content": f"Basis: {len(samples)} gesendete Mails ({account}).\n\n{profile}",
+    })
+    return f"Stilprofil '{label}' erstellt aus {len(samples)} Mails und gespeichert.\n\n{profile}"
 
 
 # ── TAGES-LOG + NIGHTLY-KONSOLIDIERUNG ───────────────────────
@@ -485,11 +779,14 @@ def think(history, user_text):
 # ── HAUPTSCHLEIFE ────────────────────────────────────────────
 def main():
     print("=" * 58, flush=True)
-    print("  JARVIS CORE v3 — GEDAECHTNIS + NIGHTLY-KONSOLIDIERUNG", flush=True)
+    print("  JARVIS CORE v5 — GEDAECHTNIS + NIGHTLY + MAIL + STIL", flush=True)
     print(f"  Modell    : {MODEL}", flush=True)
     print(f"  Extraktion: {EXTRACT_MODEL}", flush=True)
     print(f"  Embeddings: {EMBED_MODEL if oai else 'DEAKTIVIERT (kein Key)'}", flush=True)
     print(f"  Nightly   : taeglich {NIGHTLY_HOUR:02d}:00", flush=True)
+    for k, acc in MAIL_ACCOUNTS.items():
+        status = "aktiv" if (acc["user"] and acc["pass"]) else "nicht konfiguriert"
+        print(f"  Mail {k:<6}: {status}", flush=True)
     print("=" * 58, flush=True)
 
     r = None
@@ -538,6 +835,12 @@ def main():
             if low in ("konsolidiere", "konsolidieren", "nightly"):
                 result = consolidate(r)
                 r.rpush(reply_q, result)
+                r.expire(reply_q, 120)
+                continue
+
+            if low.startswith("stil "):
+                acct = low.split(None, 1)[1].strip()
+                r.rpush(reply_q, analyze_style(acct))
                 r.expire(reply_q, 120)
                 continue
 
