@@ -17,6 +17,7 @@ import threading
 from datetime import datetime
 
 import redis
+import requests
 import imaplib
 import email
 from email.header import decode_header
@@ -26,6 +27,7 @@ from anthropic import Anthropic
 from openai import OpenAI
 
 BOT_NAME = "buroflow-ceo"
+BOT_USER_ID = "ceo"
 
 CLAUDE_KEY = os.getenv("ANTHROPIC_API_KEY") or os.getenv("CLAUDE_API_KEY", "")
 OPENAI_KEY = os.getenv("OPENAI_API_KEY", "")
@@ -39,7 +41,7 @@ PG_DB   = os.getenv("POSTGRES_DB", "jarvis_brain")
 
 MODEL       = os.getenv("ORCHESTRATOR_MODEL", "claude-sonnet-4-6")
 EMBED_MODEL = "text-embedding-3-small"
-MAX_HISTORY = 30
+MAX_HISTORY = 12
 MAX_TOKENS  = 2000
 MAX_TOOL_ROUNDS = 5
 VAULT_DIR = "/app/vault"
@@ -87,6 +89,8 @@ DEINE TOOLS:
 - check_mail/read_mail: NUR das Bueroflow-Postfach (ionos), read-only. Nie senden.
 - ask_marketing: dein Arbeiter fuer Ausfuehrung — Social-Posts, Copy, SEO, Ads, E-Mail-Sequenzen, Bilder (48 Skills). Du gibst Strategie und Briefing vor, er liefert Entwuerfe. Delegiere Ausfuehrungsarbeit an ihn statt sie selbst zu machen.
 
+DEIN WEB-ZUGRIFF (web_search/web_open/web_click): Echtes Browsen fuer Markt-Recherche, Wettbewerber, Preise, Trends. Nur lesen — nie einloggen, kaufen, posten oder Formulare absenden.
+
 EISERNE REGELN:
 - Alles Externe (Posts, Antworten, Mails) ist ENTWURF zur Freigabe — du postest/sendest nichts.
 - Keine Features vorschlagen, die Wochen kosten, ohne den Warteliste/Umsatz-Effekt zu benennen.
@@ -110,11 +114,12 @@ def pg_conn():
                             password=PG_PASS, dbname=PG_DB, connect_timeout=5)
 
 
-def track_cost(model, tok_in, tok_out):
+def track_cost(model, tok_in, tok_out, cache_read=0, cache_write=0):
     def _work():
         try:
             p = PRICING.get(model, DEFAULT_PRICE)
-            cost = (tok_in * p["in"] + tok_out * p["out"]) / 1_000_000
+            cost = (tok_in * p["in"] + tok_out * p["out"]
+                    + cache_read * p["in"] * 0.1 + cache_write * p["in"] * 1.25) / 1_000_000
             conn = pg_conn()
             with conn, conn.cursor() as cur:
                 cur.execute(
@@ -358,7 +363,94 @@ TOOLS = [
      "input_schema": {"type": "object", "properties": {
          "task": {"type": "string", "description": "Der Auftrag, praezise mit Kontext (Kanal, Ziel, Thema)"}},
          "required": ["task"]}},
+    {
+        "name": "web_search",
+        "description": "Google-Suche ueber den Stealth-Browser. Liefert Ergebnisliste als Text-Snapshot mit klickbaren refs (e1, e2...).",
+        "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+    },
+    {
+        "name": "web_open",
+        "description": "Oeffnet eine URL im Stealth-Browser und liefert den Seiteninhalt als kompakten Text-Snapshot. Auch Macros: @youtube_search foo, @reddit_subreddit bar.",
+        "input_schema": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+    },
+    {
+        "name": "web_click",
+        "description": "Klickt ein Element (ref aus Snapshot, z.B. e3) im offenen Tab und liefert den neuen Snapshot.",
+        "input_schema": {"type": "object", "properties": {"tab_id": {"type": "string"}, "ref": {"type": "string"}}, "required": ["tab_id", "ref"]},
+    },
 ]
+
+
+
+# ── WEB-ZUGRIFF (camofox, anti-detect Browser) ───────────────
+CAMOFOX_URL = os.getenv("CAMOFOX_URL", "http://camofox:9377")
+
+
+WEB_MACROS = {
+    "@google_search":   "https://www.google.com/search?q={}",
+    "@youtube_search":  "https://www.youtube.com/results?search_query={}",
+    "@wikipedia_search": "https://de.wikipedia.org/wiki/Spezial:Suche?search={}",
+    "@reddit_search":   "https://www.reddit.com/search/?q={}",
+    "@linkedin_search": "https://www.linkedin.com/search/results/all/?keywords={}",
+}
+
+
+def _expand_macro(target):
+    if not target.startswith("@"):
+        return target
+    parts = target.split(None, 1)
+    tmpl = WEB_MACROS.get(parts[0])
+    if not tmpl:
+        return target
+    from urllib.parse import quote
+    return tmpl.format(quote(parts[1] if len(parts) > 1 else ""))
+
+
+def _camofox_open(target: str, bot_user: str) -> str:
+    try:
+        r = requests.post(f"{CAMOFOX_URL}/tabs", json={"userId": bot_user, "sessionKey": "main", "url": _expand_macro(target)}, timeout=60)
+        if r.status_code >= 400:
+            return f"Browser-Fehler ({r.status_code}): {r.text[:200]}"
+        tab = r.json().get("tabId") or r.json().get("id")
+        if not tab:
+            return f"Kein Tab erhalten: {str(r.json())[:200]}"
+        s = requests.get(f"{CAMOFOX_URL}/tabs/{tab}/snapshot", params={"userId": bot_user}, timeout=60)
+        if s.status_code >= 400:
+            return f"Snapshot-Fehler ({s.status_code}): {s.text[:200]}"
+        snap = s.json().get("snapshot", "")
+        return f"[tab {tab}]\n{snap[:3500]}"
+    except Exception as e:
+        return f"Browser nicht erreichbar ({type(e).__name__}) — laeuft der camofox-Container?"
+
+
+def tool_web_search(inp):
+    q = (inp.get("query") or "").strip()
+    if not q:
+        return "Fehler: leere Suche."
+    return _camofox_open("@google_search " + q, BOT_USER_ID)
+
+
+def tool_web_open(inp):
+    url = (inp.get("url") or "").strip()
+    if not url:
+        return "Fehler: leere URL."
+    return _camofox_open(url, BOT_USER_ID)
+
+
+def tool_web_click(inp):
+    tab = (inp.get("tab_id") or "").strip()
+    ref = (inp.get("ref") or "").strip()
+    if not tab or not ref:
+        return "Fehler: tab_id und ref noetig."
+    try:
+        r = requests.post(f"{CAMOFOX_URL}/tabs/{tab}/click", json={"userId": BOT_USER_ID, "sessionKey": "main", "ref": ref}, timeout=60)
+        if r.status_code >= 400:
+            return f"Click-Fehler ({r.status_code}): {r.text[:200]}"
+        s = requests.get(f"{CAMOFOX_URL}/tabs/{tab}/snapshot", params={"userId": BOT_USER_ID}, timeout=60)
+        snap = s.json().get("snapshot", "") if s.status_code < 400 else ""
+        return f"[tab {tab}]\n{snap[:3500]}"
+    except Exception as e:
+        return f"Browser-Fehler: {type(e).__name__}: {e}"
 
 
 def tool_ask_marketing(inp):
@@ -390,17 +482,30 @@ def run_tool(name, inp):
         return tool_read_mail(inp)
     if name == "ask_marketing":
         return tool_ask_marketing(inp)
+    if name == "web_search":
+        return tool_web_search(inp)
+    if name == "web_open":
+        return tool_web_open(inp)
+    if name == "web_click":
+        return tool_web_click(inp)
     return f"Unbekanntes Tool: {name}"
 
 
 # ── Claude Tool-Loop ─────────────────────────────────────────
 client = Anthropic(api_key=CLAUDE_KEY)
 
+# Prompt-Caching: System-Prompt + Tools werden serverseitig gecacht (90% billiger ab 2. Aufruf)
+import copy as _copy
+SYS_CACHED = [{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}]
+TOOLS_CACHED = _copy.deepcopy(TOOLS)
+if TOOLS_CACHED:
+    TOOLS_CACHED[-1]["cache_control"] = {"type": "ephemeral"}
+
 
 def load_history(r):
     try:
         raw = r.get(HISTORY_KEY)
-        return json.loads(raw) if raw else []
+        return (json.loads(raw)[-MAX_HISTORY:]) if raw else []
     except Exception:
         return []
 
@@ -418,14 +523,16 @@ def think(history, user_text):
         hits = tool_recall({"query": user_text, "project": "buroflow"}, k=3)
         if hits and not hits.startswith(("Keine", "Fehler")):
             context = f"\n\n[AUTO-RECALL buroflow:\n{hits}]"
-    history.append({"role": "user", "content": user_text + context})
+    history.append({"role": "user", "content": user_text})
     messages = list(history)
+    if context:
+        messages[-1] = {"role": "user", "content": user_text + context}
     final_text = ""
     for _ in range(MAX_TOOL_ROUNDS):
         resp = client.messages.create(model=MODEL, max_tokens=MAX_TOKENS,
-                                      system=SYSTEM, tools=TOOLS, messages=messages)
+                                      system=SYS_CACHED, tools=TOOLS_CACHED, messages=messages)
         try:
-            track_cost(MODEL, resp.usage.input_tokens, resp.usage.output_tokens)
+            track_cost(MODEL, resp.usage.input_tokens, resp.usage.output_tokens, getattr(resp.usage, 'cache_read_input_tokens', 0) or 0, getattr(resp.usage, 'cache_creation_input_tokens', 0) or 0)
         except Exception:
             pass
         parts = [b.text for b in resp.content if b.type == "text"]

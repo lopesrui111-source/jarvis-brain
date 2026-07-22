@@ -40,7 +40,7 @@ PG_DB   = os.getenv("POSTGRES_DB", "jarvis_brain")
 
 MODEL       = os.getenv("ORCHESTRATOR_MODEL", "claude-sonnet-4-6")
 EMBED_MODEL = "text-embedding-3-small"
-MAX_HISTORY = 24
+MAX_HISTORY = 10
 MAX_TOKENS  = 3000
 MAX_TOOL_ROUNDS = 8
 VAULT_DIR  = "/app/vault"
@@ -94,7 +94,7 @@ def tool_load_skill(inp):
     try:
         with open(path, encoding="utf-8") as f:
             content = f.read()
-        return content[:22000]
+        return content[:12000]
     except Exception as e:
         return f"Fehler beim Laden: {e}"
 
@@ -249,11 +249,12 @@ def pg_conn():
                             password=PG_PASS, dbname=PG_DB, connect_timeout=5)
 
 
-def track_cost(model, tok_in, tok_out):
+def track_cost(model, tok_in, tok_out, cache_read=0, cache_write=0):
     def _work():
         try:
             p = PRICING.get(model, DEFAULT_PRICE)
-            cost = (tok_in * p["in"] + tok_out * p["out"]) / 1_000_000
+            cost = (tok_in * p["in"] + tok_out * p["out"]
+                    + cache_read * p["in"] * 0.1 + cache_write * p["in"] * 1.25) / 1_000_000
             conn = pg_conn()
             with conn, conn.cursor() as cur:
                 cur.execute("INSERT INTO cost_ledger (bot, model, tokens_in, tokens_out, cost_usd) "
@@ -455,11 +456,18 @@ SYSTEM = build_system()
 
 client = Anthropic(api_key=CLAUDE_KEY)
 
+# Prompt-Caching: System-Prompt + Tools werden serverseitig gecacht (90% billiger ab 2. Aufruf)
+import copy as _copy
+SYS_CACHED = [{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}]
+TOOLS_CACHED = _copy.deepcopy(TOOLS)
+if TOOLS_CACHED:
+    TOOLS_CACHED[-1]["cache_control"] = {"type": "ephemeral"}
+
 
 def load_history(r):
     try:
         raw = r.get(HISTORY_KEY)
-        return json.loads(raw) if raw else []
+        return (json.loads(raw)[-MAX_HISTORY:]) if raw else []
     except Exception:
         return []
 
@@ -477,9 +485,9 @@ def think(history, user_text):
     final_text = ""
     for _ in range(MAX_TOOL_ROUNDS):
         resp = client.messages.create(model=MODEL, max_tokens=MAX_TOKENS,
-                                      system=SYSTEM, tools=TOOLS, messages=messages)
+                                      system=SYS_CACHED, tools=TOOLS_CACHED, messages=messages)
         try:
-            track_cost(MODEL, resp.usage.input_tokens, resp.usage.output_tokens)
+            track_cost(MODEL, resp.usage.input_tokens, resp.usage.output_tokens, getattr(resp.usage, 'cache_read_input_tokens', 0) or 0, getattr(resp.usage, 'cache_creation_input_tokens', 0) or 0)
         except Exception:
             pass
         parts = [b.text for b in resp.content if b.type == "text"]

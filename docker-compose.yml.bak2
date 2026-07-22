@@ -64,8 +64,6 @@ services:
     container_name: jarvis-dashboard
     restart: unless-stopped
     env_file: .env
-    volumes:
-      - ./vault:/app/vault
     ports:
       - "127.0.0.1:8090:8090"
     depends_on:
@@ -114,21 +112,11 @@ services:
     volumes:
       - ./vault:/app/vault
       - ./skills-repo/skills:/app/skills:ro
-      - ./brand:/app/brand:ro
     depends_on:
       redis:
         condition: service_healthy
       postgres:
         condition: service_healthy
-    networks:
-      - jarvis-net
-
-  camofox:
-    build: ./camofox
-    container_name: jarvis-camofox
-    restart: unless-stopped
-    environment:
-      - CAMOFOX_CRASH_REPORT_ENABLED=false
     networks:
       - jarvis-net
 
