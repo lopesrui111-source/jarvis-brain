@@ -89,6 +89,21 @@ services:
     networks:
       - jarvis-net
 
+  jarvis-ceo:
+    build: ./bots/ceo
+    container_name: jarvis-ceo
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./vault:/app/vault
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - jarvis-net
+
 networks:
   jarvis-net:
     driver: bridge

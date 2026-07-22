@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
 """
-JARVIS Core v5 — GEDAECHTNIS + NIGHTLY + MAIL + STILPROFIL
+JARVIS Core v6 — GEDAECHTNIS + NIGHTLY + MAIL + STIL + CEO-DELEGATION
 Neu gegenueber v4:
 - Stil-Analyse: 'stil ionos' / 'stil gmail' liest die letzten gesendeten
   Mails (read-only), erstellt ein Schreibstil-Profil und speichert es
   ins Langzeitgedaechtnis + Vault (skills/)
 - Gesendet-Ordner wird automatisch erkannt (\\Sent Flag, Fallback-Namen)
+- ask_ceo: delegiert Auftraege an den Bueroflow-CEO-Bot am Bus
 """
 
 import os
@@ -95,7 +96,7 @@ DEIN GEDAECHTNIS (Tools):
 - Vor jeder Antwort bekommst du automatisch relevante Gedaechtnis-Treffer als Kontext (AUTO-RECALL). Nutze sie, erwaehne sie nur wenn relevant.
 
 DEINE ROLLE:
-- Orchestrator eines Multi-Agent-Systems auf einem Hetzner-Server. Aktuell laeuft nur dein Kern — es gibt noch keine Bots.
+- Orchestrator eines Multi-Agent-Systems auf einem Hetzner-Server. Erster Bot am Bus: der BUEROFLOW-CEO (ask_ceo) fuer Strategie, Marketing-Entwuerfe und Bueroflow-Analysen. Delegiere Bueroflow-Detailarbeit an ihn; einfache Fragen beantworte selbst.
 - Ruis Denk-Partner: Ideen challengen, Optionen abwaegen, Klartext reden.
 - Sag nie "ich bin nur eine KI". Wenn du etwas nicht kannst, sag konkret was fehlt.
 
@@ -174,6 +175,17 @@ TOOLS = [
                 "uid": {"type": "string", "description": "Mail-UID aus check_mail"},
             },
             "required": ["account", "uid"],
+        },
+    },
+    {
+        "name": "ask_ceo",
+        "description": "Delegiert einen Auftrag an den Bueroflow-CEO-Bot (Strategie, Marketing-Entwuerfe, Bueroflow-Analysen). Der CEO hat eigenes Fachwissen, Zugriff aufs gemeinsame Gedaechtnis und das Bueroflow-Postfach. Dauert bis zu 2 Minuten.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "Der Auftrag an den CEO, praezise formuliert"},
+            },
+            "required": ["task"],
         },
     },
 ]
@@ -477,6 +489,22 @@ def tool_vault_note(inp: dict) -> str:
         return f"Fehler beim Schreiben: {e}"
 
 
+def tool_ask_ceo(inp: dict) -> str:
+    task = (inp.get("task") or "").strip()
+    if not task:
+        return "Fehler: leerer Auftrag."
+    try:
+        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        req_id = str(uuid.uuid4())
+        r.rpush("bot:ceo:inbox", json.dumps({"id": req_id, "text": task}, ensure_ascii=False))
+        resp = r.blpop(f"bot:ceo:reply:{req_id}", timeout=150)
+        if resp is None:
+            return "CEO antwortet nicht (Timeout) — laeuft der jarvis-ceo Container?"
+        return f"CEO-Antwort:\n{resp[1]}"
+    except Exception as e:
+        return f"Fehler bei der Delegation: {e}"
+
+
 def run_tool(name: str, inp: dict) -> str:
     if name == "remember":
         return tool_remember(inp)
@@ -488,6 +516,8 @@ def run_tool(name: str, inp: dict) -> str:
         return tool_check_mail(inp)
     if name == "read_mail":
         return tool_read_mail(inp)
+    if name == "ask_ceo":
+        return tool_ask_ceo(inp)
     return f"Unbekanntes Tool: {name}"
 
 
@@ -779,7 +809,7 @@ def think(history, user_text):
 # ── HAUPTSCHLEIFE ────────────────────────────────────────────
 def main():
     print("=" * 58, flush=True)
-    print("  JARVIS CORE v5 — GEDAECHTNIS + NIGHTLY + MAIL + STIL", flush=True)
+    print("  JARVIS CORE v6 — GEDAECHTNIS + NIGHTLY + MAIL + STIL + CEO", flush=True)
     print(f"  Modell    : {MODEL}", flush=True)
     print(f"  Extraktion: {EXTRACT_MODEL}", flush=True)
     print(f"  Embeddings: {EMBED_MODEL if oai else 'DEAKTIVIERT (kein Key)'}", flush=True)
@@ -867,3 +897,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
