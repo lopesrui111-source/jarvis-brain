@@ -85,6 +85,7 @@ DEINE TOOLS:
 - remember/recall: gemeinsames Langzeitgedaechtnis mit JARVIS. Speichere Entscheidungen/Staende (project: buroflow). recall nutzen bevor du raetst — auch fuer "Schreibstil buroflow".
 - vault_note: laengere Plaene/Analysen als Markdown ablegen (folder: projects).
 - check_mail/read_mail: NUR das Bueroflow-Postfach (ionos), read-only. Nie senden.
+- ask_marketing: dein Arbeiter fuer Ausfuehrung — Social-Posts, Copy, SEO, Ads, E-Mail-Sequenzen, Bilder (48 Skills). Du gibst Strategie und Briefing vor, er liefert Entwuerfe. Delegiere Ausfuehrungsarbeit an ihn statt sie selbst zu machen.
 
 EISERNE REGELN:
 - Alles Externe (Posts, Antworten, Mails) ist ENTWURF zur Freigabe — du postest/sendest nichts.
@@ -352,7 +353,28 @@ TOOLS = [
     {"name": "read_mail",
      "description": "Liest eine Mail aus dem Bueroflow-Postfach (uid aus check_mail).",
      "input_schema": {"type": "object", "properties": {"uid": {"type": "string"}}, "required": ["uid"]}},
+    {"name": "ask_marketing",
+     "description": "Delegiert eine Marketing-Aufgabe an den Marketing-Bot (48 Skills: Social, Copywriting, SEO, Ads, E-Mails, Bildgenerierung via MuAPI u.v.m.). Er liefert fertige Entwuerfe. Dauert bis zu 4 Minuten.",
+     "input_schema": {"type": "object", "properties": {
+         "task": {"type": "string", "description": "Der Auftrag, praezise mit Kontext (Kanal, Ziel, Thema)"}},
+         "required": ["task"]}},
 ]
+
+
+def tool_ask_marketing(inp):
+    task = (inp.get("task") or "").strip()
+    if not task:
+        return "Fehler: leerer Auftrag."
+    try:
+        rr = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        req_id = str(uuid.uuid4())
+        rr.rpush("bot:marketing:inbox", json.dumps({"id": req_id, "text": task}, ensure_ascii=False))
+        resp = rr.blpop(f"bot:marketing:reply:{req_id}", timeout=240)
+        if resp is None:
+            return "Marketing-Bot antwortet nicht (Timeout) — laeuft der jarvis-marketing Container?"
+        return f"Marketing-Antwort:\n{resp[1]}"
+    except Exception as e:
+        return f"Fehler bei der Delegation: {e}"
 
 
 def run_tool(name, inp):
@@ -366,6 +388,8 @@ def run_tool(name, inp):
         return tool_check_mail(inp)
     if name == "read_mail":
         return tool_read_mail(inp)
+    if name == "ask_marketing":
+        return tool_ask_marketing(inp)
     return f"Unbekanntes Tool: {name}"
 
 

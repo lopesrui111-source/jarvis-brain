@@ -109,6 +109,65 @@ def stats():
     return JSONResponse(out)
 
 
+VAULT_DIR = "/app/vault"
+TEXT_EXT = (".md", ".txt", ".json", ".yml", ".yaml", ".csv")
+IMG_EXT  = (".png", ".jpg", ".jpeg", ".webp", ".gif")
+
+
+def _safe_vault_path(rel: str) -> str:
+    """Pfad-Traversal verhindern: Ergebnis muss unter VAULT_DIR liegen."""
+    rel = (rel or "").strip().lstrip("/")
+    full = os.path.realpath(os.path.join(VAULT_DIR, rel))
+    root = os.path.realpath(VAULT_DIR)
+    if not (full == root or full.startswith(root + os.sep)):
+        return ""
+    return full
+
+
+@app.get("/api/vault")
+def vault_list(path: str = ""):
+    full = _safe_vault_path(path)
+    if not full or not os.path.isdir(full):
+        return JSONResponse({"error": "Ordner nicht gefunden", "path": path}, status_code=404)
+    dirs, files = [], []
+    try:
+        for name in sorted(os.listdir(full)):
+            if name.startswith("."):
+                continue
+            p = os.path.join(full, name)
+            rel = os.path.relpath(p, os.path.realpath(VAULT_DIR)).replace(os.sep, "/")
+            if os.path.isdir(p):
+                dirs.append({"name": name, "path": rel})
+            else:
+                st = os.stat(p)
+                files.append({"name": name, "path": rel, "size": st.st_size,
+                              "mtime": __import__("datetime").datetime.fromtimestamp(st.st_mtime).strftime("%d.%m.%Y %H:%M"),
+                              "kind": "image" if name.lower().endswith(IMG_EXT) else ("text" if name.lower().endswith(TEXT_EXT) else "file")})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse({"path": path, "dirs": dirs, "files": files})
+
+
+@app.get("/api/vault/file")
+def vault_file(path: str = "", download: int = 0):
+    from fastapi.responses import FileResponse, PlainTextResponse
+    full = _safe_vault_path(path)
+    if not full or not os.path.isfile(full):
+        return JSONResponse({"error": "Datei nicht gefunden"}, status_code=404)
+    name = os.path.basename(full)
+    if download:
+        return FileResponse(full, filename=name)
+    if name.lower().endswith(IMG_EXT):
+        return FileResponse(full)
+    if name.lower().endswith(TEXT_EXT):
+        try:
+            with open(full, encoding="utf-8", errors="replace") as f:
+                return PlainTextResponse(f.read(200000))
+        except Exception as e:
+            return JSONResponse({"error": str(e)}, status_code=500)
+    return FileResponse(full, filename=name)
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     return HTML
@@ -169,6 +228,28 @@ HTML = """<!DOCTYPE html>
   .bot .row .v { font-variant-numeric: tabular-nums; }
 
   .empty { color: var(--dim); font-size: 13px; padding: 8px 2px; }
+  .vault { display: grid; grid-template-columns: minmax(260px, 1fr) 2fr; gap: 14px; }
+  @media (max-width: 800px) { .vault { grid-template-columns: 1fr; } }
+  .vpanel { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px; min-height: 120px; }
+  .vcrumbs { font-size: 12px; color: var(--dim); margin-bottom: 10px; word-break: break-all; }
+  .vcrumbs a { color: var(--green); text-decoration: none; cursor: pointer; }
+  .vlist { display: grid; gap: 4px; max-height: 420px; overflow-y: auto; }
+  .vitem { display: flex; justify-content: space-between; gap: 8px; padding: 7px 9px; border-radius: 8px;
+           font-size: 13px; cursor: pointer; border: 1px solid transparent; }
+  .vitem:hover { background: var(--bg2); border-color: var(--line); }
+  .vitem .n { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .vitem .m { color: var(--dim); font-size: 11px; flex: none; }
+  .vitem.dir .n::before { content: "📁 "; }
+  .vitem.text .n::before { content: "📄 "; }
+  .vitem.image .n::before { content: "🖼️ "; }
+  .vitem.file .n::before { content: "📦 "; }
+  .vview { max-height: 480px; overflow: auto; }
+  .vview pre { white-space: pre-wrap; word-break: break-word; font-size: 13px; line-height: 1.55;
+               font-family: 'Cascadia Code', Consolas, monospace; }
+  .vview img { max-width: 100%; border-radius: 8px; }
+  .vhead { display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px; gap: 10px; }
+  .vhead .t { font-size: 13px; font-weight: 600; word-break: break-all; }
+  .vhead a { color: var(--green); font-size: 12px; text-decoration: none; flex: none; }
   footer { margin-top: 34px; color: var(--dim); font-size: 11px; text-align: center; }
 </style>
 </head>
@@ -190,11 +271,23 @@ HTML = """<!DOCTYPE html>
   <h2>Agenten</h2>
   <div class="bots" id="bots"><div class="empty">Lade...</div></div>
 
+  <h2 style="margin-top:32px">Vault</h2>
+  <div class="vault">
+    <div class="vpanel">
+      <div class="vcrumbs" id="vcrumbs"></div>
+      <div class="vlist" id="vlist"><div class="empty">Lade...</div></div>
+    </div>
+    <div class="vpanel vview" id="vview">
+      <div class="empty">Datei anklicken zum Ansehen.</div>
+    </div>
+  </div>
+
   <footer>JARVIS Brain · Hetzner nbg1 · nur lesend</footer>
 </div>
 
 <script>
 function fmt(n, d) { return '$' + n.toFixed(d === undefined ? 4 : d); }
+function esc(s) { return String(s).replace(/[&<>"]/g, function(c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
 
 async function load() {
   try {
@@ -204,36 +297,78 @@ async function load() {
     document.getElementById('k-total').textContent = fmt(s.total);
     document.getElementById('k-req').textContent   = s.requests;
     document.getElementById('k-queue').textContent = s.queue;
-
     const wrap = document.getElementById('bots');
-    if (!s.bots.length) {
-      wrap.innerHTML = '<div class="empty">Noch keine Agenten aktiv.</div>';
-      return;
-    }
-    wrap.innerHTML = s.bots.map(b => `
-      <div class="bot">
-        <div class="head">
-          <span class="dot ${b.online ? 'on' : ''}"></span>
-          <span class="name">${b.name}</span>
-          <span class="state">${b.online ? 'online' : 'offline'}</span>
-        </div>
-        <div class="rows">
-          <div class="row"><span class="k">Kosten</span><span class="v">${fmt(b.cost)}</span></div>
-          <div class="row"><span class="k">Requests</span><span class="v">${b.requests}</span></div>
-          <div class="row"><span class="k">Zuletzt aktiv</span><span class="v">${b.last_seen}</span></div>
-        </div>
-      </div>
-    `).join('');
-  } catch (e) { /* naechster Tick */ }
+    if (!s.bots.length) { wrap.innerHTML = '<div class="empty">Noch keine Agenten aktiv.</div>'; return; }
+    wrap.innerHTML = s.bots.map(function(b) {
+      return '<div class="bot"><div class="head">' +
+        '<span class="dot ' + (b.online ? 'on' : '') + '"></span>' +
+        '<span class="name">' + esc(b.name) + '</span>' +
+        '<span class="state">' + (b.online ? 'online' : 'offline') + '</span></div>' +
+        '<div class="rows">' +
+        '<div class="row"><span class="k">Kosten</span><span class="v">' + fmt(b.cost) + '</span></div>' +
+        '<div class="row"><span class="k">Requests</span><span class="v">' + b.requests + '</span></div>' +
+        '<div class="row"><span class="k">Zuletzt aktiv</span><span class="v">' + b.last_seen + '</span></div>' +
+        '</div></div>';
+    }).join('');
+  } catch (e) {}
 }
 
 function tick() {
   const n = new Date();
   document.getElementById('clock').textContent =
-    n.toLocaleTimeString('de-DE') + ' · ' + n.toLocaleDateString('de-DE', {weekday:'short', day:'2-digit', month:'short'});
+    n.toLocaleTimeString('de-DE') + ' | ' + n.toLocaleDateString('de-DE', {weekday:'short', day:'2-digit', month:'short'});
 }
 
-load(); tick();
+var vpath = '';
+
+async function vload(path) {
+  vpath = path || '';
+  try {
+    const d = await (await fetch('/api/vault?path=' + encodeURIComponent(vpath))).json();
+    var crumbHtml = '<a data-nav="">vault</a>';
+    var acc = '';
+    vpath.split('/').filter(Boolean).forEach(function(part) {
+      acc = acc ? acc + '/' + part : part;
+      crumbHtml += ' / <a data-nav="' + esc(acc) + '">' + esc(part) + '</a>';
+    });
+    document.getElementById('vcrumbs').innerHTML = crumbHtml;
+    var items = '';
+    (d.dirs || []).forEach(function(dir) {
+      items += '<div class="vitem dir" data-nav="' + esc(dir.path) + '"><span class="n">' + esc(dir.name) + '</span></div>';
+    });
+    (d.files || []).forEach(function(f) {
+      items += '<div class="vitem ' + f.kind + '" data-open="' + esc(f.path) + '" data-kind="' + f.kind + '">' +
+               '<span class="n">' + esc(f.name) + '</span><span class="m">' + f.mtime + '</span></div>';
+    });
+    document.getElementById('vlist').innerHTML = items || '<div class="empty">Leer.</div>';
+  } catch (e) {
+    document.getElementById('vlist').innerHTML = '<div class="empty">Vault nicht erreichbar.</div>';
+  }
+}
+
+async function vopen(path, kind) {
+  const view = document.getElementById('vview');
+  const enc = encodeURIComponent(path);
+  const head = '<div class="vhead"><span class="t">' + esc(path) + '</span>' +
+               '<a href="/api/vault/file?download=1&path=' + enc + '">Download</a></div>';
+  if (kind === 'image') {
+    view.innerHTML = head + '<img src="/api/vault/file?path=' + enc + '">';
+  } else if (kind === 'text') {
+    const txt = await (await fetch('/api/vault/file?path=' + enc)).text();
+    view.innerHTML = head + '<pre>' + esc(txt) + '</pre>';
+  } else {
+    view.innerHTML = head + '<div class="empty">Binaerdatei - per Download oeffnen.</div>';
+  }
+}
+
+document.addEventListener('click', function(ev) {
+  var el = ev.target.closest('[data-nav],[data-open]');
+  if (!el) return;
+  if (el.hasAttribute('data-nav')) { vload(el.getAttribute('data-nav')); }
+  else { vopen(el.getAttribute('data-open'), el.getAttribute('data-kind')); }
+});
+
+load(); tick(); vload('');
 setInterval(load, 5000);
 setInterval(tick, 1000);
 </script>
