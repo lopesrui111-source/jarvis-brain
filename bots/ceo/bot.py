@@ -89,6 +89,9 @@ DEINE TOOLS:
 - check_mail/read_mail: NUR das Bueroflow-Postfach (ionos), read-only. Nie senden.
 - ask_marketing: dein Arbeiter fuer Ausfuehrung — Social-Posts, Copy, SEO, Ads, E-Mail-Sequenzen, Bilder (48 Skills). Du gibst Strategie und Briefing vor, er liefert Entwuerfe. Delegiere Ausfuehrungsarbeit an ihn statt sie selbst zu machen.
 
+DEIN SEO-BOT (ask_seo): findet auf gutefrage.net und Quora frische Fragen mit Sichtbarkeits-Potenzial
+und schreibt Antwort-ENTWUERFE in Ruis Stil. Er postet nichts — Rui prueft und postet selbst.
+
 DEIN WEB-ZUGRIFF (web_search/web_open/web_click): Echtes Browsen fuer Markt-Recherche, Wettbewerber, Preise, Trends. Nur lesen — nie einloggen, kaufen, posten oder Formulare absenden.
 
 EISERNE REGELN:
@@ -374,6 +377,11 @@ TOOLS = [
         "input_schema": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
     },
     {
+        "name": "ask_seo",
+        "description": "Delegiert an den SEO/Q&A-BOT: frische Fragen auf gutefrage.net und Quora finden, Antwort-Entwuerfe in Ruis Stil schreiben (Vault seo/ + Telegram). Der Bot postet nichts. Kann bis zu 7 Minuten dauern.",
+        "input_schema": {"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]},
+    },
+    {
         "name": "web_click",
         "description": "Klickt ein Element (ref aus Snapshot, z.B. e3) im offenen Tab und liefert den neuen Snapshot.",
         "input_schema": {"type": "object", "properties": {"tab_id": {"type": "string"}, "ref": {"type": "string"}}, "required": ["tab_id", "ref"]},
@@ -453,6 +461,22 @@ def tool_web_click(inp):
         return f"Browser-Fehler: {type(e).__name__}: {e}"
 
 
+def tool_ask_seo(inp):
+    task = (inp.get("task") or "").strip()
+    if not task:
+        return "Fehler: leerer Auftrag."
+    try:
+        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        req_id = str(uuid.uuid4())
+        r.rpush("bot:seo:inbox", json.dumps({"id": req_id, "text": task}, ensure_ascii=False))
+        resp = r.blpop(f"bot:seo:reply:{req_id}", timeout=420)
+        if resp is None:
+            return "SEO-Bot antwortet nicht (Timeout) — laeuft der Container?"
+        return f"SEO-BOT:\n{resp[1]}"
+    except Exception as e:
+        return f"Fehler: {type(e).__name__}: {e}"
+
+
 def tool_ask_marketing(inp):
     task = (inp.get("task") or "").strip()
     if not task:
@@ -482,6 +506,8 @@ def run_tool(name, inp):
         return tool_read_mail(inp)
     if name == "ask_marketing":
         return tool_ask_marketing(inp)
+    if name == "ask_seo":
+        return tool_ask_seo(inp)
     if name == "web_search":
         return tool_web_search(inp)
     if name == "web_open":
@@ -505,7 +531,7 @@ if TOOLS_CACHED:
 def load_history(r):
     try:
         raw = r.get(HISTORY_KEY)
-        return (json.loads(raw)[-MAX_HISTORY:]) if raw else []
+        return json.loads(raw) if raw else []
     except Exception:
         return []
 

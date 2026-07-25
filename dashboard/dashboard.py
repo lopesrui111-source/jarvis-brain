@@ -34,9 +34,11 @@ IMG_EXT  = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
 # Bot-Registry: Queue-Namen + Hierarchie fuers Frontend
 BOTS = {
-    "jarvis":       {"label": "JARVIS",        "inbox": "jarvis:inbox",        "reply": "jarvis:reply:{id}",        "parent": None},
-    "buroflow-ceo": {"label": "BUEROFLOW-CEO", "inbox": "bot:ceo:inbox",       "reply": "bot:ceo:reply:{id}",       "parent": "jarvis"},
-    "marketing":    {"label": "MARKETING",     "inbox": "bot:marketing:inbox", "reply": "bot:marketing:reply:{id}", "parent": "buroflow-ceo"},
+    "jarvis":       {"label": "JARVIS",        "inbox": "jarvis:inbox",        "reply": "jarvis:reply:{id}",        "parent": None,           "desc": "orchestrator"},
+    "buroflow-ceo": {"label": "CEO",           "inbox": "bot:ceo:inbox",       "reply": "bot:ceo:reply:{id}",       "parent": "jarvis",       "desc": "strategie & entscheidungen"},
+    "marketing":    {"label": "MARKETING",     "inbox": "bot:marketing:inbox", "reply": "bot:marketing:reply:{id}", "parent": "buroflow-ceo", "desc": "content, creatives, skills"},
+    "immo":         {"label": "IMMO",          "inbox": "bot:immo:inbox",      "reply": "bot:immo:reply:{id}",      "parent": "jarvis",       "desc": "rendite-analysen, telegram"},
+    "seo":          {"label": "SEO",           "inbox": "bot:seo:inbox",       "reply": "bot:seo:reply:{id}",       "parent": "buroflow-ceo", "desc": "gutefrage + quora, entwuerfe"},
 }
 
 app = FastAPI()
@@ -86,10 +88,12 @@ def stats():
             out.update({"today": float(row["today"]), "month": float(row["month"]),
                         "total": float(row["total"]), "requests": int(row["requests"])})
             cur.execute("""
-                SELECT bot, COALESCE(SUM(cost_usd),0) AS cost, COUNT(*) AS requests, MAX(created_at) AS last_seen
+                SELECT bot, COALESCE(SUM(cost_usd),0) AS cost, COUNT(*) AS requests, MAX(created_at) AS last_seen,
+                       MAX(created_at) > now() - interval '10 minutes' AS recent
                 FROM cost_ledger GROUP BY bot""")
             for b in cur.fetchall():
                 known[b["bot"]] = {"cost": float(b["cost"]), "requests": int(b["requests"]),
+                                   "recent": bool(b["recent"]),
                                    "last_seen": b["last_seen"].strftime("%d.%m. %H:%M") if b["last_seen"] else "-"}
             cur.execute("""
                 SELECT bot, model, cost_usd, created_at FROM cost_ledger
@@ -100,17 +104,33 @@ def stats():
         conn.close()
     except Exception as e:
         out["error"] = str(e)
+    spark = {}
+    try:
+        conn2 = pg()
+        with conn2, conn2.cursor() as cur2:
+            cur2.execute("SELECT bot, EXTRACT(EPOCH FROM (now() - created_at)) / 3600.0 AS hrs_ago, "
+                        "cost_usd FROM cost_ledger WHERE created_at > now() - interval '6 hours'")
+            for bot_name, hrs_ago, cost_usd in cur2.fetchall():
+                idx = 5 - min(int(hrs_ago), 5)
+                arr = spark.setdefault(bot_name, [0.0] * 6)
+                arr[idx] += float(cost_usd)
+        conn2.close()
+    except Exception:
+        pass
+
     online_all = listeners >= len(BOTS)
     for key, meta in BOTS.items():
-        k = known.get(key, {"cost": 0.0, "requests": 0, "last_seen": "-"})
+        k = known.get(key, {"cost": 0.0, "requests": 0, "last_seen": "-", "recent": False})
         out["bots"].append({"id": key, "label": meta["label"], "parent": meta["parent"],
+                            "desc": meta.get("desc", "agent"),
                             "cost": k["cost"], "requests": k["requests"], "last_seen": k["last_seen"],
-                            "online": online_all or (key == "jarvis" and listeners > 0)})
+                            "spark": spark.get(key, [0.0] * 6),
+                            "online": online_all or k.get("recent", False) or (key == "jarvis" and listeners > 0)})
     for name, k in known.items():
         if name not in BOTS:
-            out["bots"].append({"id": name, "label": name.upper(), "parent": "jarvis",
+            out["bots"].append({"id": name, "label": name.upper(), "parent": "jarvis", "desc": "agent",
                                 "cost": k["cost"], "requests": k["requests"],
-                                "last_seen": k["last_seen"], "online": False})
+                                "last_seen": k["last_seen"], "spark": spark.get(name, [0.0] * 6), "online": False})
     return JSONResponse(out)
 
 
@@ -142,6 +162,21 @@ def _safe_vault_path(rel: str) -> str:
     if not (full == root or full.startswith(root + os.sep)):
         return ""
     return full
+
+
+@app.get("/api/memory")
+def memory_graph():
+    try:
+        conn = pg()
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, project, title, source, LEFT(content, 400) AS content, "
+                        "to_char(created_at, 'DD.MM.YYYY') AS created FROM memory "
+                        "ORDER BY id DESC LIMIT 400")
+            rows = cur.fetchall()
+        conn.close()
+        return JSONResponse({"nodes": [dict(r) for r in rows]})
+    except Exception as e:
+        return JSONResponse({"error": str(e), "nodes": []}, status_code=500)
 
 
 @app.get("/api/vault")
@@ -230,7 +265,7 @@ HTML = """<!DOCTYPE html>
     font-family: 'Cascadia Code', 'Consolas', 'Segoe UI', monospace;
     letter-spacing: .06em;
   }
-  #space { position: fixed; inset: 0; z-index: 0; }
+  #space, #brain { position: fixed; inset: 0; z-index: 0; }
 
   .hud { position: fixed; inset: 0; z-index: 2; pointer-events: none; }
   .hud > * { pointer-events: auto; }
@@ -238,19 +273,18 @@ HTML = """<!DOCTYPE html>
   header {
     position: absolute; top: 0; left: 0; right: 0;
     display: flex; align-items: center; justify-content: space-between;
-    padding: 18px 28px;
+    padding: 18px 28px; z-index: 6;
   }
   .brand { font-size: 22px; font-weight: 700; letter-spacing: .45em; color: #eaf9ff;
            text-shadow: 0 0 18px var(--cyan-dim); }
-  .sub { position: absolute; left: 50%; transform: translateX(-50%);
-         font-size: 11px; color: var(--cyan); letter-spacing: .5em; opacity: .85; }
-  .sub::after { content: ""; display: block; height: 1px; margin-top: 6px;
-                background: linear-gradient(90deg, transparent, var(--cyan), transparent); }
-  body.thinking .sub { animation: subpulse 1s ease-in-out infinite; }
-  @keyframes subpulse {
-    0%, 100% { opacity: .85; text-shadow: 0 0 8px rgba(89, 215, 255, .3); }
-    50% { opacity: 1; text-shadow: 0 0 22px rgba(93, 255, 210, .9); }
-  }
+  .viewtabs { position: absolute; left: 50%; transform: translateX(-50%); display: flex; gap: 4px;
+              border: 1px solid var(--glass-line); border-radius: 20px; padding: 4px;
+              background: var(--glass); backdrop-filter: blur(10px); }
+  .vt { font-size: 10px; letter-spacing: .35em; padding: 6px 16px 6px 19px; border-radius: 16px;
+        color: var(--dim); cursor: pointer; user-select: none; transition: all .25s; }
+  .vt.active { color: #eaf9ff; background: rgba(89, 215, 255, .12);
+               text-shadow: 0 0 10px rgba(89, 215, 255, .5); }
+  .vt:hover { color: var(--cyan); }
   .clock { font-size: 26px; color: #eaf9ff; text-shadow: 0 0 14px var(--cyan-dim);
            font-variant-numeric: tabular-nums; text-align: right; }
   .clock small { display: block; font-size: 10px; color: var(--dim); letter-spacing: .4em; }
@@ -286,24 +320,78 @@ HTML = """<!DOCTYPE html>
   .kv .v.green { color: var(--green); }
   .kv .v.cyan { color: var(--cyan); }
 
-  .tree { position: relative; }
-  .treewrap { position: relative; }
-  .treewrap svg { display: block; }
-  .bnode { position: absolute; border: 1px solid rgba(89, 215, 255, .22); border-radius: 9px;
-           background: rgba(9, 22, 33, .72); backdrop-filter: blur(6px);
-           padding: 6px 10px; display: flex; flex-direction: column; justify-content: center; gap: 3px;
-           transition: box-shadow .3s, border-color .3s; }
-  .bnode.on { border-color: rgba(93, 202, 165, .4); box-shadow: 0 0 14px rgba(93, 202, 165, .12); }
-  .bnode.busy { animation: nodepulse 1.1s ease-in-out infinite; }
-  @keyframes nodepulse {
-    0%, 100% { box-shadow: 0 0 10px rgba(89, 215, 255, .15); border-color: rgba(89, 215, 255, .3); }
-    50% { box-shadow: 0 0 26px rgba(89, 215, 255, .55); border-color: rgba(89, 215, 255, .85); }
-  }
-  .bnode .bl { display: flex; align-items: center; gap: 7px; font-size: 11px; letter-spacing: .12em; }
-  .bnode .bm { display: flex; justify-content: space-between; font-size: 9.5px; color: var(--dim);
-               font-variant-numeric: tabular-nums; }
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--red); flex: none; }
   .dot.on { background: var(--green); box-shadow: 0 0 9px rgba(93, 202, 165, .8); }
+
+  /* Agenten-Reiter: Org-Chart auf eigenem, blickdichtem Grund (keine Kugel im Hintergrund) */
+  .agentsView { position: absolute; inset: 0; overflow: hidden;
+                display: flex; padding: 90px 26px 30px; z-index: 1; }
+  #agChart { transform-origin: 0 0; }
+  .agAurora { position: fixed; inset: 0; pointer-events: none; z-index: 0; }
+  .agAurora i { position: absolute; border-radius: 50%; filter: blur(70px); opacity: .16; }
+  .agAurora i:nth-child(1) { width: 560px; height: 560px; left: 8%; top: 12%;
+    background: radial-gradient(circle, #1b5f7a, transparent 65%); animation: adrift1 26s ease-in-out infinite alternate; }
+  .agAurora i:nth-child(2) { width: 480px; height: 480px; right: 6%; top: 34%;
+    background: radial-gradient(circle, #1d6b52, transparent 65%); animation: adrift2 31s ease-in-out infinite alternate; }
+  .agAurora i:nth-child(3) { width: 420px; height: 420px; left: 38%; bottom: 4%;
+    background: radial-gradient(circle, #4a3a70, transparent 65%); animation: adrift1 37s ease-in-out infinite alternate-reverse; }
+  @keyframes adrift1 { from { transform: translate(0, 0) scale(1); } to { transform: translate(70px, -50px) scale(1.15); } }
+  @keyframes adrift2 { from { transform: translate(0, 0) scale(1.1); } to { transform: translate(-80px, 60px) scale(.95); } }
+  .agInner { max-width: 1040px; width: 100%; margin: auto; }
+  .agSvg { position: absolute; top: 0; left: 0; pointer-events: none; }
+  .agNode { position: absolute; backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
+            border-radius: 15px; padding: 15px 17px; cursor: grab; overflow: hidden;
+            box-shadow: 0 6px 26px rgba(0, 0, 0, .35), inset 0 1px 0 rgba(255, 255, 255, .06);
+            transition: transform .25s, box-shadow .3s; }
+  .agNode::after { content: ""; position: absolute; inset: -60% -20%; pointer-events: none;
+    background: linear-gradient(115deg, transparent 42%, rgba(255, 255, 255, .045) 50%, transparent 58%);
+    animation: agsweep 7s linear infinite; }
+  @keyframes agsweep { from { transform: translateX(-55%); } to { transform: translateX(55%); } }
+  .agNode:hover { transform: translateY(-3px) scale(1.015); }
+  .agNode.enter { animation: agenter .5s cubic-bezier(.2, .8, .25, 1) both; }
+  @keyframes agenter { from { opacity: 0; transform: translateY(16px) scale(.96); } to { opacity: 1; transform: none; } }
+  .agNode::before { content: ""; position: absolute; top: 0; left: 8%; right: 8%; height: 1px;
+                     background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .16), transparent); }
+  .agNode:hover { transform: translateY(-2px); }
+  .agNode.busy { animation: agcardpulse 1.4s ease-in-out infinite; }
+  @keyframes agcardpulse {
+    0%, 100% { filter: brightness(1); }
+    50% { filter: brightness(1.3); }
+  }
+  .agLayer { font-size: 8px; letter-spacing: .26em; color: var(--dim); margin-bottom: 10px; opacity: .8; }
+  .agLayer b { color: inherit; }
+  .agTop { display: flex; align-items: center; gap: 9px; }
+  .agMono { width: 26px; height: 26px; border-radius: 50%; flex: none; display: flex;
+            align-items: center; justify-content: center; font-size: 9.5px; font-weight: 500;
+            letter-spacing: 0; }
+  .agName { font-size: 13px; letter-spacing: .12em; font-weight: 600; color: #f6fcff; }
+  .agDesc { font-size: 9.5px; color: var(--dim); margin: 9px 0 11px; line-height: 1.55; }
+  .agDiv { border-top: 0.5px solid rgba(255, 255, 255, .09); margin: 0 0 8px; }
+  .agRow { display: flex; align-items: center; justify-content: space-between; font-size: 9.5px;
+           color: var(--dim); margin-bottom: 4px; font-variant-numeric: tabular-nums; }
+  .agRow .l { display: flex; align-items: center; gap: 7px; letter-spacing: .12em; }
+  .agRow .cost { font-size: 15px; color: var(--green); font-weight: 600; letter-spacing: 0;
+                 text-shadow: 0 0 12px rgba(93, 202, 165, .35); }
+  .agPing { position: relative; width: 7px; height: 7px; border-radius: 50%; display: inline-block; flex: none; }
+  .agPing.on::after { content: ""; position: absolute; inset: -4px; border-radius: 50%;
+    border: 1px solid currentColor; animation: agping 2s ease-out infinite; }
+  @keyframes agping { 0% { transform: scale(.4); opacity: .9; } 100% { transform: scale(1.5); opacity: 0; } }
+  .agSpark { display: flex; gap: 3px; align-items: flex-end; height: 16px; margin: 10px 0 2px; }
+  .agSpark span { flex: 1; border-radius: 2px 2px 0 0; min-height: 2px; }
+  .agCoreNode { text-align: center; }
+  .agCoreNode .agTop { justify-content: center; }
+  .agCoreWrap { position: relative; width: 40px; height: 40px; flex: none; }
+  .agCoreWrap::before { content: ""; position: absolute; inset: -4px; border-radius: 50%;
+    background: conic-gradient(from 0deg, rgba(89, 215, 255, .0), rgba(89, 215, 255, .75), rgba(93, 202, 165, .4), rgba(89, 215, 255, 0));
+    animation: agspin 5s linear infinite; filter: blur(1.5px); }
+  @keyframes agspin { to { transform: rotate(360deg); } }
+  .agCoreRing { position: absolute; inset: 3px; border-radius: 50%;
+                background: radial-gradient(circle at 35% 30%, #ffffff, #9fe3ff 45%, #59d7ff 100%);
+                box-shadow: 0 0 22px rgba(89, 215, 255, .55); animation: agcorepulse 2.2s ease-in-out infinite; }
+  @keyframes agcorepulse {
+    0%, 100% { box-shadow: 0 0 18px rgba(89, 215, 255, .45); }
+    50% { box-shadow: 0 0 30px rgba(89, 215, 255, .8); }
+  }
 
   .logbox { font-size: 10.5px; display: flex; flex-direction: column; gap: 5px;
             max-height: 130px; overflow: hidden; }
@@ -408,6 +496,17 @@ HTML = """<!DOCTYPE html>
   .vhead a:hover { text-shadow: 0 0 10px rgba(93, 202, 165, .6); }
   @keyframes fadeUp { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
 
+  .braindetail { position: absolute; right: 24px; top: 84px; width: 320px; max-height: 60vh;
+                 overflow: auto; z-index: 4; }
+  .braindetail h3 { display: flex; justify-content: space-between; }
+  .bdbody { font-size: 12px; line-height: 1.6; }
+  .bdbody .bt { color: var(--cyan); font-size: 12.5px; margin-bottom: 6px; }
+  .bdbody .bm { color: var(--dim); font-size: 10px; margin-bottom: 10px; letter-spacing: .15em; }
+  .brainlegend { position: absolute; left: 24px; bottom: 46px; display: flex; flex-wrap: wrap;
+                 gap: 10px; font-size: 10px; color: var(--dim); letter-spacing: .15em; z-index: 4;
+                 max-width: 50vw; }
+  .brainlegend span { display: flex; align-items: center; gap: 5px; }
+  .brainlegend i { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
   footer { position: absolute; bottom: 0; left: 0; right: 0; display: flex;
            justify-content: space-between; padding: 12px 28px; font-size: 10px;
            color: var(--dim); letter-spacing: .3em; }
@@ -419,11 +518,16 @@ HTML = """<!DOCTYPE html>
 </head>
 <body>
 <canvas id="space"></canvas>
+<canvas id="brain" style="display:none"></canvas>
 
 <div class="hud">
   <header>
     <div class="brand">J.A.R.V.I.S</div>
-    <div class="sub">NEURAL CORE AKTIV</div>
+    <div class="viewtabs">
+      <span class="vt active" data-view="0">CORE</span>
+      <span class="vt" data-view="2">AGENTEN</span>
+      <span class="vt" data-view="1">GEHIRN</span>
+    </div>
     <div class="clock"><span id="time">--:--:--</span><small id="date"></small></div>
   </header>
 
@@ -439,13 +543,15 @@ HTML = """<!DOCTYPE html>
     </div>
 
     <div class="panel">
-      <h3>AGENTEN-STRUKTUR <span class="chev"></span></h3>
-      <div class="tree" id="tree"><div class="empty">Lade...</div></div>
-    </div>
-
-    <div class="panel">
       <h3>AKTIVITAET <span class="chev"></span></h3>
       <div class="logbox" id="log"><div class="empty">-</div></div>
+    </div>
+  </div>
+
+  <div class="agentsView" id="agentsView" style="display:none">
+    <div class="agAurora"><i></i><i></i><i></i></div>
+    <div class="agInner">
+      <div id="agChart" style="position:relative;"></div>
     </div>
   </div>
 
@@ -473,19 +579,38 @@ HTML = """<!DOCTYPE html>
         <option value="jarvis">JARVIS</option>
         <option value="buroflow-ceo">CEO</option>
         <option value="marketing">MARKETING</option>
+        <option value="immo">IMMO</option>
+        <option value="seo">SEO</option>
       </select>
       <input id="input" placeholder="Nachricht..." autocomplete="off">
     </div>
   </div>
 
+  <div class="braindetail panel" id="braindetail" style="display:none">
+    <h3>ERINNERUNG <span class="vclose" id="bdclose">\u2715</span></h3>
+    <div id="bdbody" class="bdbody"></div>
+  </div>
+  <div class="brainlegend" id="brainlegend" style="display:none"></div>
+
   <footer>
     <span>SESSION <b id="f-session">00:00</b></span>
-    <span>STATUS <b>NOMINAL</b></span>
-    <span>SYSTEM <b id="f-online">ONLINE</b></span>
   </footer>
 </div>
 
 <script>
+window.onerror = function(msg, srcf, line, col) {
+  var el = document.getElementById('errbox') || (function() {
+    var d = document.createElement('div');
+    d.id = 'errbox';
+    d.style.cssText = 'position:fixed;bottom:8px;left:50%;transform:translateX(-50%);z-index:99;' +
+      'background:rgba(60,10,16,.92);border:1px solid #ff5f6b;color:#ffd6da;font:11px Consolas,monospace;' +
+      'padding:8px 14px;border-radius:8px;max-width:80vw;';
+    document.body.appendChild(d);
+    return d;
+  })();
+  el.textContent = 'JS-FEHLER: ' + msg + ' (Zeile ' + line + ')';
+  return false;
+};
 /* ── Plasma-Kern ── */
 var canvas = document.getElementById('space');
 var ctx = canvas.getContext('2d');
@@ -493,8 +618,8 @@ var W, H, CX, CY, R;
 function resize() {
   W = canvas.width = window.innerWidth;
   H = canvas.height = window.innerHeight;
-  CX = W / 2; CY = H * 0.47;
-  R = Math.min(W, H) * 0.33;
+  CX = W / 2; CY = H * 0.5;
+  R = Math.min(W, H) * 0.46;
 }
 window.addEventListener('resize', resize);
 resize();
@@ -645,6 +770,546 @@ function draw() {
 }
 draw();
 
+/* ── Gehirn-View (Memory-Graph, Obsidian-Style) ── */
+var brainCanvas = document.getElementById('brain');
+var bctx = brainCanvas.getContext('2d');
+var currentView = 0;
+var brainNodes = [], brainEdges = [], brainHubs = {}, brainFolders = [], brainLoaded = false, brainAnim = null;
+var PALETTE = ['#59d7ff', '#5DCAA5', '#c792ea', '#ffd479', '#ff8fa3', '#7ee0d0', '#9fb5ff', '#f4a988'];
+var brainHover = null, brainSelected = null;
+var brainCore = { x: 0, y: 0, color: '#59d7ff' };
+var brainNodesById = {};
+var brainFolderStore = {};
+var brainPollTimer = null;
+var brainGrowToast = { text: '', until: 0 };
+var bview = { x: 0, y: 0, zoom: 1 };
+var brainAlpha = 0;
+var stars = [];
+var pulses = [];
+var lastPulse = 0;
+
+function resizeBrain() {
+  brainCanvas.width = window.innerWidth;
+  brainCanvas.height = window.innerHeight;
+  stars = [];
+  for (var i = 0; i < 160; i++) {
+    stars.push({ x: Math.random() * brainCanvas.width, y: Math.random() * brainCanvas.height,
+                 r: Math.random() * 1.1 + 0.2, a: 0.04 + Math.random() * 0.10,
+                 tw: Math.random() * 6.28 });
+  }
+}
+window.addEventListener('resize', resizeBrain);
+resizeBrain();
+
+var STOP = new Set(['jarvis','buroflow','privat','sonstiges','einer','eines','nicht','wurde','haben','sowie','ueber','aktuell','status']);
+
+function tokenize(n) {
+  return (n.title + ' ' + (n.content || '').substring(0, 80)).toLowerCase()
+    .replace(/[^a-zäöüß0-9 ]/g, ' ').split(/\\s+/).filter(function(w) { return w.length > 4 && !STOP.has(w); });
+}
+
+function stem(w) { return w.replace(/(ungen|ung|en|er|n|s)$/, ''); }
+
+function buildStructure() {
+  // ORDNER-BILDUNG pro Projekt (persistente Objekte -> stabile Positionen ueber Reloads):
+  // 1) Titel-Praefix "Xyz: ..." wird direkt zum Ordner
+  // 2) danach: gemeinsame Wortstaemme (>=2 Titel)
+  // 3) Rest -> Ordner "ALLGEMEIN"
+  var seenFolderKeys = {};
+  var allFolders = [];
+  var byProject = {};
+  brainNodes.forEach(function(n, i) { (byProject[n.project] = byProject[n.project] || []).push(i); });
+
+  Object.keys(byProject).forEach(function(p) {
+    var idx = byProject[p];
+    var assigned = new Set();
+    var localFolders = [];
+
+    function addFolder(label, members) {
+      if (!members.length) return;
+      var lbl = label.toUpperCase().substring(0, 14);
+      var key = p + '/' + lbl;
+      seenFolderKeys[key] = true;
+      var f = brainFolderStore[key];
+      if (!f) { f = {}; brainFolderStore[key] = f; }
+      f.project = p; f.label = lbl; f.members = members;
+      localFolders.push(f);
+      members.forEach(function(i) { assigned.add(i); });
+    }
+
+    // 1) Praefix-Ordner
+    var prefixGroups = {};
+    idx.forEach(function(i) {
+      var m = brainNodes[i].title.match(/^([A-Za-zÄÖÜäöüß\\-]{4,16}):/);
+      if (m) (prefixGroups[m[1].toLowerCase()] = prefixGroups[m[1].toLowerCase()] || []).push(i);
+    });
+    Object.keys(prefixGroups).forEach(function(pref) {
+      var mem = prefixGroups[pref];
+      // Praefix zieht auch Titel-Treffer per Stamm an
+      var ps = stem(pref);
+      idx.forEach(function(i) {
+        if (assigned.has(i) || mem.indexOf(i) >= 0) return;
+        var hit = tokenize(brainNodes[i]).some(function(w) { return w.indexOf(ps) >= 0 || ps.indexOf(stem(w)) >= 0; });
+        if (hit) mem.push(i);
+      });
+      addFolder(pref, mem.filter(function(i) { return !assigned.has(i); }));
+    });
+
+    // 2) Stamm-Gruppen
+    var freq = {};
+    idx.forEach(function(i) {
+      if (assigned.has(i)) return;
+      var seen = new Set();
+      tokenize(brainNodes[i]).forEach(function(w) {
+        var s = stem(w);
+        if (s.length < 5 || s === p || seen.has(s)) return;
+        seen.add(s);
+        (freq[s] = freq[s] || { word: w, members: [] }).members.push(i);
+      });
+    });
+    Object.keys(freq)
+      .sort(function(a, b) { return freq[b].members.length - freq[a].members.length; })
+      .forEach(function(s) {
+        var free = freq[s].members.filter(function(i) { return !assigned.has(i); });
+        if (free.length >= 2) addFolder(freq[s].word, free);
+      });
+
+    // 3) Rest
+    addFolder('allgemein', idx.filter(function(i) { return !assigned.has(i); }));
+
+    localFolders.forEach(function(f) {
+      var fi = allFolders.length;
+      allFolders.push(f);
+      f.members.forEach(function(i) { brainNodes[i].folder = fi; });
+    });
+  });
+
+  Object.keys(brainFolderStore).forEach(function(k) { if (!seenFolderKeys[k]) delete brainFolderStore[k]; });
+  brainFolders = allFolders;
+
+  // Wenige semantische Querlinks (projektuebergreifend)
+  brainEdges = [];
+  var toks = brainNodes.map(function(n) { return new Set(tokenize(n)); });
+  var cross = brainNodes.map(function() { return 0; });
+  for (var i = 0; i < brainNodes.length; i++) {
+    for (var j = i + 1; j < brainNodes.length; j++) {
+      if (brainNodes[i].project === brainNodes[j].project) continue;
+      if (cross[i] > 0 || cross[j] > 0) continue;
+      var shared = 0;
+      toks[i].forEach(function(w) { if (toks[j].has(w)) shared++; });
+      if (shared >= 2) { brainEdges.push({ a: i, b: j }); cross[i]++; cross[j]++; }
+    }
+  }
+}
+
+function layoutBrain() {
+  var W2 = brainCanvas.width, H2 = brainCanvas.height;
+  brainCore.x = W2 / 2; brainCore.y = H2 / 2;
+  var base = Math.min(W2, H2);
+  var R1 = base * 0.20, R2 = base * 0.335, R3 = base * 0.435, ROW = base * 0.062;
+
+  var projects = [];
+  brainNodes.forEach(function(n) { if (projects.indexOf(n.project) < 0 && n.project !== 'jarvis') projects.push(n.project); });
+  projects.sort();
+  var hasJarvis = brainNodes.some(function(n) { return n.project === 'jarvis'; });
+  var all = hasJarvis ? projects.concat(['jarvis']) : projects;
+  var sectorW = 6.283 / Math.max(all.length, 1);
+
+  var seenHubs = {};
+  all.forEach(function(p, i) {
+    var ang = i * sectorW - 1.5708;
+    var h = brainHubs[p];
+    if (!h) { h = { x: brainCore.x, y: brainCore.y }; brainHubs[p] = h; }
+    h.tx = brainCore.x + Math.cos(ang) * R1;
+    h.ty = brainCore.y + Math.sin(ang) * R1;
+    h.ang = ang;
+    h.color = (p === 'jarvis') ? '#59d7ff' : PALETTE[(i + 1) % PALETTE.length];
+    h.label = p;
+    seenHubs[p] = true;
+  });
+  Object.keys(brainHubs).forEach(function(k) { if (!seenHubs[k]) delete brainHubs[k]; });
+
+  // Ordner: Faecher im Sektor ihres Projekts (persistente Positionen -> weiches Nachruecken)
+  var foldersByP = {};
+  brainFolders.forEach(function(f, fi) { (foldersByP[f.project] = foldersByP[f.project] || []).push(fi); });
+  Object.keys(foldersByP).forEach(function(p) {
+    var hub = brainHubs[p];
+    var fis = foldersByP[p];
+    var spread = sectorW * 0.72;
+    fis.forEach(function(fi, k) {
+      var off = fis.length > 1 ? (k / (fis.length - 1) - 0.5) * spread : 0;
+      var ang = hub.ang + off;
+      var f = brainFolders[fi];
+      if (f.x === undefined) { f.x = hub.x; f.y = hub.y; }
+      f.tx = brainCore.x + Math.cos(ang) * R2;
+      f.ty = brainCore.y + Math.sin(ang) * R2;
+      f.ang = ang;
+      f.color = hub.color;
+      // Erinnerungen: Faecher um den Ordner, ggf. zweite Reihe
+      var perRow = 5;
+      f.members.forEach(function(ni, m) {
+        var row = Math.floor(m / perRow);
+        var inRow = f.members.length - row * perRow > perRow ? perRow : f.members.length - row * perRow;
+        var pos = m % perRow;
+        var nSpread = Math.min(0.16 * inRow, sectorW * 0.62);
+        var nOff = inRow > 1 ? (pos / (inRow - 1) - 0.5) * nSpread : 0;
+        var na = ang + nOff;
+        var nr = R3 + row * ROW;
+        var node = brainNodes[ni];
+        if (node.x === undefined) { node.x = f.x; node.y = f.y; }
+        node.tx = brainCore.x + Math.cos(na) * nr;
+        node.ty = brainCore.y + Math.sin(na) * nr;
+      });
+    });
+  });
+}
+
+async function loadBrain(isPoll) {
+  try {
+    var d = await (await fetch('/api/memory')).json();
+    var incoming = d.nodes || [];
+    var newCount = 0;
+    var nextById = {};
+    brainNodes = incoming.map(function(n) {
+      var node = brainNodesById[n.id];
+      if (!node) {
+        node = { id: n.id, r: 3.5 + Math.min((n.content || '').length / 120, 3.5), ph: Math.random() * 6.28 };
+        if (isPoll) { node.bornAt = Date.now(); newCount++; }
+      }
+      node.title = n.title; node.content = n.content; node.project = n.project;
+      node.source = n.source; node.created = n.created;
+      nextById[n.id] = node;
+      return node;
+    });
+    brainNodesById = nextById;
+
+    buildStructure();
+    layoutBrain();
+
+    if (isPoll && newCount > 0) {
+      brainGrowToast = { text: '+' + newCount + ' neue Erinnerung' + (newCount > 1 ? 'en' : ''), until: Date.now() + 4500 };
+    }
+
+    var lg = Object.keys(brainHubs).filter(function(p) { return p !== 'jarvis'; }).map(function(p) {
+      return '<span><i style="background:' + brainHubs[p].color + '"></i>' + esc(p) + '</span>';
+    }).join('');
+    document.getElementById('brainlegend').innerHTML =
+      lg + '<span>' + brainNodes.length + ' Erinnerungen | ' + brainFolders.length + ' Ordner</span>';
+    brainLoaded = true;
+  } catch (e) {}
+}
+
+function drawCurve(x1, y1, x2, y2, style, width, dash) {
+  bctx.beginPath();
+  if (dash) bctx.setLineDash(dash);
+  bctx.moveTo(x1, y1);
+  var mx = (x1 + x2) / 2, my = (y1 + y2) / 2;
+  var cx2 = mx + (brainCore.x - mx) * -0.12, cy2 = my + (brainCore.y - my) * -0.12;
+  bctx.quadraticCurveTo(cx2, cy2, x2, y2);
+  bctx.strokeStyle = style;
+  bctx.lineWidth = width;
+  bctx.stroke();
+  bctx.setLineDash([]);
+}
+
+var labelBoxes = [];
+function drawLabel(text, x, y, opts) {
+  opts = opts || {};
+  bctx.font = (opts.bold ? 'bold ' : '') + (opts.size || 9.5) + 'px Consolas, monospace';
+  bctx.textAlign = 'center';
+  var w = bctx.measureText(text).width + 10;
+  var h = (opts.size || 9.5) + 5;
+  var candidates = [y, opts.alt || (y - 22), y + 15, (opts.alt || (y - 22)) - 15];
+  var fy = candidates[0];
+  for (var c = 0; c < candidates.length; c++) {
+    var box = { x: x - w / 2, y: candidates[c] - h + 3, w: w, h: h };
+    var hit = labelBoxes.some(function(b) {
+      return box.x < b.x + b.w && box.x + box.w > b.x && box.y < b.y + b.h && box.y + box.h > b.y;
+    });
+    if (!hit) { fy = candidates[c]; break; }
+  }
+  labelBoxes.push({ x: x - w / 2, y: fy - h + 3, w: w, h: h });
+  bctx.fillStyle = 'rgba(4, 11, 18, .8)';
+  bctx.fillRect(x - w / 2, fy - h + 3, w, h);
+  bctx.fillStyle = opts.color || 'rgba(205, 231, 247, .82)';
+  bctx.fillText(text, x, fy);
+}
+
+var EASE_K = 0.09;
+function easeAll() {
+  brainNodes.forEach(function(n) { n.x += (n.tx - n.x) * EASE_K; n.y += (n.ty - n.y) * EASE_K; });
+  brainFolders.forEach(function(f) { f.x += (f.tx - f.x) * EASE_K; f.y += (f.ty - f.y) * EASE_K; });
+  Object.keys(brainHubs).forEach(function(k) {
+    var h = brainHubs[k]; h.x += (h.tx - h.x) * EASE_K; h.y += (h.ty - h.y) * EASE_K;
+  });
+}
+
+function drawBrain() {
+  if (currentView === 0) { brainAnim = null; return; }
+  var t = Date.now() / 1000;
+  bctx.clearRect(0, 0, brainCanvas.width, brainCanvas.height);
+  labelBoxes = [];
+
+  stars.forEach(function(s) {
+    bctx.beginPath();
+    bctx.arc(s.x, s.y, s.r, 0, 6.283);
+    bctx.fillStyle = 'rgba(140, 210, 255,' + (s.a * (0.6 + 0.4 * Math.sin(t * 1.3 + s.tw))) + ')';
+    bctx.fill();
+  });
+
+  if (currentView === 2) {   // Agenten-Tab: nur Sternenfeld als Hintergrund
+    brainAnim = requestAnimationFrame(drawBrain);
+    return;
+  }
+
+  if (!brainNodes.length) {
+    bctx.font = '11px Consolas, monospace';
+    bctx.textAlign = 'center';
+    bctx.fillStyle = 'rgba(120, 170, 200, .6)';
+    bctx.fillText('LADE GEDAECHTNIS...', brainCanvas.width / 2, brainCanvas.height / 2);
+    brainAnim = requestAnimationFrame(drawBrain);
+    return;
+  }
+
+  bctx.save();
+  bctx.translate(bview.x, bview.y);
+  bctx.scale(bview.zoom, bview.zoom);
+  easeAll();
+
+  // 1) Kanten (hinten): Kern->Hub, Hub->Ordner, Ordner->Erinnerung, Querlinks
+  Object.keys(brainHubs).forEach(function(p) {
+    var h = brainHubs[p];
+    var g = bctx.createLinearGradient(brainCore.x, brainCore.y, h.x, h.y);
+    g.addColorStop(0, 'rgba(89, 215, 255, .30)');
+    g.addColorStop(1, h.color + '55');
+    drawCurve(brainCore.x, brainCore.y, h.x, h.y, g, 1.6);
+  });
+  brainFolders.forEach(function(f) {
+    var hub = brainHubs[f.project];
+    drawCurve(hub.x, hub.y, f.x, f.y, f.color + '40', 1.1);
+    f.members.forEach(function(ni) {
+      var n = brainNodes[ni];
+      drawCurve(f.x, f.y, n.x, n.y, f.color + '2a', 0.8);
+    });
+  });
+  brainEdges.forEach(function(e) {
+    var a = brainNodes[e.a], b = brainNodes[e.b];
+    drawCurve(a.x, a.y, b.x, b.y, 'rgba(160, 200, 230, .12)', 0.7, [3, 4]);
+  });
+
+  // Synapsen-Pulse auf Ordner-Kanten
+  if (brainFolders.length && Date.now() - lastPulse > 380) {
+    var rf = brainFolders[Math.floor(Math.random() * brainFolders.length)];
+    if (rf.members.length) {
+      pulses.push({ fx: rf.x, fy: rf.y, n: brainNodes[rf.members[Math.floor(Math.random() * rf.members.length)]],
+                    col: rf.color, t: 0 });
+    }
+    lastPulse = Date.now();
+  }
+  for (var pi = pulses.length - 1; pi >= 0; pi--) {
+    var pu = pulses[pi];
+    pu.t += 0.02;
+    if (pu.t >= 1) { pulses.splice(pi, 1); continue; }
+    var px2 = pu.fx + (pu.n.x - pu.fx) * pu.t;
+    var py2 = pu.fy + (pu.n.y - pu.fy) * pu.t;
+    bctx.beginPath();
+    bctx.arc(px2, py2, 1.9, 0, 6.283);
+    bctx.shadowColor = pu.col; bctx.shadowBlur = 8;
+    bctx.fillStyle = pu.col;
+    bctx.fill();
+    bctx.shadowBlur = 0;
+  }
+
+  // 2) Punkte: Erinnerungen -> Ordner -> Hubs -> Kern
+  brainNodes.forEach(function(n) {
+    var col = brainFolders[n.folder] ? brainFolders[n.folder].color : '#59d7ff';
+    var hot = (n === brainHover || n === brainSelected);
+    var isNew = n.bornAt && (Date.now() - n.bornAt < 4500);
+    if (n.bornAt && !isNew) n.bornAt = 0;
+    var rr = n.r + (hot ? 2.5 : 0) + (isNew ? 1.5 : 0);
+    bctx.beginPath();
+    bctx.arc(n.x, n.y, rr, 0, 6.283);
+    bctx.fillStyle = hot ? col : col + 'c8';
+    if (hot || isNew) { bctx.shadowColor = col; bctx.shadowBlur = isNew ? 20 : 16; }
+    bctx.fill();
+    bctx.shadowBlur = 0;
+    if (isNew) {
+      bctx.beginPath();
+      bctx.arc(n.x, n.y, rr + 5 + 3 * Math.sin(Date.now() / 150), 0, 6.283);
+      bctx.strokeStyle = col + '90';
+      bctx.lineWidth = 1.2;
+      bctx.stroke();
+    }
+  });
+  brainFolders.forEach(function(f) {
+    bctx.beginPath();
+    bctx.arc(f.x, f.y, 8, 0, 6.283);
+    bctx.strokeStyle = f.color + 'aa';
+    bctx.lineWidth = 1.6;
+    bctx.stroke();
+    bctx.beginPath();
+    bctx.arc(f.x, f.y, 3.2, 0, 6.283);
+    bctx.fillStyle = f.color;
+    bctx.fill();
+  });
+  Object.keys(brainHubs).forEach(function(p) {
+    var h = brainHubs[p];
+    var halo = bctx.createRadialGradient(h.x, h.y, 0, h.x, h.y, 30);
+    halo.addColorStop(0, h.color + '30');
+    halo.addColorStop(1, h.color + '00');
+    bctx.fillStyle = halo;
+    bctx.fillRect(h.x - 30, h.y - 30, 60, 60);
+    bctx.beginPath();
+    bctx.arc(h.x, h.y, 7, 0, 6.283);
+    bctx.fillStyle = h.color;
+    bctx.shadowColor = h.color; bctx.shadowBlur = 12;
+    bctx.fill();
+    bctx.shadowBlur = 0;
+  });
+  var corePulse = 1 + 0.08 * Math.sin(t * 2.1);
+  var chalo = bctx.createRadialGradient(brainCore.x, brainCore.y, 0, brainCore.x, brainCore.y, 60 * corePulse);
+  chalo.addColorStop(0, 'rgba(89, 215, 255, .25)');
+  chalo.addColorStop(1, 'rgba(89, 215, 255, 0)');
+  bctx.fillStyle = chalo;
+  bctx.fillRect(brainCore.x - 60, brainCore.y - 60, 120, 120);
+  bctx.beginPath();
+  bctx.arc(brainCore.x, brainCore.y, 10 * corePulse, 0, 6.283);
+  bctx.fillStyle = '#bfeeff';
+  bctx.shadowColor = '#59d7ff'; bctx.shadowBlur = 22;
+  bctx.fill();
+  bctx.shadowBlur = 0;
+
+  // 3) Labels zuletzt, nach Prioritaet: Kern -> Hubs -> Ordner -> Erinnerungen
+  drawLabel('J A R V I S', brainCore.x, brainCore.y - 22, { size: 11, bold: true, color: 'rgba(234,249,255,.96)', alt: brainCore.y + 30 });
+  Object.keys(brainHubs).forEach(function(p) {
+    if (p === 'jarvis') return;
+    var h = brainHubs[p];
+    drawLabel(p.toUpperCase(), h.x, h.y - 15, { size: 10.5, bold: true, color: 'rgba(224,246,255,.95)', alt: h.y + 22 });
+  });
+  brainFolders.forEach(function(f) {
+    drawLabel('\u25C8 ' + f.label, f.x, f.y - 14, { size: 9.5, color: 'rgba(226,244,255,.9)', alt: f.y + 22 });
+  });
+  if (bview.zoom > 0.5) {
+    brainNodes.forEach(function(n) {
+      var label = n.title.length > 24 ? n.title.substring(0, 23) + '\u2026' : n.title;
+      var hot = (n === brainHover || n === brainSelected);
+      drawLabel(label, n.x, n.y + n.r + 13, {
+        size: hot ? 10.5 : 9,
+        color: hot ? 'rgba(234,249,255,.98)' : 'rgba(195,222,240,.72)',
+        alt: n.y - n.r - 6,
+      });
+    });
+  }
+
+  bctx.restore();
+
+  if (brainGrowToast.text && Date.now() < brainGrowToast.until) {
+    var remain = brainGrowToast.until - Date.now();
+    var alpha = Math.min(1, remain / 500);
+    bctx.font = '11px Consolas, monospace';
+    bctx.textAlign = 'center';
+    var ttxt = brainGrowToast.text;
+    var tw3 = bctx.measureText(ttxt).width;
+    var tcx = brainCanvas.width / 2, tcy = 94;
+    bctx.fillStyle = 'rgba(93, 202, 165,' + (0.16 * alpha) + ')';
+    bctx.fillRect(tcx - tw3 / 2 - 14, tcy - 15, tw3 + 28, 23);
+    bctx.strokeStyle = 'rgba(93, 202, 165,' + (0.55 * alpha) + ')';
+    bctx.lineWidth = 1;
+    bctx.strokeRect(tcx - tw3 / 2 - 14, tcy - 15, tw3 + 28, 23);
+    bctx.fillStyle = 'rgba(200, 250, 225,' + alpha + ')';
+    bctx.fillText(ttxt, tcx, tcy);
+  }
+
+  brainAnim = requestAnimationFrame(drawBrain);
+}
+
+function brainHit(mx, my) {
+  var x = (mx - bview.x) / bview.zoom, y = (my - bview.y) / bview.zoom;
+  for (var i = 0; i < brainNodes.length; i++) {
+    var n = brainNodes[i];
+    var dx = n.x - x, dy = n.y - y;
+    if (dx * dx + dy * dy < (n.r + 6) * (n.r + 6)) return n;
+  }
+  return null;
+}
+var dragging = false, dragMoved = false, dragSX = 0, dragSY = 0;
+brainCanvas.addEventListener('mousedown', function(ev) {
+  dragging = true; dragMoved = false; dragSX = ev.clientX - bview.x; dragSY = ev.clientY - bview.y;
+});
+window.addEventListener('mouseup', function() { dragging = false; });
+brainCanvas.addEventListener('mousemove', function(ev) {
+  if (dragging) {
+    bview.x = ev.clientX - dragSX; bview.y = ev.clientY - dragSY;
+    dragMoved = true;
+    return;
+  }
+  brainHover = brainHit(ev.clientX, ev.clientY);
+  brainCanvas.style.cursor = brainHover ? 'pointer' : 'grab';
+});
+brainCanvas.addEventListener('click', function(ev) {
+  if (dragMoved) return;
+  var n = brainHit(ev.clientX, ev.clientY);
+  brainSelected = n;
+  var panel = document.getElementById('braindetail');
+  if (n) {
+    document.getElementById('bdbody').innerHTML =
+      '<div class="bt">' + esc(n.title) + '</div>' +
+      '<div class="bm">' + esc(n.project.toUpperCase()) + ' | ' + esc(n.source) + ' | ' + esc(n.created) + '</div>' +
+      '<div>' + esc(n.content) + '</div>';
+    panel.style.display = 'block';
+  } else { panel.style.display = 'none'; }
+});
+brainCanvas.addEventListener('wheel', function(ev) {
+  ev.preventDefault();
+  var z = ev.deltaY < 0 ? 1.1 : 0.9;
+  bview.zoom = Math.max(0.4, Math.min(2.5, bview.zoom * z));
+}, { passive: false });
+document.getElementById('bdclose').addEventListener('click', function() {
+  brainSelected = null;
+  document.getElementById('braindetail').style.display = 'none';
+});
+
+var VIEW_ORDER = [0, 2, 1];
+function setView(v) {
+  currentView = v;
+  document.querySelectorAll('.vt').forEach(function(t) {
+    t.classList.toggle('active', parseInt(t.getAttribute('data-view')) === v);
+  });
+  var brainMode = (v === 1);
+  var agentMode = (v === 2);
+  brainCanvas.style.display = (brainMode || agentMode) ? 'block' : 'none';
+  canvas.style.display = (brainMode || agentMode) ? 'none' : 'block';
+  document.querySelector('.col-left').style.display = (brainMode || agentMode) ? 'none' : 'flex';
+  document.querySelector('.chat').style.display = (brainMode || agentMode) ? 'none' : 'flex';
+  document.getElementById('vtab').style.display = (brainMode || agentMode) ? 'none' : 'block';
+  document.getElementById('agentsView').style.display = agentMode ? 'block' : 'none';
+  if (agentMode) { document.getElementById('agChart').innerHTML = ''; agLastHash = ''; renderAgents(lastBots); }
+  document.getElementById('brainlegend').style.display = brainMode ? 'flex' : 'none';
+  if (!brainMode) document.getElementById('braindetail').style.display = 'none';
+  if (brainMode || agentMode) {
+    if (brainMode) loadBrain(false);
+    if (brainAnim) cancelAnimationFrame(brainAnim);
+    brainAnim = null;
+    drawBrain();
+  }
+  if (brainMode) {
+    if (brainPollTimer) clearInterval(brainPollTimer);
+    brainPollTimer = setInterval(function() { loadBrain(true); }, 20000);
+  } else if (brainPollTimer) {
+    clearInterval(brainPollTimer);
+    brainPollTimer = null;
+  }
+}
+document.querySelectorAll('.vt').forEach(function(t) {
+  t.addEventListener('click', function() { setView(parseInt(t.getAttribute('data-view'))); });
+});
+document.addEventListener('keydown', function(ev) {
+  if (ev.key !== 'ArrowRight' && ev.key !== 'ArrowLeft') return;
+  var i = VIEW_ORDER.indexOf(currentView);
+  var ni = ev.key === 'ArrowRight' ? Math.min(i + 1, VIEW_ORDER.length - 1) : Math.max(i - 1, 0);
+  setView(VIEW_ORDER[ni]);
+});
+
 /* ── Helpers ── */
 function esc(s) { return String(s).replace(/[&<>"]/g, function(c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
 function fmt(n) { return '$' + n.toFixed(4); }
@@ -661,7 +1326,11 @@ function tick() {
 }
 setInterval(tick, 1000); tick();
 
-/* ── Stats ── */
+/* ── Stats + Agenten-Ansicht ── */
+var AG_PALETTE = ['#59d7ff', '#5DCAA5', '#c792ea', '#ffd479', '#ff8fa3', '#7ee0d0', '#9fb5ff', '#f4a988'];
+var lastLog = [];
+var lastBots = [];
+
 async function load() {
   try {
     var s = await (await fetch('/api/stats')).json();
@@ -672,65 +1341,177 @@ async function load() {
     document.getElementById('s-req').textContent = s.requests;
     document.getElementById('s-queue').textContent = s.queue;
     document.getElementById('sysdot').className = 'dot ' + (s.listeners > 0 ? 'on' : '');
-    document.getElementById('f-online').textContent = s.listeners > 0 ? 'ONLINE' : 'OFFLINE';
-
-    renderTree(s.bots);
 
     document.getElementById('log').innerHTML = (s.log || []).map(function(e) {
       return '<div>' + e.t + ' <b>' + esc(e.bot) + '</b> ' + fmt(e.cost) + '</div>';
     }).join('') || '<div class="empty">-</div>';
+    lastLog = s.log || [];
+    lastBots = s.bots || [];
+
+    renderAgents(s.bots);
   } catch (e) {}
 }
-function renderTree(bots) {
-  var byId = {}, children = {};
-  bots.forEach(function(b) { byId[b.id] = b; });
-  bots.forEach(function(b) {
-    var p = (b.parent && byId[b.parent]) ? b.parent : (b.parent ? 'root' : 'root');
-    if (b.parent && byId[b.parent]) { (children[b.parent] = children[b.parent] || []).push(b); }
-    else { (children['root'] = children['root'] || []).push(b); }
-  });
-  var levels = [];
-  function walk(list, depth) {
-    if (!list || !list.length) return;
-    levels[depth] = (levels[depth] || []).concat(list);
-    list.forEach(function(b) { walk(children[b.id], depth + 1); });
-  }
-  walk(children['root'], 0);
 
-  var Wp = 233, NH = 46, GAP = 30, PADT = 8;
-  var Hp = PADT + levels.length * (NH + GAP) - GAP + 8;
-  var pos = {};
-  var svg = '<svg width="' + Wp + '" height="' + Hp + '" viewBox="0 0 ' + Wp + ' ' + Hp + '">';
-  levels.forEach(function(lv, d) {
-    var slice = Wp / lv.length;
-    lv.forEach(function(b, i) {
-      pos[b.id] = { x: slice * i + slice / 2, y: PADT + d * (NH + GAP) + NH / 2, w: Math.min(slice - 8, 210) };
-    });
-  });
-  // Verbindungen + Fluss-Partikel
-  bots.forEach(function(b) {
+var agView = { x: 0, y: 0, zoom: 1 };
+function agApplyView() {
+  document.getElementById('agChart').style.transform =
+    'translate(' + agView.x + 'px,' + agView.y + 'px) scale(' + agView.zoom + ')';
+}
+function agZoomAt(mx, my, factor) {
+  var nz = Math.max(0.4, Math.min(2.5, agView.zoom * factor));
+  var k = nz / agView.zoom;
+  agView.x = mx - (mx - agView.x) * k;
+  agView.y = my - (my - agView.y) * k;
+  agView.zoom = nz;
+  agApplyView();
+}
+var agPan = null;
+
+var agCustomPos = {};
+try { agCustomPos = JSON.parse(localStorage.getItem('jarvis_agpos') || '{}'); } catch (e) {}
+var agMeta = null;
+var agDrag = null;
+var agDragMoved = false;
+
+function buildAgSvg(pos) {
+  var defs = '<defs>';
+  var paths = '';
+  agMeta.bots.forEach(function(b, bi) {
     if (!b.parent || !pos[b.parent] || !pos[b.id]) return;
     var a = pos[b.parent], c = pos[b.id];
-    var y1 = a.y + NH / 2, y2 = c.y - NH / 2;
-    var path = 'M ' + a.x + ' ' + y1 + ' C ' + a.x + ' ' + (y1 + 16) + ', ' + c.x + ' ' + (y2 - 16) + ', ' + c.x + ' ' + y2;
-    svg += '<path d="' + path + '" fill="none" stroke="rgba(89,215,255,.35)" stroke-width="1"/>';
-    svg += '<circle r="2" fill="#59d7ff"><animateMotion dur="2.6s" repeatCount="indefinite" path="' + path + '"/></circle>';
+    var colP = agMeta.colorOf[b.parent] || '#59d7ff';
+    var col = agMeta.colorOf[b.id] || '#59d7ff';
+    var x1 = a.x + agMeta.CW / 2, y1 = a.y + agMeta.CH - 4;
+    var x2 = c.x + agMeta.CW / 2, y2 = c.y + 6;
+    var gid = 'agg' + bi;
+    defs += '<linearGradient id="' + gid + '" x1="' + x1 + '" y1="' + y1 + '" x2="' + x2 + '" y2="' + y2 +
+            '" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="' + colP + '"/><stop offset="1" stop-color="' + col + '"/></linearGradient>';
+    var path = 'M ' + x1 + ' ' + y1 + ' C ' + x1 + ' ' + (y1 + 38) + ', ' + x2 + ' ' + (y2 - 38) + ', ' + x2 + ' ' + y2;
+    paths += '<path d="' + path + '" fill="none" stroke="url(#' + gid + ')" stroke-width="5" stroke-opacity=".07"/>';
+    paths += '<path d="' + path + '" fill="none" stroke="url(#' + gid + ')" stroke-width="1.2" stroke-opacity=".55"/>';
+    paths += '<circle r="2.2" fill="' + col + '"><animateMotion dur="3.2s" repeatCount="indefinite" path="' + path + '"/></circle>';
+    paths += '<circle r="1.5" fill="' + colP + '" opacity=".7"><animateMotion dur="3.2s" begin="1.6s" repeatCount="indefinite" path="' + path + '"/></circle>';
   });
-  svg += '</svg>';
+  return '<svg class="agSvg" width="' + agMeta.W + '" height="' + agMeta.totalH + '" viewBox="0 0 ' + agMeta.W + ' ' + agMeta.totalH + '">' + defs + '</defs>' + paths + '</svg>';
+}
 
-  var html = '<div class="treewrap">' + svg;
+function agDomPositions() {
+  var pos = {};
+  document.querySelectorAll('#agChart .agNode').forEach(function(n) {
+    pos[n.getAttribute('data-bot')] = { x: parseFloat(n.style.left) || 0, y: parseFloat(n.style.top) || 0 };
+  });
+  return pos;
+}
+
+function agUpdateSvgLive() {
+  if (!agMeta) return;
+  var chart = document.getElementById('agChart');
+  var old = chart.querySelector('.agSvg');
+  var pos = agDomPositions();
+  var maxY = 0;
+  Object.keys(pos).forEach(function(id) { maxY = Math.max(maxY, pos[id].y); });
+  agMeta.totalH = Math.max(agMeta.totalH, maxY + agMeta.CH + 10);
+  chart.style.height = agMeta.totalH + 'px';
+  var tmp = document.createElement('div');
+  tmp.innerHTML = buildAgSvg(pos);
+  if (old) old.replaceWith(tmp.firstChild);
+}
+
+var agLastHash = '';
+function renderAgents(bots) {
+  var chart = document.getElementById('agChart');
+  var W = chart.clientWidth;
+  if (!W) return;
+
+  var busyIds = [];
+  document.querySelectorAll('.agNode.busy').forEach(function(n) { busyIds.push(n.getAttribute('data-bot')); });
+  var hash = W + '|' + busyIds.join(',') + '|' + JSON.stringify(bots.map(function(b) {
+    return [b.id, b.parent, b.online, b.cost, b.requests, b.spark];
+  }));
+  var firstRender = chart.innerHTML === '';
+  if (hash === agLastHash && !firstRender) return;
+  agLastHash = hash;
+
+  var byId = {};
+  bots.forEach(function(b) { byId[b.id] = b; });
+  var children = {};
+  bots.forEach(function(b) {
+    var p = (b.parent && byId[b.parent]) ? b.parent : 'root';
+    (children[p] = children[p] || []).push(b);
+  });
+  var levels = [];
+  var colorOf = {};
+  var depthOf = {};
+  function walk(list, depth, branchColor) {
+    if (!list || !list.length) return;
+    levels[depth] = (levels[depth] || []).concat(list);
+    list.forEach(function(b, i) {
+      var col = depth === 0 ? AG_PALETTE[i % AG_PALETTE.length] : branchColor;
+      colorOf[b.id] = col;
+      depthOf[b.id] = depth;
+      walk(children[b.id], depth + 1, col);
+    });
+  }
+  walk(children['root'], 0, '#59d7ff');
+
+  var CW = 216, CH = 168, GAPX = 26, GAPY = 78;
+  var pos = {};
+  levels.forEach(function(lv, d) {
+    var n = lv.length;
+    var rowW = n * CW + (n - 1) * GAPX;
+    var startX = Math.max(0, (W - rowW) / 2);
+    lv.forEach(function(b, i) {
+      pos[b.id] = { x: startX + i * (CW + GAPX), y: d * (CH + GAPY), w: CW };
+    });
+  });
+  Object.keys(agCustomPos).forEach(function(id) {
+    if (pos[id]) { pos[id].x = agCustomPos[id].x; pos[id].y = agCustomPos[id].y; }
+  });
+  var maxY = 0;
+  Object.keys(pos).forEach(function(id) { maxY = Math.max(maxY, pos[id].y); });
+  var totalH = Math.max(levels.length * (CH + GAPY) - GAPY, maxY + CH) + 10;
+  agMeta = { bots: bots, colorOf: colorOf, CW: CW, CH: CH, W: W, totalH: totalH };
+
+  var svg = buildAgSvg(pos);
+
+  var html = svg;
   bots.forEach(function(b) {
     var p = pos[b.id];
     if (!p) return;
-    html += '<div class="bnode' + (b.online ? ' on' : '') + '" data-bot="' + esc(b.id) + '" style="left:' +
-      (p.x - p.w / 2) + 'px;top:' + (p.y - NH / 2) + 'px;width:' + p.w + 'px;height:' + NH + 'px">' +
-      '<div class="bl"><span class="dot ' + (b.online ? 'on' : '') + '"></span>' + esc(b.label) + '</div>' +
-      '<div class="bm"><span>' + fmt(b.cost) + '</span><span>' + b.requests + ' req</span></div></div>';
+    var col = colorOf[b.id] || '#59d7ff';
+    var isRoot = !b.parent;
+    var depth = depthOf[b.id] || 0;
+    var isBusy = busyIds.indexOf(b.id) >= 0;
+    var maxSpark = Math.max.apply(null, (b.spark || [0]).concat([0.0001]));
+    var bars = (b.spark || [0, 0, 0, 0, 0, 0]).map(function(v) {
+      var h = Math.max(2, Math.round((v / maxSpark) * 15));
+      return '<span style="height:' + h + 'px;background:' + col + (v > 0 ? '88' : '26') + '"></span>';
+    }).join('');
+    var mono = esc(b.label.substring(0, 2).toUpperCase());
+    var enterDelay = firstRender ? (' style-delay') : '';
+    html += '<div class="agNode' + (isBusy ? ' busy' : '') + (isRoot ? ' agCoreNode' : '') + (firstRender ? ' enter' : '') +
+      '" data-bot="' + esc(b.id) + '" style="' +
+      'left:' + p.x + 'px; top:' + p.y + 'px; width:' + p.w + 'px; min-height:' + CH + 'px; ' +
+      (firstRender ? 'animation-delay:' + (depth * 130) + 'ms; ' : '') +
+      'background:linear-gradient(160deg, ' + col + (isRoot ? '26' : '1c') + ', rgba(9,22,33,.62)); border:0.5px solid ' + col + (b.online ? (isRoot ? '77' : '55') : '22') +
+      (isRoot ? '; box-shadow: 0 0 30px rgba(89,215,255,.14), 0 6px 26px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.08)' : '') + '">' +
+      '<div class="agLayer">LAYER ' + depth + ' \u00b7 ' + (isRoot ? 'ORCHESTRATOR' : 'AGENT') + '</div>' +
+      '<div class="agTop">' +
+      (isRoot ? '<div class="agCoreWrap"><div class="agCoreRing"></div></div>' :
+        '<div class="agMono" style="background:' + col + '22; color:' + col + '; border:1px solid ' + col + '55">' + mono + '</div>') +
+      '<div class="agName">' + esc(b.label) + '</div></div>' +
+      '<div class="agDesc">' + esc(b.desc || 'agent') + '</div>' +
+      '<div class="agDiv"></div>' +
+      '<div class="agRow"><span class="l"><span class="agPing' + (b.online ? ' on' : '') + '" style="background:' +
+      (b.online ? col : 'var(--dim)') + '; color:' + col + '"></span>' +
+      (isBusy ? 'DENKT ...' : (b.online ? 'ONLINE' : 'STANDBY')) + '</span><span class="cost">' + fmt(b.cost) + '</span></div>' +
+      '<div class="agRow"><span>requests</span><span>' + b.requests + '</span></div>' +
+      '<div class="agSpark">' + bars + '</div>' +
+      '</div>';
   });
-  html += '</div>';
-  var wrap = document.getElementById('tree');
-  wrap.style.height = Hp + 'px';
-  wrap.innerHTML = html;
+
+  chart.style.height = totalH + 'px';
+  chart.innerHTML = html;
 }
 
 setInterval(load, 5000); load();
@@ -758,8 +1539,8 @@ input.addEventListener('keydown', async function(ev) {
   busy = true;
   setEnergy(1);
   document.body.classList.add('thinking');
-  var bn = document.querySelector('[data-bot="' + target + '"]');
-  if (bn) bn.classList.add('busy');
+  var bn = document.querySelector('.agNode[data-bot="' + target + '"]');
+  if (bn) { bn.classList.add('busy'); var st = bn.querySelector('.agState'); if (st) st.textContent = 'DENKT ...'; }
   document.getElementById('typing').textContent = target.toUpperCase() + ' DENKT...';
   try {
     var r = await fetch('/api/chat', { method: 'POST',
@@ -773,7 +1554,10 @@ input.addEventListener('keydown', async function(ev) {
   busy = false;
   setEnergy(0);
   document.body.classList.remove('thinking');
-  document.querySelectorAll('.bnode.busy').forEach(function(n) { n.classList.remove('busy'); });
+  document.querySelectorAll('.agNode.busy').forEach(function(n) {
+    n.classList.remove('busy');
+    var st = n.querySelector('.agState'); if (st) st.textContent = st.getAttribute('data-default');
+  });
   document.getElementById('typing').textContent = '';
 });
 
@@ -854,6 +1638,82 @@ async function vopen(path, kind) {
     view.innerHTML = head + '<div class="empty">Binaerdatei - per Download oeffnen.</div>';
   }
 }
+
+document.getElementById('agChart').addEventListener('mousedown', function(ev) {
+  var card = ev.target.closest('.agNode');
+  if (!card || ev.button !== 0) return;
+  ev.preventDefault();
+  agDragMoved = false;
+  agDrag = { card: card, startX: ev.clientX, startY: ev.clientY,
+             origX: parseFloat(card.style.left) || 0, origY: parseFloat(card.style.top) || 0 };
+  card.style.zIndex = 5;
+  card.style.transition = 'none';
+});
+document.addEventListener('mousemove', function(ev) {
+  if (!agDrag) return;
+  var dx = (ev.clientX - agDrag.startX) / agView.zoom, dy = (ev.clientY - agDrag.startY) / agView.zoom;
+  if (Math.abs(dx) + Math.abs(dy) > 4) agDragMoved = true;
+  if (!agDragMoved) return;
+  var nx = Math.max(-300, agDrag.origX + dx);
+  var ny = Math.max(-300, agDrag.origY + dy);
+  agDrag.card.style.left = nx + 'px';
+  agDrag.card.style.top = ny + 'px';
+  agUpdateSvgLive();
+});
+document.addEventListener('mouseup', function() {
+  if (!agDrag) return;
+  var card = agDrag.card;
+  card.style.zIndex = '';
+  card.style.transition = '';
+  if (agDragMoved) {
+    agCustomPos[card.getAttribute('data-bot')] = {
+      x: parseFloat(card.style.left) || 0, y: parseFloat(card.style.top) || 0 };
+    try { localStorage.setItem('jarvis_agpos', JSON.stringify(agCustomPos)); } catch (e) {}
+    agLastHash = '';
+  }
+  agDrag = null;
+});
+document.getElementById('agChart').addEventListener('click', function(ev) {
+  if (agDragMoved) { agDragMoved = false; return; }
+  var card = ev.target.closest('.agNode');
+  if (!card) return;
+  var id = card.getAttribute('data-bot');
+  document.getElementById('target').value = id;
+  document.getElementById('input').focus();
+});
+document.getElementById('agentsView').addEventListener('wheel', function(ev) {
+  ev.preventDefault();
+  var rect = document.getElementById('agentsView').getBoundingClientRect();
+  agZoomAt(ev.clientX - rect.left, ev.clientY - rect.top, ev.deltaY < 0 ? 1.12 : 0.89);
+}, { passive: false });
+document.getElementById('agentsView').addEventListener('mousedown', function(ev) {
+  if (ev.target.closest('.agNode') || ev.button !== 0) return;
+  agPan = { sx: ev.clientX - agView.x, sy: ev.clientY - agView.y };
+  document.getElementById('agentsView').style.cursor = 'grabbing';
+});
+document.addEventListener('mousemove', function(ev) {
+  if (!agPan) return;
+  agView.x = ev.clientX - agPan.sx;
+  agView.y = ev.clientY - agPan.sy;
+  agApplyView();
+});
+document.addEventListener('mouseup', function() {
+  if (agPan) { agPan = null; document.getElementById('agentsView').style.cursor = ''; }
+});
+document.getElementById('agentsView').addEventListener('dblclick', function(ev) {
+  if (ev.target.closest('.agNode')) return;
+  agView = { x: 0, y: 0, zoom: 1 };
+  agApplyView();
+});
+document.getElementById('agChart').addEventListener('dblclick', function(ev) {
+  var card = ev.target.closest('.agNode');
+  if (!card) return;
+  delete agCustomPos[card.getAttribute('data-bot')];
+  try { localStorage.setItem('jarvis_agpos', JSON.stringify(agCustomPos)); } catch (e) {}
+  agLastHash = '';
+  document.getElementById('agChart').innerHTML = '';
+  renderAgents(lastBots);
+});
 
 document.getElementById('vsearch').addEventListener('input', function() { vrender(); });
 

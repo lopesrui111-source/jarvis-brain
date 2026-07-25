@@ -1,12 +1,14 @@
 #!/usr/bin/env python3
 """
-JARVIS Core v7 — v6 + WEB-ZUGRIFF (camofox Stealth-Browser)
+JARVIS Core v7.5 — v7.4 + IMMO-BOT-DELEGATION
 Neu gegenueber v4:
 - Stil-Analyse: 'stil ionos' / 'stil gmail' liest die letzten gesendeten
   Mails (read-only), erstellt ein Schreibstil-Profil und speichert es
   ins Langzeitgedaechtnis + Vault (skills/)
 - Gesendet-Ordner wird automatisch erkannt (\\Sent Flag, Fallback-Namen)
 - ask_ceo: delegiert Auftraege an den Bueroflow-CEO-Bot am Bus
+- ask_immo: dein Immobilien-Analyst (Rendite-Bewertungen, Scans, Telegram-Alerts an Rui).
+- check_calendar: Ruis iCloud-Kalender lesen (Termine der naechsten Tage). Read-only — du kannst nichts eintragen oder aendern.
 - web_search/web_open/web_click: echtes Browsen via camofox
 """
 
@@ -50,6 +52,9 @@ MAX_TOOL_ROUNDS = 5
 
 VAULT_DIR = "/app/vault"
 BOT_USER_ID = "jarvis"
+
+ICLOUD_USER = os.getenv("ICLOUD_USER", "")
+ICLOUD_PASS = os.getenv("ICLOUD_PASS", "")
 
 # Mail-Konten (read-only). Nur Konten mit gesetztem User+Pass sind aktiv.
 MAIL_ACCOUNTS = {
@@ -95,6 +100,8 @@ DEIN GEDAECHTNIS (Tools):
 - recall: Durchsuche dein Langzeitgedaechtnis. Nutze es, wenn Rui nach frueheren Themen fragt oder dir Kontext fehlt.
 - vault_note: Lege eine Markdown-Notiz im Wissens-Vault ab (fuer laengere Inhalte: Zusammenfassungen, Plaene, Recherchen).
 - check_mail / read_mail: Lies Ruis Postfaecher (ionos = Bueroflow-Business, gmail = privat). STRIKT read-only. Du kannst Mails zusammenfassen und Antwort-ENTWUERFE vorschlagen, aber nie senden.
+- ask_immo: dein Immobilien-Analyst (Rendite-Bewertungen, Scans, Telegram-Alerts an Rui).
+- check_calendar: Ruis iCloud-Kalender lesen (Termine der naechsten Tage). Read-only — du kannst nichts eintragen oder aendern.
 - web_search/web_open/web_click: Du kannst echt im Web browsen (Stealth-Browser). Nutze es fuer aktuelle Infos, Recherche, Preise, News. REGELN: nur lesen und recherchieren — nie einloggen, nie kaufen, nie posten, nie Formulare absenden.
 - Bevor du Texte/Mails/Posts fuer Rui entwirfst: recall nach "Schreibstil" und wende das Profil an (buroflow = geschaeftlich, privat = persoenlich).
 - Vor jeder Antwort bekommst du automatisch relevante Gedaechtnis-Treffer als Kontext (AUTO-RECALL). Nutze sie, erwaehne sie nur wenn relevant.
@@ -206,6 +213,18 @@ TOOLS = [
         "name": "web_click",
         "description": "Klickt ein Element (ref aus Snapshot, z.B. e3) im offenen Tab und liefert den neuen Snapshot.",
         "input_schema": {"type": "object", "properties": {"tab_id": {"type": "string"}, "ref": {"type": "string"}}, "required": ["tab_id", "ref"]},
+    },
+    {
+        "name": "ask_immo",
+        "description": "Delegiert an den IMMO-BOT (Immobilien-Investment-Analyst): Angebote bewerten (URL), ImmoScout-Mails scannen, Kleinanzeigen-Suchen pruefen, fruehere Objekte nachschlagen. Kann bis zu 4 Minuten dauern.",
+        "input_schema": {"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]},
+    },
+    {
+        "name": "check_calendar",
+        "description": "Liest Ruis iCloud-Kalender (read-only): kommende Termine der naechsten Tage, sortiert.",
+        "input_schema": {"type": "object", "properties": {
+            "days": {"type": "integer", "description": "Zeitraum in Tagen (Standard 7, max 30)"}},
+        },
     },
 ]
 
@@ -514,6 +533,59 @@ def tool_vault_note(inp: dict) -> str:
 CAMOFOX_URL = os.getenv("CAMOFOX_URL", "http://camofox:9377")
 
 
+# ── iCLOUD-KALENDER (CalDAV, strikt read-only) ───────────────
+def tool_check_calendar(inp):
+    if not ICLOUD_USER or not ICLOUD_PASS:
+        return "iCloud nicht konfiguriert — ICLOUD_USER/ICLOUD_PASS in .env fehlen."
+    days = min(max(int(inp.get("days") or 7), 1), 30)
+    try:
+        import caldav
+        from datetime import timedelta, date as _date
+        client = caldav.DAVClient(url="https://caldav.icloud.com/",
+                                  username=ICLOUD_USER, password=ICLOUD_PASS)
+        principal = client.principal()
+        cals = principal.calendars()
+        start = datetime.now()
+        end = start + timedelta(days=days)
+        events = []
+        for cal in cals:
+            try:
+                name = cal.name or "Kalender"
+            except Exception:
+                name = "Kalender"
+            try:
+                found = cal.search(start=start, end=end, event=True, expand=True)
+            except Exception:
+                try:
+                    found = cal.date_search(start, end)
+                except Exception:
+                    continue
+            for ev in found:
+                try:
+                    comp = ev.icalendar_component
+                    summ = str(comp.get("summary", "(ohne Titel)"))
+                    dt = comp.get("dtstart").dt
+                    if isinstance(dt, datetime):
+                        key = dt.replace(tzinfo=None) if dt.tzinfo else dt
+                        label = dt.strftime("%a %d.%m. %H:%M")
+                        dte = comp.get("dtend")
+                        if dte is not None and isinstance(dte.dt, datetime):
+                            label += dte.dt.strftime("-%H:%M")
+                    else:
+                        key = datetime.combine(dt, datetime.min.time())
+                        label = dt.strftime("%a %d.%m.") + " ganztaegig"
+                    events.append((key, f"{label} | {summ} ({name})"))
+                except Exception:
+                    continue
+        if not events:
+            return f"Keine Termine in den naechsten {days} Tagen."
+        events.sort(key=lambda x: x[0])
+        lines = [e[1] for e in events[:40]]
+        return f"Termine der naechsten {days} Tage:\n" + "\n".join(lines)
+    except Exception as e:
+        return f"Kalender-Fehler: {type(e).__name__}: {e}"
+
+
 WEB_MACROS = {
     "@google_search":   "https://www.google.com/search?q={}",
     "@youtube_search":  "https://www.youtube.com/results?search_query={}",
@@ -581,6 +653,22 @@ def tool_web_click(inp: dict) -> str:
         return f"Browser-Fehler: {type(e).__name__}: {e}"
 
 
+def tool_ask_immo(inp):
+    task = (inp.get("task") or "").strip()
+    if not task:
+        return "Fehler: leerer Auftrag."
+    try:
+        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        req_id = str(uuid.uuid4())
+        r.rpush("bot:immo:inbox", json.dumps({"id": req_id, "text": task}, ensure_ascii=False))
+        resp = r.blpop(f"bot:immo:reply:{req_id}", timeout=280)
+        if resp is None:
+            return "Immo-Bot antwortet nicht (Timeout) — laeuft der Container?"
+        return f"IMMO-BOT:\n{resp[1]}"
+    except Exception as e:
+        return f"Fehler: {type(e).__name__}: {e}"
+
+
 def tool_ask_ceo(inp: dict) -> str:
     task = (inp.get("task") or "").strip()
     if not task:
@@ -616,6 +704,10 @@ def run_tool(name: str, inp: dict) -> str:
         return tool_web_open(inp)
     if name == "web_click":
         return tool_web_click(inp)
+    if name == "check_calendar":
+        return tool_check_calendar(inp)
+    if name == "ask_immo":
+        return tool_ask_immo(inp)
     return f"Unbekanntes Tool: {name}"
 
 
@@ -831,7 +923,7 @@ def nightly_thread(r):
 def load_history(r):
     try:
         raw = r.get(HISTORY_KEY)
-        return (json.loads(raw)[-MAX_HISTORY:]) if raw else []
+        return json.loads(raw) if raw else []
     except Exception:
         return []
 
@@ -921,6 +1013,7 @@ def main():
     print(f"  Extraktion: {EXTRACT_MODEL}", flush=True)
     print(f"  Embeddings: {EMBED_MODEL if oai else 'DEAKTIVIERT (kein Key)'}", flush=True)
     print(f"  Nightly   : taeglich {NIGHTLY_HOUR:02d}:00", flush=True)
+    print(f"  Kalender  : {'aktiv' if (ICLOUD_USER and ICLOUD_PASS) else 'nicht konfiguriert'}", flush=True)
     for k, acc in MAIL_ACCOUNTS.items():
         status = "aktiv" if (acc["user"] and acc["pass"]) else "nicht konfiguriert"
         print(f"  Mail {k:<6}: {status}", flush=True)

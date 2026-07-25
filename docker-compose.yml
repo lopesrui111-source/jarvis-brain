@@ -132,6 +132,30 @@ services:
     networks:
       - jarvis-net
 
+  jarvis-immo:
+    build: ./bots/immo
+    container_name: jarvis-immo
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - jarvis-net
+
+  jarvis-seo:
+    build: ./bots/seo
+    container_name: jarvis-seo
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./vault:/app/vault
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - jarvis-net
+
 networks:
   jarvis-net:
     driver: bridge
