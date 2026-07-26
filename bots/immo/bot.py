@@ -91,6 +91,12 @@ def init_db():
                 rendite NUMERIC,
                 qualifiziert BOOLEAN,
                 created_at TIMESTAMPTZ DEFAULT now())""")
+            for spalte, typ in (("kaufpreis", "NUMERIC"), ("qm", "NUMERIC"),
+                                ("miete_qm", "NUMERIC"), ("warnung", "TEXT")):
+                try:
+                    cur.execute(f"ALTER TABLE immo_seen ADD COLUMN IF NOT EXISTS {spalte} {typ}")
+                except Exception:
+                    pass
         conn.close()
         print("  [db] immo_seen bereit", flush=True)
     except Exception as e:
@@ -109,13 +115,16 @@ def already_seen(url):
         return False
 
 
-def mark_seen(url, titel, rendite, qualifiziert):
+def mark_seen(url, titel, rendite, qualifiziert, d=None, warnung=""):
+    d = d or {}
     try:
         conn = pg_conn()
         with conn, conn.cursor() as cur:
-            cur.execute("INSERT INTO immo_seen (url, titel, rendite, qualifiziert) "
-                        "VALUES (%s, %s, %s, %s) ON CONFLICT (url) DO NOTHING",
-                        (url, titel[:200], rendite, qualifiziert))
+            cur.execute("INSERT INTO immo_seen (url, titel, rendite, qualifiziert, "
+                        "kaufpreis, qm, miete_qm, warnung) "
+                        "VALUES (%s, %s, %s, %s, %s, %s, %s, %s) ON CONFLICT (url) DO NOTHING",
+                        (url, titel[:200], rendite, qualifiziert,
+                         d.get("kaufpreis"), d.get("qm"), d.get("miete_qm"), warnung[:300]))
         conn.close()
     except Exception as e:
         print(f"  [seen] {e}", flush=True)
@@ -251,9 +260,52 @@ def calc_szenarien(kaufpreis, qm, miete_qm):
     }
 
 
+def pruefe_plausibilitaet(d, calc):
+    """Erkennt Datenfehler (falscher Kaufpreis, unrealistische Miete). Gibt Warnungen zurueck."""
+    warn = []
+    kp = float(d.get("kaufpreis") or 0)
+    qm = float(d.get("qm") or 0)
+    mq = float(d.get("miete_qm") or 0)
+    if qm > 0 and kp > 0:
+        pro_qm = kp / qm
+        if pro_qm < 800:
+            warn.append(f"Kaufpreis nur {pro_qm:.0f} EUR/m2 — fuer Wohnraum unrealistisch niedrig, "
+                        f"vermutlich Teilpreis/Grundstueck erfasst")
+        elif pro_qm > 15000:
+            warn.append(f"Kaufpreis {pro_qm:.0f} EUR/m2 — unrealistisch hoch")
+    if mq and (mq < 4 or mq > 25):
+        warn.append(f"Miete {mq:.2f} EUR/m2 ausserhalb des ueblichen Rahmens")
+    if qm and (qm < 15 or qm > 400):
+        warn.append(f"Flaeche {qm:.0f} m2 unplausibel")
+    if calc["rendite"] > 7:
+        warn.append(f"{calc['rendite']:.1f} % Bruttorendite — in BW/Region Stuttgart unrealistisch "
+                    f"(ueblich 3-5 %), Zahlen stammen vermutlich aus unvollstaendigen Angaben")
+
+    titel = (d.get("titel") or "").lower()
+    if any(w in titel for w in ("geplant", "neubau", "projektiert", "bauprojekt",
+                                "im bau", "fertigstellung", "grundstueck", "grundstück",
+                                "rohbau", "baugrund")):
+        warn.append("Neubau/Projekt — es gibt keine Ist-Miete, und Preisangaben sind meist "
+                    "'ab'-Preise. Rendite nicht belastbar")
+
+    # Teure Grosstaedte: dort sind hohe Renditen praktisch ausgeschlossen
+    ort = ((d.get("ort") or "") + " " + titel).lower()
+    if any(s in ort for s in ("stuttgart", "münchen", "muenchen", "frankfurt", "s-")) \
+            and calc["rendite"] > 5:
+        warn.append(f"{calc['rendite']:.1f} % in einer teuren Lage — dort liegen Renditen "
+                    f"real bei 2-3 %, Daten pruefen")
+    return warn
+
+
 def format_angebot(d, calc, url, plattform):
     q = calc["rendite"] >= MIN_RENDITE
-    lines = [
+    warnungen = pruefe_plausibilitaet(d, calc)
+    lines = []
+    if warnungen:
+        lines.append("⚠️ ZAHLEN PRUEFEN:")
+        lines += [f"   • {w}" for w in warnungen]
+        lines.append("")
+    lines += [
         f"{'✅' if q else '❌'} 📍 {d.get('titel', '(ohne Titel)')} — 🏷️ {plattform}",
         f"💶 {d.get('kaufpreis', 0):,.0f} € | {d.get('qm', '?')} m² | {d.get('zimmer', '?')} Zi | {d.get('ort', '?')}".replace(",", "."),
         f"📊 Bruttorendite: {calc['rendite']:.1f} % (Miete ca. {d.get('miete_qm', 0):.2f} €/m² — {d.get('miete_quelle', '')})",
@@ -319,13 +371,15 @@ def analyze_listing(url, notify=True, force=False):
         return f"Extraktion fehlgeschlagen: {type(e).__name__}: {e}"
 
     if not d.get("kaufpreis") or not d.get("qm") or not d.get("miete_qm"):
-        mark_seen(url, d.get("titel") or url, 0, False)
+        mark_seen(url, d.get("titel") or url, 0, False, d, "unvollstaendige Daten")
         return f"Unvollstaendige Daten (Preis/qm/Miete fehlen) — nicht bewertbar.\nTitel: {d.get('titel')}"
 
     calc = calc_szenarien(float(d["kaufpreis"]), float(d["qm"]), float(d["miete_qm"]))
-    qualifiziert = calc["rendite"] >= MIN_RENDITE and d.get("vermietbar", True)
+    warnungen = pruefe_plausibilitaet(d, calc)
+    qualifiziert = (calc["rendite"] >= MIN_RENDITE and d.get("vermietbar", True)
+                    and not warnungen)
     text = format_angebot(d, calc, url, plattform)
-    mark_seen(url, d.get("titel") or url, calc["rendite"], qualifiziert)
+    mark_seen(url, d.get("titel") or url, calc["rendite"], qualifiziert, d, "; ".join(warnungen))
     if qualifiziert and notify:
         send_telegram(text)
     return text + ("\n\n📲 Telegram gesendet." if qualifiziert and notify and TELEGRAM_TOKEN else "")
@@ -415,8 +469,16 @@ def _bewerte_mail_bodies(bodies):
                 continue
             gefunden += 1
             if not a.get("kaufpreis") or not a.get("qm") or not a.get("ort"):
-                mark_seen(url, a.get("titel") or url, 0, False)
-                results.append(f"❌ {a.get('titel', '?')} — unvollstaendige Daten in der Mail.")
+                mark_seen(url, a.get("titel") or url, 0, False, a, "unvollstaendige Mail-Angaben")
+                results.append(f"❌ {a.get('titel', '?')} — unvollstaendige Daten in der Mail. "
+                               f"Bei Interesse selbst oeffnen: {url}")
+                continue
+            # Neubau/Projekt: keine Ist-Miete -> nicht bewerten, nur melden
+            if any(w in (a.get("titel") or "").lower() for w in
+                   ("geplant", "neubau", "projektiert", "bauprojekt", "im bau", "rohbau")):
+                mark_seen(url, a.get("titel") or url, 0, False, a, "Neubau/Projekt - nicht bewertbar")
+                results.append(f"🏗 {a.get('titel', '?')} — Neubau/Projekt, keine Ist-Miete. "
+                               f"Nicht bewertet: {url}")
                 continue
             miete_qm, quelle = _miete_fuer_ort(a["ort"], a["qm"])
             if not miete_qm:
@@ -427,9 +489,10 @@ def _bewerte_mail_bodies(bodies):
                  "qm": a["qm"], "zimmer": a.get("zimmer"), "miete_qm": miete_qm,
                  "miete_quelle": quelle, "anmerkung": "Aus ImmoScout-Mail bewertet."}
             calc = calc_szenarien(float(a["kaufpreis"]), float(a["qm"]), miete_qm)
-            qualifiziert = calc["rendite"] >= MIN_RENDITE
+            warnungen = pruefe_plausibilitaet(d, calc)
+            qualifiziert = calc["rendite"] >= MIN_RENDITE and not warnungen
             text = format_angebot(d, calc, url if url.startswith("http") else "(Link in der Mail)", "ImmoScout24")
-            mark_seen(url, a.get("titel") or url, calc["rendite"], qualifiziert)
+            mark_seen(url, a.get("titel") or url, calc["rendite"], qualifiziert, d, "; ".join(warnungen))
             if qualifiziert:
                 send_telegram(text)
             results.append(text)
@@ -542,6 +605,12 @@ RUIS KRITERIEN (fest):
 - Region: Rems-Murr-Kreis und Umgebung (BW), grundsaetzlich vermietbar, kein Abrisskandidat
 - Bekannte Referenzen im Gedaechtnis: Pleidelsheim (Favorit ~5,1-5,3%), Bad Wimpfen (abgelehnt: Energieklasse F), Welzheim (alte Gasheizung, Bad ohne Fenster)
 
+GRENZEN DER DATENQUELLE (wichtig):
+- ImmoScout-Mails enthalten oft nur Bruchstuecke. Wenn Preis, Flaeche oder Ort fehlen,
+  rechnest du NICHT und erfindest keine Werte — du meldest die Anzeige zum Selbstansehen.
+- Bei "geplant"/"Neubau"/"projektiert" gibt es keine Ist-Miete: nicht bewerten.
+- Renditen ueber 7 % sind in BW ein Alarmzeichen fuer falsche Daten, nicht fuer ein Schnaeppchen.
+
 PERSOENLICHKEIT:
 - Du duzt. Nuechtern, zahlengetrieben, ehrlich — du redest kein Objekt schoen.
 - Rechne NIE selbst im Kopf: analyze_listing macht die Berechnung deterministisch.
@@ -600,9 +669,12 @@ def _ist_leere_ankuendigung(text):
         return False
     if ANNOUNCE_RE.search(t):
         return True
-    # Sehr kurze Absichts-Saetze ohne jedes Ergebnis
-    if len(t) <= 90 and INTENT_RE.match(t):
-        return True
+    # Absichts-Saetze pruefen (auch wenn sie nicht am Anfang stehen)
+    saetze = [s.strip() for s in re.split(r"[.!?]+", t) if s.strip()]
+    if len(t) <= 160:
+        for s in saetze:
+            if len(s) <= 90 and INTENT_RE.match(s):
+                return True
     return False
 
 
@@ -687,6 +759,26 @@ def auto_scan_thread():
             print(f"  [auto] {e}", flush=True)
 
 
+def _antwort_senden(r, queue, text):
+    """Antwort zustellen — auch wenn die Verbindung waehrend langer Arbeit abgelaufen ist."""
+    for versuch in range(3):
+        try:
+            r.rpush(queue, text)
+            r.expire(queue, 300)
+            return True
+        except Exception as e:
+            print(f"  [reply] Versuch {versuch + 1} fehlgeschlagen ({type(e).__name__}) — neue Verbindung", flush=True)
+            try:
+                r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
+                                socket_keepalive=True, health_check_interval=20,
+                                retry_on_timeout=True, socket_timeout=30)
+            except Exception:
+                pass
+            time.sleep(1)
+    print("  [reply] Antwort konnte NICHT zugestellt werden!", flush=True)
+    return False
+
+
 def main():
     print("=" * 58, flush=True)
     print("  IMMO-BOT — Investment-Analyst unter JARVIS", flush=True)
@@ -699,7 +791,9 @@ def main():
     r = None
     for _ in range(30):
         try:
-            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
+                            socket_keepalive=True, health_check_interval=20,
+                            retry_on_timeout=True, socket_timeout=30)
             r.ping()
             print("  [redis] verbunden", flush=True)
             break
@@ -724,13 +818,11 @@ def main():
             text = (msg.get("text") or "").strip()
             reply_q = REPLY_KEY.format(id=req_id)
             if not text:
-                r.rpush(reply_q, "Leere Anfrage.")
-                r.expire(reply_q, 300)
+                _antwort_senden(r, reply_q, "Leere Anfrage.")
                 continue
             if text.lower() in ("reset", "vergiss alles"):
                 r.delete(HISTORY_KEY)
-                r.rpush(reply_q, "Immo-Kurzzeitgedaechtnis geleert.")
-                r.expire(reply_q, 300)
+                _antwort_senden(r, reply_q, "Immo-Kurzzeitgedaechtnis geleert.")
                 continue
             print(f"  Auftrag: {text[:80]}", flush=True)
             history = load_history(r)
@@ -740,8 +832,7 @@ def main():
                 answer = f"Fehler: {type(e).__name__}: {e}"
             save_history(r, history)
             print(f"  Immo: {answer[:100]}\n", flush=True)
-            r.rpush(reply_q, answer)
-            r.expire(reply_q, 300)
+            _antwort_senden(r, reply_q, answer)
         except KeyboardInterrupt:
             break
         except Exception as e:

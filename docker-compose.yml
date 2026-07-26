@@ -67,6 +67,7 @@ services:
     volumes:
       - ./vault:/app/vault
     ports:
+      - "100.89.106.8:8090:8090" 
       - "127.0.0.1:8090:8090"
     depends_on:
       redis:

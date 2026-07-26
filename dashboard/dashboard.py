@@ -45,6 +45,7 @@ UMAMI_KEY = os.getenv("UMAMI_API_KEY", "")
 UMAMI_SITE = os.getenv("UMAMI_WEBSITE_ID", "")
 # Kostenlose Alternative zur API: oeffentlicher Share-Link (Umami Cloud, kein Pro noetig)
 UMAMI_SHARE = os.getenv("UMAMI_SHARE_URL", "").strip().rstrip("/")
+GOOGLE_ICS = [u.strip() for u in os.getenv("GOOGLE_ICS_URLS", "").split(",") if u.strip()]
 TEXT_EXT = (".md", ".txt", ".json", ".yml", ".yaml", ".csv")
 IMG_EXT  = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
@@ -389,6 +390,94 @@ def umami(tage: int = 7):
     return JSONResponse(out)
 
 
+@app.get("/api/heute")
+def heute():
+    """Nur was heute wirklich ansteht — Termine und offene Punkte."""
+    out = {"posten": []}
+
+    def add(art, text, detail="", dringend=False):
+        out["posten"].append({"art": art, "text": text[:70], "detail": detail, "dringend": dringend})
+
+    # ── 1) Termine heute und morgen ──
+    try:
+        import icalendar
+        from datetime import timedelta
+        try:
+            import recurring_ical_events
+            wdh = True
+        except Exception:
+            wdh = False
+        heute_d = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+        ende = heute_d + timedelta(days=2)
+        termine = []
+        for url in GOOGLE_ICS[:5]:
+            try:
+                cal = icalendar.Calendar.from_ical(requests.get(url, timeout=20).text)
+            except Exception:
+                continue
+            treffer = []
+            if wdh:
+                try:
+                    treffer = recurring_ical_events.of(cal).between(heute_d, ende)
+                except Exception:
+                    treffer = list(cal.walk("VEVENT"))
+            else:
+                treffer = list(cal.walk("VEVENT"))
+            for ev in treffer:
+                try:
+                    dt = ev.get("DTSTART").dt
+                    titel = str(ev.get("SUMMARY") or "Termin")
+                    if isinstance(dt, datetime):
+                        n = dt.replace(tzinfo=None) if dt.tzinfo else dt
+                        if not (heute_d <= n < ende):
+                            continue
+                        wann = "heute" if n.date() == heute_d.date() else "morgen"
+                        termine.append((n, titel, f"{wann} {n.strftime('%H:%M')}"))
+                    else:
+                        tag = datetime.combine(dt, datetime.min.time())
+                        if not (heute_d <= tag < ende):
+                            continue
+                        wann = "heute" if tag.date() == heute_d.date() else "morgen"
+                        termine.append((tag, titel, f"{wann}, ganztägig"))
+                except Exception:
+                    continue
+        for _, titel, wann in sorted(termine, key=lambda x: x[0])[:5]:
+            add("termin", titel, wann, True)
+    except Exception:
+        pass
+
+    # ── 2) Offene Punkte aus der Datenbank ──
+    try:
+        conn = pg()
+        with conn, conn.cursor() as cur:
+            def sicher(sql):
+                try:
+                    cur.execute(sql)
+                    return cur.fetchall()
+                except Exception:
+                    conn.rollback()
+                    return []
+
+            for r in sicher("SELECT titel, aktueller_schritt, jsonb_array_length(schritte) FROM jobs "
+                            "WHERE status = 'laeuft' ORDER BY id DESC LIMIT 3"):
+                add("job", r[0] or "Auftrag", f"läuft — Schritt {min((r[1] or 0)+1, r[2] or 1)}/{r[2] or 1}", True)
+
+            for r in sicher("SELECT titel, to_char(created_at,'DD.MM.') FROM qa_seen "
+                            "WHERE entwurf_datei <> '' AND NOT erledigt ORDER BY id DESC LIMIT 4"):
+                add("seo", r[0] or "Entwurf", f"Entwurf vom {r[1]} — zu posten")
+
+            # Immo: ohne Doppelte, nur die letzten 2 Tage
+            for r in sicher("SELECT DISTINCT ON (titel) titel, rendite FROM immo_seen "
+                            "WHERE qualifiziert AND created_at > now() - interval '2 days' "
+                            "ORDER BY titel, created_at DESC LIMIT 4"):
+                add("immo", r[0] or "Objekt", f"{float(r[1] or 0):.1f} % Rendite — prüfen")
+        conn.close()
+    except Exception as e:
+        out["fehler"] = str(e)[:120]
+
+    return JSONResponse(out)
+
+
 @app.get("/api/jobs")
 def jobs():
     try:
@@ -636,6 +725,16 @@ HTML = """<!DOCTYPE html>
   @keyframes adrift2 { from { transform: translate(0, 0) scale(1.1); } to { transform: translate(-80px, 60px) scale(.95); } }
   .agInner { max-width: 1040px; width: 100%; margin: auto; }
   .agSvg { position: absolute; top: 0; left: 0; pointer-events: none; }
+  .agZoom { position: absolute; right: 22px; bottom: 26px; display: flex; flex-direction: column;
+            gap: 8px; z-index: 6; }
+  .agZbtn { width: 38px; height: 38px; display: flex; align-items: center; justify-content: center;
+            font-size: 17px; color: var(--cyan); cursor: pointer; user-select: none;
+            background: rgba(9, 22, 33, .72); backdrop-filter: blur(10px);
+            border: 1px solid rgba(89, 215, 255, .22); border-radius: 10px;
+            transition: border-color .2s, box-shadow .2s, color .2s; }
+  .agZbtn:hover { border-color: rgba(89, 215, 255, .6); color: #eaf9ff;
+                  box-shadow: 0 0 16px rgba(89, 215, 255, .22); }
+  .agZbtn:active { transform: scale(.94); }
   .agNode { position: absolute; backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
             border-radius: 15px; padding: 15px 17px; cursor: grab; overflow: hidden;
             box-shadow: 0 6px 26px rgba(0, 0, 0, .35), inset 0 1px 0 rgba(255, 255, 255, .06);
@@ -694,6 +793,15 @@ HTML = """<!DOCTYPE html>
             max-height: 130px; overflow: hidden; }
   .logbox div { color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .logbox b { color: var(--cyan); font-weight: 400; }
+  .hitem { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0;
+           border-bottom: 1px solid rgba(89, 215, 255, .06); font-size: 11px; }
+  .hitem:last-child { border-bottom: none; }
+  .hitem .sym { flex: none; width: 15px; text-align: center; font-size: 10px; opacity: .85; }
+  .hitem .txt { flex: 1; min-width: 0; }
+  .hitem .txt b { display: block; color: var(--txt); font-weight: 400; overflow: hidden;
+                  text-overflow: ellipsis; white-space: nowrap; }
+  .hitem .txt span { color: var(--dim); font-size: 9px; }
+  .hitem.dringend .sym { color: var(--green); }
   .jobitem { margin-bottom: 10px; }
   .jobitem:last-child { margin-bottom: 0; }
   .jobtop { display: flex; justify-content: space-between; font-size: 10.5px; margin-bottom: 4px; }
@@ -824,11 +932,81 @@ HTML = """<!DOCTYPE html>
            color: var(--dim); letter-spacing: .3em; }
   footer b { color: var(--cyan); font-weight: 400; }
 
+  /* ══════════ MOBIL (nur schmale Bildschirme — Desktop bleibt unveraendert) ══════════ */
+  @media (max-width: 820px) {
+    header { flex-wrap: wrap; padding: 10px 14px 6px; gap: 6px; }
+    .brand { font-size: 15px; letter-spacing: .22em; }
+    .clock { font-size: 17px; }
+    .clock small { font-size: 8px; letter-spacing: .25em; }
+    .viewtabs { position: static; transform: none; order: 3; width: 100%;
+                justify-content: center; margin-top: 4px; padding: 3px; }
+    .vt { padding: 8px 11px; font-size: 8.5px; letter-spacing: .14em; }
+
+    /* CORE: alles untereinander, scrollbar — Header nimmt Platz ein statt zu ueberlappen */
+    body.view-0 .hud { pointer-events: auto; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+    body.view-0 header { position: relative; }
+    /* Freiraum, in dem der Plasma-Kern sichtbar bleibt */
+    body.view-0 .col-left { position: relative; top: 0; left: 0; width: auto;
+                            max-height: none; margin: 172px 12px 12px; }
+    body.view-0 .chat { position: relative; top: 0; right: 0; bottom: 0; width: auto;
+                        height: 62vh; margin: 0 12px 14px; }
+    body.view-0 footer { position: relative; padding: 4px 16px 28px; font-size: 9px; }
+    body.view-0 .vtab { position: fixed; left: auto; right: 10px; bottom: 12px; top: auto;
+                        transform: none; writing-mode: horizontal-tb; border: 1px solid var(--glass-line);
+                        border-radius: 20px; padding: 8px 14px; font-size: 9.5px; letter-spacing: .18em;
+                        background: rgba(9, 22, 33, .82); backdrop-filter: blur(8px);
+                        box-shadow: 0 4px 16px rgba(0,0,0,.45); z-index: 7; opacity: .9; }
+
+    /* Panel-Titel linksbuendig, Pfeil rechts */
+    .panel h3 { justify-content: flex-start; gap: 9px; }
+    .panel h3 .chev, .panel h3 > span:last-child { margin-left: auto; }
+
+    /* Eingabefelder gross genug, damit iOS nicht hineinzoomt */
+    .chatbar input, .chatbar select, .vsearch { font-size: 16px; padding: 12px 10px; }
+    .chatbar select { width: 108px; }
+    .msg { font-size: 13px; max-width: 96%; }
+
+    /* Vault als Vollbild */
+    .vmodal { width: 96vw; height: 90vh; padding: 12px; }
+    .vmhead { flex-wrap: wrap; gap: 8px; }
+    .vmhead .vsearch { width: 100%; order: 3; }
+    .vbody { flex-direction: column; }
+    .vbody .vlistwrap { width: auto; max-height: 45%; }
+    .vgrid { grid-template-columns: repeat(2, 1fr); }
+    .vview { min-height: 180px; }
+
+    /* Agenten + Bueroflow */
+    .agentsView { padding: 74px 8px 24px; overflow-y: auto; overflow-x: hidden;
+                  scrollbar-width: thin; }
+    .agZoom { right: 10px; bottom: 62px; gap: 6px; }
+    .agZbtn { width: 34px; height: 34px; font-size: 15px; }
+    .agName { font-size: 12px; }
+    .bfView { padding: 74px 12px 28px; }
+    .bfHero { padding: 16px; gap: 12px; }
+    .bfHero .big { font-size: 27px; }
+    .bfGrid { grid-template-columns: repeat(2, 1fr); gap: 9px; }
+    .bfCard { padding: 11px 12px; }
+    .bfCard .v { font-size: 19px; }
+    .bfWide { grid-template-columns: 1fr; }
+    .bfBar .n { width: 84px; font-size: 10px; }
+
+    /* Gehirn-Detailpanel unten statt rechts */
+    .braindetail { right: 10px; left: 10px; width: auto; top: auto; bottom: 12px; max-height: 42vh; }
+    .brainlegend { left: 10px; bottom: 8px; font-size: 9px; gap: 7px; max-width: 92vw; }
+  }
+
+  @media (max-width: 400px) {
+    .brand { font-size: 13px; letter-spacing: .15em; }
+    .clock { font-size: 15px; }
+    .bfGrid { grid-template-columns: 1fr; }
+    .vgrid { grid-template-columns: repeat(2, 1fr); }
+  }
+
   ::-webkit-scrollbar { width: 5px; }
   ::-webkit-scrollbar-thumb { background: rgba(89, 215, 255, .2); border-radius: 3px; }
 </style>
 </head>
-<body>
+<body class="view-0">
 <canvas id="space"></canvas>
 <canvas id="brain" style="display:none"></canvas>
 
@@ -845,6 +1023,11 @@ HTML = """<!DOCTYPE html>
   </header>
 
   <div class="col-left">
+    <div class="panel" id="heutePanel" style="display:none">
+      <h3>HEUTE <span id="heuteZahl" style="color:var(--dim);font-size:9px"></span> <span class="chev"></span></h3>
+      <div id="heuteListe"></div>
+    </div>
+
     <div class="panel">
       <h3>SYSTEMSTATUS <span style="display:flex;align-items:center;gap:10px"><span class="dot on" id="sysdot"></span><span class="chev"></span></span></h3>
       <div class="kv"><span class="k">LISTENER</span><span class="v cyan" id="s-listen">-/-</span></div>
@@ -872,6 +1055,11 @@ HTML = """<!DOCTYPE html>
 
   <div class="agentsView" id="agentsView" style="display:none">
     <div class="agAurora"><i></i><i></i><i></i></div>
+    <div class="agZoom">
+      <span class="agZbtn" data-zoom="in">+</span>
+      <span class="agZbtn" data-zoom="out">\u2212</span>
+      <span class="agZbtn" data-zoom="reset">\u21ba</span>
+    </div>
     <div class="agInner">
       <div id="agChart" style="position:relative;"></div>
     </div>
@@ -940,8 +1128,30 @@ var W, H, CX, CY, R;
 function resize() {
   W = canvas.width = window.innerWidth;
   H = canvas.height = window.innerHeight;
-  CX = W / 2; CY = H * 0.5;
-  R = Math.min(W, H) * 0.46;
+  CY = H * 0.5;
+
+  // Auf schmalen Bildschirmen liegt alles untereinander -> normal zentrieren
+  if (W < 820) {
+    CX = W / 2;
+    // In CORE oben ein sichtbarer Bereich, sonst mittig
+    var core = document.body.className.indexOf("view-0") >= 0;
+    CY = core ? 176 : H * 0.5;
+    R = core ? Math.min(W * 0.30, 112) : Math.min(W, H) * 0.42;
+    return;
+  }
+
+  // Sonst: den freien Raum zwischen linker Spalte und Chat nutzen
+  var links = 0, rechts = W;
+  try {
+    var l = document.querySelector('.col-left');
+    if (l && l.offsetParent !== null) links = l.getBoundingClientRect().right;
+    var c = document.querySelector('.chat');
+    if (c && c.offsetParent !== null) rechts = c.getBoundingClientRect().left;
+  } catch (e) {}
+  var frei = rechts - links;
+  if (frei < 260) { links = 0; rechts = W; frei = W; }   // Notfall: volle Breite
+  CX = links + frei / 2;
+  R = Math.min(frei * 0.46, H * 0.46);
 }
 window.addEventListener('resize', resize);
 resize();
@@ -1783,6 +1993,7 @@ document.getElementById('bdclose').addEventListener('click', function() {
 var VIEW_ORDER = [0, 2, 3, 1];
 function setView(v) {
   currentView = v;
+  document.body.className = document.body.className.replace(/\\bview-\\d\\b/g, "").trim() + " view-" + v;
   document.querySelectorAll('.vt').forEach(function(t) {
     t.classList.toggle('active', parseInt(t.getAttribute('data-view')) === v);
   });
@@ -1800,6 +2011,7 @@ function setView(v) {
   if (agentMode) { document.getElementById('agChart').innerHTML = ''; agLastHash = ''; renderAgents(lastBots); }
   document.getElementById('brainlegend').style.display = brainMode ? 'flex' : 'none';
   if (!brainMode) document.getElementById('braindetail').style.display = 'none';
+  if (v === 0) setTimeout(resize, 60);
   if (bfMode) {
     loadBuroflow();
     if (bfTimer) clearInterval(bfTimer);
@@ -1876,8 +2088,12 @@ async function load() {
 
 var agView = { x: 0, y: 0, zoom: 1 };
 function agApplyView() {
-  document.getElementById('agChart').style.transform =
+  var chart = document.getElementById('agChart');
+  chart.style.transform =
     'translate(' + agView.x + 'px,' + agView.y + 'px) scale(' + agView.zoom + ')';
+  if (agMeta && chart.parentElement) {
+    chart.parentElement.style.minHeight = (agMeta.totalH * agView.zoom + 30) + 'px';
+  }
 }
 function agZoomAt(mx, my, factor) {
   var nz = Math.max(0.4, Math.min(2.5, agView.zoom * factor));
@@ -1976,16 +2192,29 @@ function renderAgents(bots) {
   }
   walk(children['root'], 0, '#59d7ff');
 
-  var CW = 216, CH = 168, GAPX = 26, GAPY = 78;
+  var schmal = W < 560;
+  var CW = schmal ? Math.max(190, W - 6) : 216;
+  var CH = schmal ? 156 : 168;
+  var GAPX = 26, GAPY = schmal ? 46 : 78;
   var pos = {};
-  levels.forEach(function(lv, d) {
-    var n = lv.length;
-    var rowW = n * CW + (n - 1) * GAPX;
-    var startX = Math.max(0, (W - rowW) / 2);
-    lv.forEach(function(b, i) {
-      pos[b.id] = { x: startX + i * (CW + GAPX), y: d * (CH + GAPY), w: CW };
+  if (schmal) {
+    var reihe = 0;
+    levels.forEach(function(lv) {
+      lv.forEach(function(b) {
+        pos[b.id] = { x: Math.max(0, (W - CW) / 2), y: reihe * (CH + GAPY), w: CW };
+        reihe++;
+      });
     });
-  });
+  } else {
+    levels.forEach(function(lv, d) {
+      var n = lv.length;
+      var rowW = n * CW + (n - 1) * GAPX;
+      var startX = Math.max(0, (W - rowW) / 2);
+      lv.forEach(function(b, i) {
+        pos[b.id] = { x: startX + i * (CW + GAPX), y: d * (CH + GAPY), w: CW };
+      });
+    });
+  }
   Object.keys(agCustomPos).forEach(function(id) {
     if (pos[id]) { pos[id].x = agCustomPos[id].x; pos[id].y = agCustomPos[id].y; }
   });
@@ -2036,6 +2265,26 @@ function renderAgents(bots) {
   chart.innerHTML = html;
 }
 
+var HEUTE_SYM = { termin: "\u25f7", job: "\u25d0", seo: "\u270e", immo: "\u2302" };
+
+async function loadHeute() {
+  try {
+    var d = await (await fetch('/api/heute')).json();
+    var p = d.posten || [];
+    var panel = document.getElementById('heutePanel');
+    if (!p.length) { panel.style.display = 'none'; return; }
+    panel.style.display = 'block';
+    document.getElementById('heuteZahl').textContent = p.length > 0 ? '(' + p.length + ')' : '';
+    document.getElementById('heuteListe').innerHTML = p.slice(0, 10).map(function(x) {
+      return '<div class="hitem' + (x.dringend ? ' dringend' : '') + '">' +
+        '<span class="sym">' + (HEUTE_SYM[x.art] || '\u00b7') + '</span>' +
+        '<span class="txt"><b>' + esc(x.text) + '</b>' +
+        (x.detail ? '<span>' + esc(x.detail) + '</span>' : '') + '</span></div>';
+    }).join('');
+  } catch (e) {}
+}
+setInterval(loadHeute, 30000); loadHeute();
+
 async function loadJobs() {
   try {
     var d = await (await fetch('/api/jobs')).json();
@@ -2056,6 +2305,7 @@ async function loadJobs() {
 setInterval(loadJobs, 8000); loadJobs();
 
 setInterval(load, 5000); load();
+setTimeout(resize, 300);
 
 /* ── Chat ── */
 var msgs = document.getElementById('msgs');
@@ -2300,10 +2550,21 @@ document.getElementById('agChart').addEventListener('click', function(ev) {
   document.getElementById('input').focus();
 });
 document.getElementById('agentsView').addEventListener('wheel', function(ev) {
+  if (window.innerWidth < 820 && !ev.ctrlKey) return;   // Handy: scrollen erlauben
   ev.preventDefault();
   var rect = document.getElementById('agentsView').getBoundingClientRect();
   agZoomAt(ev.clientX - rect.left, ev.clientY - rect.top, ev.deltaY < 0 ? 1.12 : 0.89);
 }, { passive: false });
+document.querySelector('.agZoom').addEventListener('click', function(ev) {
+  var b = ev.target.closest('[data-zoom]');
+  if (!b) return;
+  ev.stopPropagation();
+  var art = b.getAttribute('data-zoom');
+  var box = document.getElementById('agentsView').getBoundingClientRect();
+  if (art === 'reset') { agView = { x: 0, y: 0, zoom: 1 }; agApplyView(); return; }
+  agZoomAt(box.width / 2, box.height / 2, art === 'in' ? 1.18 : 0.85);
+});
+
 document.getElementById('agentsView').addEventListener('mousedown', function(ev) {
   if (ev.target.closest('.agNode') || ev.button !== 0) return;
   agPan = { sx: ev.clientX - agView.x, sy: ev.clientY - agView.y };
@@ -2336,7 +2597,10 @@ document.getElementById('agChart').addEventListener('dblclick', function(ev) {
 document.getElementById('vsearch').addEventListener('input', function() { vrender(); });
 
 document.querySelectorAll('.col-left .panel h3').forEach(function(h) {
-  h.addEventListener('click', function() { h.parentElement.classList.toggle('collapsed'); });
+  h.addEventListener('click', function() {
+    h.parentElement.classList.toggle('collapsed');
+    setTimeout(resize, 60);
+  });
 });
 
 document.addEventListener('click', async function(ev) {
