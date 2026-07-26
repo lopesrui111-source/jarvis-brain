@@ -24,6 +24,8 @@ from email.header import decode_header
 import psycopg2
 import psycopg2.extras
 from anthropic import Anthropic
+from skills import (skills_indexieren, SKILL_TOOLS, SKILL_PROMPT,
+                    skill_tool_ausfuehren, skill_banner)
 from openai import OpenAI
 
 BOT_NAME = "buroflow-ceo"
@@ -93,6 +95,8 @@ DEIN SEO-BOT (ask_seo): findet auf gutefrage.net und Quora frische Fragen mit Si
 und schreibt Antwort-ENTWUERFE in Ruis Stil. Er postet nichts — Rui prueft und postet selbst.
 
 DEIN WEB-ZUGRIFF (web_search/web_open/web_click): Echtes Browsen fuer Markt-Recherche, Wettbewerber, Preise, Trends. Nur lesen — nie einloggen, kaufen, posten oder Formulare absenden.
+
+{SKILL_PROMPT}
 
 EISERNE REGELN:
 - Alles Externe (Posts, Antworten, Mails) ist ENTWURF zur Freigabe — du postest/sendest nichts.
@@ -466,7 +470,9 @@ def tool_ask_seo(inp):
     if not task:
         return "Fehler: leerer Auftrag."
     try:
-        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
+                            socket_keepalive=True, health_check_interval=20,
+                            retry_on_timeout=True, socket_timeout=30)
         req_id = str(uuid.uuid4())
         r.rpush("bot:seo:inbox", json.dumps({"id": req_id, "text": task}, ensure_ascii=False))
         resp = r.blpop(f"bot:seo:reply:{req_id}", timeout=420)
@@ -482,7 +488,9 @@ def tool_ask_marketing(inp):
     if not task:
         return "Fehler: leerer Auftrag."
     try:
-        rr = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        rr = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
+                            socket_keepalive=True, health_check_interval=20,
+                            retry_on_timeout=True, socket_timeout=30)
         req_id = str(uuid.uuid4())
         rr.rpush("bot:marketing:inbox", json.dumps({"id": req_id, "text": task}, ensure_ascii=False))
         resp = rr.blpop(f"bot:marketing:reply:{req_id}", timeout=240)
@@ -493,7 +501,12 @@ def tool_ask_marketing(inp):
         return f"Fehler bei der Delegation: {e}"
 
 
+TOOLS = TOOLS + SKILL_TOOLS
+
 def run_tool(name, inp):
+    _skill = skill_tool_ausfuehren(name, inp)
+    if _skill is not None:
+        return _skill
     if name == "remember":
         return tool_remember(inp)
     if name == "recall":
@@ -566,9 +579,12 @@ def _ist_leere_ankuendigung(text):
         return False
     if ANNOUNCE_RE.search(t):
         return True
-    # Sehr kurze Absichts-Saetze ohne jedes Ergebnis
-    if len(t) <= 90 and INTENT_RE.match(t):
-        return True
+    # Absichts-Saetze pruefen (auch wenn sie nicht am Anfang stehen)
+    saetze = [s.strip() for s in re.split(r"[.!?]+", t) if s.strip()]
+    if len(t) <= 160:
+        for s in saetze:
+            if len(s) <= 90 and INTENT_RE.match(s):
+                return True
     return False
 
 
@@ -646,9 +662,31 @@ def think(history, user_text):
     return final_text
 
 
+def _antwort_senden(r, queue, text):
+    """Antwort zustellen — auch wenn die Verbindung waehrend langer Arbeit abgelaufen ist."""
+    for versuch in range(3):
+        try:
+            r.rpush(queue, text)
+            r.expire(queue, 300)
+            return True
+        except Exception as e:
+            print(f"  [reply] Versuch {versuch + 1} fehlgeschlagen ({type(e).__name__}) — neue Verbindung", flush=True)
+            try:
+                r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
+                                socket_keepalive=True, health_check_interval=20,
+                                retry_on_timeout=True, socket_timeout=30)
+            except Exception:
+                pass
+            time.sleep(1)
+    print("  [reply] Antwort konnte NICHT zugestellt werden!", flush=True)
+    return False
+
+
 def main():
+    skills_indexieren()
     print("=" * 58, flush=True)
     print("  BUEROFLOW-CEO — Bot am JARVIS-Bus", flush=True)
+    print(f"  Skills    : {skill_banner()}", flush=True)
     print(f"  Modell: {MODEL} | Queue: {INBOX_KEY}", flush=True)
     print(f"  Skill : {'geladen' if len(SKILL) > 100 else 'FEHLT'}", flush=True)
     print("=" * 58, flush=True)
@@ -656,7 +694,9 @@ def main():
     r = None
     for attempt in range(30):
         try:
-            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
+                            socket_keepalive=True, health_check_interval=20,
+                            retry_on_timeout=True, socket_timeout=30)
             r.ping()
             print("  [redis] verbunden", flush=True)
             break
@@ -680,13 +720,11 @@ def main():
             text = (msg.get("text") or "").strip()
             reply_q = REPLY_KEY.format(id=req_id)
             if not text:
-                r.rpush(reply_q, "Leere Anfrage.")
-                r.expire(reply_q, 180)
+                _antwort_senden(r, reply_q, "Leere Anfrage.")
                 continue
             if text.lower() in ("reset", "vergiss alles"):
                 r.delete(HISTORY_KEY)
-                r.rpush(reply_q, "CEO-Kurzzeitgedaechtnis geleert.")
-                r.expire(reply_q, 180)
+                _antwort_senden(r, reply_q, "CEO-Kurzzeitgedaechtnis geleert.")
                 continue
             print(f"  Auftrag: {text[:80]}", flush=True)
             history = load_history(r)
@@ -697,8 +735,7 @@ def main():
                 print(f"  [think] {answer}", flush=True)
             save_history(r, history)
             print(f"  CEO: {answer[:100]}\n", flush=True)
-            r.rpush(reply_q, answer)
-            r.expire(reply_q, 180)
+            _antwort_senden(r, reply_q, answer)
         except KeyboardInterrupt:
             break
         except Exception as e:

@@ -64,7 +64,10 @@ services:
     container_name: jarvis-dashboard
     restart: unless-stopped
     env_file: .env
+    volumes:
+      - ./vault:/app/vault
     ports:
+      - "100.89.106.8:8090:8090" 
       - "127.0.0.1:8090:8090"
     depends_on:
       redis:
@@ -80,6 +83,7 @@ services:
     restart: unless-stopped
     env_file: .env
     volumes:
+      - ./skills-lib:/app/skills-lib:ro
       - ./vault:/app/vault
     depends_on:
       redis:
@@ -101,6 +105,69 @@ services:
         condition: service_healthy
       postgres:
         condition: service_healthy
+    volumes:
+      - ./skills-lib:/app/skills-lib:ro
+    networks:
+      - jarvis-net
+
+  jarvis-marketing:
+    build: ./bots/marketing
+    container_name: jarvis-marketing
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./vault:/app/vault
+      - ./skills-repo/skills:/app/skills:ro
+      - ./brand:/app/brand:ro
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - jarvis-net
+
+  camofox:
+    build: ./camofox
+    container_name: jarvis-camofox
+    restart: unless-stopped
+    environment:
+      - CAMOFOX_CRASH_REPORT_ENABLED=false
+    networks:
+      - jarvis-net
+
+  jarvis-immo:
+    build: ./bots/immo
+    container_name: jarvis-immo
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - jarvis-net
+
+  jarvis-seo:
+    build: ./bots/seo
+    container_name: jarvis-seo
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./vault:/app/vault
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - jarvis-net
+
+  jarvis-telegram:
+    build: ./bots/telegram
+    container_name: jarvis-telegram
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      - redis
+      - postgres
     networks:
       - jarvis-net
 

@@ -100,6 +100,7 @@ services:
     env_file: .env
     volumes:
       - ./vault:/app/vault
+      - ./skills-lib:/app/skills-lib:ro
     depends_on:
       redis:
         condition: service_healthy
