@@ -157,6 +157,17 @@ services:
     networks:
       - jarvis-net
 
+  jarvis-telegram:
+    build: ./bots/telegram
+    container_name: jarvis-telegram
+    restart: unless-stopped
+    env_file: .env
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - jarvis-net
+
 networks:
   jarvis-net:
     driver: bridge
