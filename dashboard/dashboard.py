@@ -14,6 +14,7 @@ import uuid
 from datetime import datetime
 
 import redis
+import requests
 import psycopg2
 import psycopg2.extras
 from fastapi import FastAPI, Body
@@ -29,16 +30,31 @@ PG_PASS = os.getenv("POSTGRES_PASSWORD", "")
 PG_DB   = os.getenv("POSTGRES_DB", "jarvis_brain")
 
 VAULT_DIR = "/app/vault"
+
+# Buroflow-Datenbank (Supabase). Verbindungsstring: Supabase → Settings → Database → URI
+SUPABASE_URL = os.getenv("SUPABASE_DB_URL", "")
+BF_T_WAITLIST = os.getenv("BF_TABLE_WAITLIST", "waitlist")
+BF_T_USERS    = os.getenv("BF_TABLE_USERS", "user_profiles")
+BF_T_SUBS     = os.getenv("BF_TABLE_SUBS", "subscriptions")
+BF_T_GEN      = os.getenv("BF_TABLE_GENERATIONS", "generations")
+BF_T_USAGE    = os.getenv("BF_TABLE_USAGE", "ai_usage")
+
+# Umami (Besucherstatistik). Cloud: https://api.umami.is | Self-hosted: eigene URL
+UMAMI_URL = os.getenv("UMAMI_URL", "https://api.umami.is").rstrip("/")
+UMAMI_KEY = os.getenv("UMAMI_API_KEY", "")
+UMAMI_SITE = os.getenv("UMAMI_WEBSITE_ID", "")
+# Kostenlose Alternative zur API: oeffentlicher Share-Link (Umami Cloud, kein Pro noetig)
+UMAMI_SHARE = os.getenv("UMAMI_SHARE_URL", "").strip().rstrip("/")
 TEXT_EXT = (".md", ".txt", ".json", ".yml", ".yaml", ".csv")
 IMG_EXT  = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
 # Bot-Registry: Queue-Namen + Hierarchie fuers Frontend
 BOTS = {
-    "jarvis":       {"label": "JARVIS",        "inbox": "jarvis:inbox",        "reply": "jarvis:reply:{id}",        "parent": None,           "desc": "orchestrator"},
-    "buroflow-ceo": {"label": "CEO",           "inbox": "bot:ceo:inbox",       "reply": "bot:ceo:reply:{id}",       "parent": "jarvis",       "desc": "strategie & entscheidungen"},
-    "marketing":    {"label": "MARKETING",     "inbox": "bot:marketing:inbox", "reply": "bot:marketing:reply:{id}", "parent": "buroflow-ceo", "desc": "content, creatives, skills"},
-    "immo":         {"label": "IMMO",          "inbox": "bot:immo:inbox",      "reply": "bot:immo:reply:{id}",      "parent": "jarvis",       "desc": "rendite-analysen, telegram"},
-    "seo":          {"label": "SEO",           "inbox": "bot:seo:inbox",       "reply": "bot:seo:reply:{id}",       "parent": "buroflow-ceo", "desc": "gutefrage + quora, entwuerfe"},
+    "jarvis":       {"label": "JARVIS",        "inbox": "jarvis:inbox",        "reply": "jarvis:reply:{id}",        "parent": None,           "desc": "orchestrator",              "history": "jarvis:history"},
+    "buroflow-ceo": {"label": "CEO",           "inbox": "bot:ceo:inbox",       "reply": "bot:ceo:reply:{id}",       "parent": "jarvis",       "desc": "strategie & entscheidungen", "history": "bot:ceo:history"},
+    "marketing":    {"label": "MARKETING",     "inbox": "bot:marketing:inbox", "reply": "bot:marketing:reply:{id}", "parent": "buroflow-ceo", "desc": "content, creatives, skills", "history": "bot:marketing:history"},
+    "immo":         {"label": "IMMO",          "inbox": "bot:immo:inbox",      "reply": "bot:immo:reply:{id}",      "parent": "jarvis",       "desc": "rendite-analysen, telegram", "history": "bot:immo:history"},
+    "seo":          {"label": "SEO",           "inbox": "bot:seo:inbox",       "reply": "bot:seo:reply:{id}",       "parent": "buroflow-ceo", "desc": "gutefrage + quora, entwuerfe", "history": "bot:seo:history"},
 }
 
 app = FastAPI()
@@ -49,9 +65,11 @@ def pg():
                             password=PG_PASS, dbname=PG_DB, connect_timeout=5)
 
 
-def rds():
+def rds(socket_timeout=15):
     return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
-                       socket_connect_timeout=3)
+                       socket_connect_timeout=5, socket_timeout=socket_timeout,
+                       socket_keepalive=True, health_check_interval=20,
+                       retry_on_timeout=True)
 
 
 def count_listeners():
@@ -147,12 +165,57 @@ def chat(payload: dict = Body(...)):
         r = rds()
         req_id = str(uuid.uuid4())
         r.rpush(meta["inbox"], json.dumps({"id": req_id, "text": text}, ensure_ascii=False))
-        resp = r.blpop(meta["reply"].format(id=req_id), timeout=240)
-        if resp is None:
-            return JSONResponse({"answer": "(Timeout — antwortet der Bot-Container?)"})
-        return JSONResponse({"answer": resp[1]})
+        return JSONResponse({"id": req_id, "target": target})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/chat/history")
+def chat_history(target: str = "jarvis", n: int = 20):
+    """Liest den Gespraechsverlauf des Bots aus Redis (das, woran er sich erinnert)."""
+    target = (target or "").strip().lower()
+    if target not in BOTS:
+        return JSONResponse({"messages": []})
+    key = BOTS[target].get("history")
+    if not key:
+        return JSONResponse({"messages": []})
+    try:
+        r = rds()
+        raw = r.get(key)
+        if not raw:
+            return JSONResponse({"messages": []})
+        verlauf = json.loads(raw)
+    except Exception as e:
+        return JSONResponse({"messages": [], "error": str(e)[:120]})
+    out = []
+    for m in verlauf[-min(max(n, 1), 60):]:
+        inhalt = m.get("content")
+        if isinstance(inhalt, list):
+            inhalt = " ".join(b.get("text", "") for b in inhalt if isinstance(b, dict) and b.get("type") == "text")
+        if not isinstance(inhalt, str) or not inhalt.strip():
+            continue
+        # Auto-Recall-Anhaenge nicht anzeigen
+        inhalt = inhalt.split("\n\n[AUTO-RECALL")[0].strip()
+        out.append({"role": m.get("role", "user"), "text": inhalt})
+    return JSONResponse({"messages": out, "target": target})
+
+
+@app.get("/api/chat/poll")
+def chat_poll(target: str = "jarvis", id: str = ""):
+    """Holt die Antwort ab, sobald sie da ist. Blockiert nur kurz — nie minutenlang."""
+    target = (target or "").strip().lower()
+    if target not in BOTS or not id:
+        return JSONResponse({"status": "error", "error": "Ziel oder ID fehlt"}, status_code=400)
+    key = BOTS[target]["reply"].format(id=id)
+    try:
+        r = rds(socket_timeout=20)
+        resp = r.blpop(key, timeout=8)
+        if resp is None:
+            return JSONResponse({"status": "pending"})
+        return JSONResponse({"status": "done", "answer": resp[1]})
+    except Exception as e:
+        # Verbindungsproblem heisst nicht, dass der Bot fertig ist -> weiter pollen
+        return JSONResponse({"status": "pending", "hinweis": str(e)[:120]})
 
 
 def _safe_vault_path(rel: str) -> str:
@@ -162,6 +225,192 @@ def _safe_vault_path(rel: str) -> str:
     if not (full == root or full.startswith(root + os.sep)):
         return ""
     return full
+
+
+def bf_conn():
+    if not SUPABASE_URL:
+        raise RuntimeError("SUPABASE_DB_URL fehlt")
+    return psycopg2.connect(SUPABASE_URL, connect_timeout=8)
+
+
+def _one(cur, sql, default=0):
+    """Einzelwert holen; bei fehlender Tabelle/Spalte sauber default zurueckgeben."""
+    try:
+        cur.execute(sql)
+        row = cur.fetchone()
+        if not row or row[0] is None:
+            return default
+        return row[0]
+    except Exception:
+        cur.connection.rollback()
+        return default
+
+
+def _rows(cur, sql):
+    try:
+        cur.execute(sql)
+        return cur.fetchall()
+    except Exception:
+        cur.connection.rollback()
+        return []
+
+
+@app.get("/api/buroflow")
+def buroflow():
+    out = {"ok": False, "tables": [], "error": None}
+    try:
+        conn = bf_conn()
+    except Exception as e:
+        out["error"] = str(e)
+        return JSONResponse(out)
+    try:
+        with conn, conn.cursor() as cur:
+            out["tables"] = [r[0] for r in _rows(cur,
+                "SELECT table_name FROM information_schema.tables "
+                "WHERE table_schema='public' ORDER BY table_name")]
+
+            out["waitlist"] = int(_one(cur, f"SELECT COUNT(*) FROM {BF_T_WAITLIST}"))
+            out["waitlist_7d"] = int(_one(cur,
+                f"SELECT COUNT(*) FROM {BF_T_WAITLIST} WHERE created_at > now() - interval '7 days'"))
+            out["users"] = int(_one(cur, f"SELECT COUNT(*) FROM {BF_T_USERS}"))
+            if not out["users"]:
+                out["users"] = int(_one(cur, "SELECT COUNT(*) FROM users"))
+            out["users_7d"] = int(_one(cur,
+                f"SELECT COUNT(*) FROM {BF_T_USERS} WHERE created_at > now() - interval '7 days'"))
+            out["subs"] = int(_one(cur, f"SELECT COUNT(*) FROM {BF_T_SUBS} WHERE status = 'active'"))
+            out["generations"] = int(_one(cur, f"SELECT COUNT(*) FROM {BF_T_GEN}"))
+            out["gen_ok"] = None  # wird unten gesetzt
+            out["gen_7d"] = int(_one(cur,
+                f"SELECT COUNT(*) FROM {BF_T_GEN} WHERE created_at > now() - interval '7 days'"))
+            def _first(*sqls):
+                """Erste Query, die einen Wert liefert (Tabellen-/Spaltennamen unsicher)."""
+                for s in sqls:
+                    v = _one(cur, s, None)
+                    if v is not None:
+                        return v
+                return 0
+
+            out["tokens_in"] = int(_first(
+                f"SELECT SUM(input_tokens) FROM {BF_T_USAGE}",
+                f"SELECT SUM(tokens_in) FROM {BF_T_USAGE}",
+                f"SELECT SUM(input_tokens) FROM {BF_T_GEN}"))
+            out["tokens_out"] = int(_first(
+                f"SELECT SUM(output_tokens) FROM {BF_T_USAGE}",
+                f"SELECT SUM(tokens_out) FROM {BF_T_USAGE}",
+                f"SELECT SUM(output_tokens) FROM {BF_T_GEN}"))
+            out["cost_total"] = float(_first(
+                f"SELECT SUM(cost_usd) FROM {BF_T_USAGE}",
+                f"SELECT SUM(cost) FROM {BF_T_USAGE}",
+                f"SELECT SUM(cost_usd) FROM {BF_T_GEN}"))
+            out["cost_7d"] = float(_first(
+                f"SELECT SUM(cost_usd) FROM {BF_T_USAGE} WHERE created_at > now() - interval '7 days'",
+                f"SELECT SUM(cost) FROM {BF_T_USAGE} WHERE created_at > now() - interval '7 days'",
+                f"SELECT SUM(cost_usd) FROM {BF_T_GEN} WHERE created_at > now() - interval '7 days'"))
+            out["ki_calls"] = int(_first(f"SELECT COUNT(*) FROM {BF_T_USAGE}"))
+            gok = _first(f"SELECT COUNT(*) FROM {BF_T_GEN} WHERE success = true",
+                         f"SELECT COUNT(*) FROM {BF_T_GEN} WHERE status = 'success'",
+                         f"SELECT COUNT(*) FROM {BF_T_GEN} WHERE error IS NULL")
+            out["gen_ok"] = int(gok) if gok else out.get("generations", 0)
+            out["active_users_7d"] = int(_one(cur,
+                f"SELECT COUNT(DISTINCT user_id) FROM {BF_T_GEN} WHERE created_at > now() - interval '7 days'"))
+
+            out["per_tool"] = [{"tool": r[0] or "?", "n": int(r[1])} for r in _rows(cur,
+                f"SELECT tool, COUNT(*) FROM {BF_T_GEN} GROUP BY tool ORDER BY COUNT(*) DESC LIMIT 8")]
+            out["per_day"] = [{"d": r[0].strftime("%d.%m."), "n": int(r[1])} for r in _rows(cur,
+                f"SELECT created_at::date AS d, COUNT(*) FROM {BF_T_GEN} "
+                f"WHERE created_at > now() - interval '14 days' GROUP BY d ORDER BY d")]
+            out["per_plan"] = [{"plan": r[0] or "?", "n": int(r[1])} for r in _rows(cur,
+                f"SELECT plan, COUNT(*) FROM {BF_T_SUBS} WHERE status='active' GROUP BY plan ORDER BY plan")]
+        conn.close()
+        out["ok"] = True
+    except Exception as e:
+        out["error"] = str(e)
+        try:
+            conn.close()
+        except Exception:
+            pass
+    return JSONResponse(out)
+
+
+@app.get("/api/umami")
+def umami(tage: int = 7):
+    out = {"ok": False, "error": None, "share": UMAMI_SHARE}
+    if not UMAMI_KEY or not UMAMI_SITE:
+        out["error"] = ("Kein API-Zugang (Umami Cloud erlaubt das nur im Pro-Plan)."
+                        if not UMAMI_SHARE else "share")
+        return JSONResponse(out)
+    import time as _t
+    end = int(_t.time() * 1000)
+    start = end - tage * 86400 * 1000
+    headers = {"x-umami-api-key": UMAMI_KEY, "Authorization": f"Bearer {UMAMI_KEY}",
+               "Accept": "application/json"}
+    base = f"{UMAMI_URL}/v1/websites/{UMAMI_SITE}"
+
+    def _get(path, params):
+        try:
+            r = requests.get(base + path, params=params, headers=headers, timeout=15)
+            if r.status_code >= 400:
+                return None, f"HTTP {r.status_code}: {r.text[:120]}"
+            return r.json(), None
+        except Exception as e:
+            return None, f"{type(e).__name__}: {e}"
+
+    stats, err = _get("/stats", {"startAt": start, "endAt": end})
+    if err:
+        out["error"] = err
+        return JSONResponse(out)
+
+    def _v(key):
+        d = (stats or {}).get(key) or {}
+        if isinstance(d, dict):
+            return float(d.get("value") or 0), float(d.get("prev") or 0)
+        return float(d or 0), 0.0
+
+    pv, pv_p = _v("pageviews")
+    vis, vis_p = _v("visitors")
+    ses, ses_p = _v("visits")
+    bounces, _ = _v("bounces")
+    tt, _ = _v("totaltime")
+
+    out.update({
+        "tage": tage,
+        "visitors": int(vis), "visitors_prev": int(vis_p),
+        "pageviews": int(pv), "pageviews_prev": int(pv_p),
+        "visits": int(ses), "visits_prev": int(ses_p),
+        "bounce_pct": round(bounces / ses * 100) if ses else 0,
+        "avg_sec": round(tt / ses) if ses else 0,
+    })
+
+    pages, _e1 = _get("/metrics", {"startAt": start, "endAt": end, "type": "url", "limit": 6})
+    refs, _e2 = _get("/metrics", {"startAt": start, "endAt": end, "type": "referrer", "limit": 6})
+    out["pages"] = [{"x": p.get("x") or "/", "y": int(p.get("y") or 0)} for p in (pages or [])][:6]
+    out["refs"] = [{"x": p.get("x") or "direkt", "y": int(p.get("y") or 0)} for p in (refs or [])][:6]
+    out["ok"] = True
+    return JSONResponse(out)
+
+
+@app.get("/api/jobs")
+def jobs():
+    try:
+        conn = pg()
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, titel, schritte, aktueller_schritt, status, "
+                        "to_char(updated_at,'HH24:MI') AS zeit FROM jobs "
+                        "WHERE status IN ('offen','laeuft') OR updated_at > now() - interval '2 hours' "
+                        "ORDER BY id DESC LIMIT 6")
+            rows = cur.fetchall()
+        conn.close()
+        out = []
+        for r in rows:
+            n = len(r["schritte"] or [])
+            i = r["aktueller_schritt"] or 0
+            out.append({"id": r["id"], "titel": r["titel"], "status": r["status"],
+                        "schritt": min(i + 1, n) if r["status"] == "laeuft" else i,
+                        "gesamt": n, "zeit": r["zeit"],
+                        "aktuell": (r["schritte"] or [""])[i] if (r["status"] == "laeuft" and i < n) else ""})
+        return JSONResponse({"jobs": out})
+    except Exception as e:
+        return JSONResponse({"jobs": [], "error": str(e)})
 
 
 @app.get("/api/memory")
@@ -323,6 +572,54 @@ HTML = """<!DOCTYPE html>
   .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--red); flex: none; }
   .dot.on { background: var(--green); box-shadow: 0 0 9px rgba(93, 202, 165, .8); }
 
+  /* Bueroflow-Reiter */
+  .bfView { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden;
+            scrollbar-width: thin; padding: 88px 26px 34px; z-index: 1; }
+  .bfInner { max-width: 1080px; margin: 0 auto; }
+  .bfHero { backdrop-filter: blur(16px); border: 0.5px solid rgba(93, 202, 165, .32);
+            border-radius: 16px; padding: 20px 24px; margin-bottom: 14px; position: relative; overflow: hidden;
+            background: linear-gradient(150deg, rgba(93, 202, 165, .16), rgba(9, 22, 33, .6));
+            box-shadow: 0 6px 28px rgba(0, 0, 0, .32), inset 0 1px 0 rgba(255, 255, 255, .06);
+            display: flex; justify-content: space-between; align-items: flex-start; gap: 20px; flex-wrap: wrap; }
+  .bfHero .lbl { font-size: 9.5px; letter-spacing: .22em; color: var(--dim); margin-bottom: 8px; }
+  .bfHero .big { font-size: 34px; font-weight: 600; color: #f2fbff; letter-spacing: -.01em;
+                 text-shadow: 0 0 22px rgba(93, 202, 165, .28); }
+  .bfHero .sub { font-size: 10px; color: var(--dim); margin-top: 6px; }
+  .bfHero .big.green { color: var(--green); }
+  .bfGrid { display: grid; grid-template-columns: repeat(auto-fit, minmax(168px, 1fr)); gap: 12px; margin-bottom: 16px; }
+  .bfCard { backdrop-filter: blur(14px); background: linear-gradient(160deg, rgba(89, 215, 255, .09), rgba(9, 22, 33, .58));
+            border: 0.5px solid rgba(89, 215, 255, .2); border-radius: 13px; padding: 14px 16px;
+            box-shadow: 0 4px 18px rgba(0, 0, 0, .28), inset 0 1px 0 rgba(255, 255, 255, .05); }
+  .bfCard .k { font-size: 9px; letter-spacing: .2em; color: var(--dim); margin-bottom: 9px; }
+  .bfCard .v { font-size: 24px; font-weight: 600; color: #f2fbff; font-variant-numeric: tabular-nums; }
+  .bfCard .s { font-size: 9.5px; color: var(--dim); margin-top: 5px; }
+  .bfSection { font-size: 9.5px; letter-spacing: .3em; color: var(--green); margin: 22px 0 12px; }
+  .bfWide { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 12px; }
+  .bfPanel { backdrop-filter: blur(14px); background: rgba(9, 22, 33, .5);
+             border: 0.5px solid rgba(89, 215, 255, .15); border-radius: 13px; padding: 16px 18px; }
+  .bfPanel .t { font-size: 10px; letter-spacing: .18em; color: var(--dim); margin-bottom: 14px; }
+  .bfBar { display: flex; align-items: center; gap: 10px; margin-bottom: 9px; font-size: 10.5px; }
+  .bfBar .n { width: 108px; color: var(--txt); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .bfBar .track { flex: 1; height: 9px; background: rgba(255, 255, 255, .05); border-radius: 5px; overflow: hidden; }
+  .bfBar .fill { height: 100%; border-radius: 5px; transition: width .6s cubic-bezier(.2,.8,.2,1); }
+  .bfBar .val { width: 34px; text-align: right; color: var(--dim); font-variant-numeric: tabular-nums; }
+  .bfSpark { display: flex; gap: 3px; align-items: flex-end; height: 74px; margin-top: 6px; }
+  .bfSpark span { flex: 1; background: linear-gradient(180deg, rgba(93,202,165,.85), rgba(93,202,165,.25));
+                  border-radius: 3px 3px 0 0; min-height: 2px; }
+  .bfSpark .lbls { display: flex; }
+  .bfDays { display: flex; justify-content: space-between; font-size: 8px; color: var(--dim); margin-top: 6px; }
+  .bfRing { display: flex; align-items: center; justify-content: center; gap: 20px; }
+  .bfRing .txt { text-align: center; }
+  .bfRing .pct { font-size: 26px; font-weight: 600; color: var(--green); }
+  .bfRing .cap { font-size: 9px; letter-spacing: .2em; color: var(--dim); margin-top: 4px; }
+  .bfFunnel .step { margin-bottom: 13px; }
+  .bfFunnel .head { display: flex; justify-content: space-between; font-size: 10.5px; margin-bottom: 5px; }
+  .bfFunnel .head b { color: var(--txt); font-weight: 400; }
+  .bfFunnel .head span { color: var(--dim); font-size: 9.5px; }
+  .bfErr { border: 0.5px solid rgba(255, 95, 107, .4); background: rgba(60, 10, 16, .5);
+           border-radius: 12px; padding: 16px 18px; color: #ffd6da; font-size: 11px; line-height: 1.7; }
+  .bfErr b { color: #ff9aa4; font-weight: 400; }
+
   /* Agenten-Reiter: Org-Chart auf eigenem, blickdichtem Grund (keine Kugel im Hintergrund) */
   .agentsView { position: absolute; inset: 0; overflow: hidden;
                 display: flex; padding: 90px 26px 30px; z-index: 1; }
@@ -397,6 +694,19 @@ HTML = """<!DOCTYPE html>
             max-height: 130px; overflow: hidden; }
   .logbox div { color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .logbox b { color: var(--cyan); font-weight: 400; }
+  .jobitem { margin-bottom: 10px; }
+  .jobitem:last-child { margin-bottom: 0; }
+  .jobtop { display: flex; justify-content: space-between; font-size: 10.5px; margin-bottom: 4px; }
+  .jobtop b { color: var(--txt); font-weight: 400; overflow: hidden; text-overflow: ellipsis;
+              white-space: nowrap; max-width: 165px; }
+  .jobtop span { color: var(--dim); font-size: 9px; flex: none; }
+  .jobbar { height: 5px; background: rgba(255,255,255,.06); border-radius: 3px; overflow: hidden; }
+  .jobbar i { display: block; height: 100%; background: var(--cyan); border-radius: 3px;
+              transition: width .6s cubic-bezier(.2,.8,.2,1); }
+  .jobbar.fertig i { background: var(--green); }
+  .jobbar.fehler i { background: var(--red); }
+  .jobstep { font-size: 9px; color: var(--dim); margin-top: 4px; overflow: hidden;
+             text-overflow: ellipsis; white-space: nowrap; }
 
   /* Chat rechts */
   .chat { position: absolute; top: 84px; right: 24px; bottom: 24px; width: 340px;
@@ -420,6 +730,8 @@ HTML = """<!DOCTYPE html>
   .chatbar input { flex: 1; }
   .chatbar input:focus { border-color: var(--cyan-dim); box-shadow: 0 0 12px rgba(89, 215, 255, .15); }
   .typing { font-size: 10px; color: var(--dim); letter-spacing: .3em; height: 14px; margin-top: 4px; }
+  .verlaufmark { text-align: center; font-size: 8.5px; letter-spacing: .25em; color: var(--dim);
+                 margin: 6px 0 2px; opacity: .55; }
 
   /* Vault-Modal */
   .vtab { position: absolute; left: 0; top: 50%; transform: translateY(-50%);
@@ -526,6 +838,7 @@ HTML = """<!DOCTYPE html>
     <div class="viewtabs">
       <span class="vt active" data-view="0">CORE</span>
       <span class="vt" data-view="2">AGENTEN</span>
+      <span class="vt" data-view="3">BÜROFLOW</span>
       <span class="vt" data-view="1">GEHIRN</span>
     </div>
     <div class="clock"><span id="time">--:--:--</span><small id="date"></small></div>
@@ -542,10 +855,19 @@ HTML = """<!DOCTYPE html>
       <div class="kv"><span class="k">QUEUE</span><span class="v" id="s-queue">0</span></div>
     </div>
 
+    <div class="panel" id="jobPanel" style="display:none">
+      <h3>AUFTRÄGE <span class="chev"></span></h3>
+      <div id="joblist"></div>
+    </div>
+
     <div class="panel">
-      <h3>AKTIVITAET <span class="chev"></span></h3>
+      <h3>AKTIVITÄT <span class="chev"></span></h3>
       <div class="logbox" id="log"><div class="empty">-</div></div>
     </div>
+  </div>
+
+  <div class="bfView" id="bfView" style="display:none">
+    <div class="bfInner" id="bfInner"><div class="empty">Lade Kennzahlen …</div></div>
   </div>
 
   <div class="agentsView" id="agentsView" style="display:none">
@@ -769,6 +1091,195 @@ function draw() {
   requestAnimationFrame(draw);
 }
 draw();
+
+/* ── Bueroflow-Ansicht ── */
+var bfTimer = null;
+var BF_COLORS = ['#5DCAA5', '#59d7ff', '#c792ea', '#ffd479', '#ff8fa3'];
+
+function bfNum(n) { return (n || 0).toLocaleString('de-DE'); }
+function bfEur(n) { return (n || 0).toLocaleString('de-DE', {minimumFractionDigits: 2, maximumFractionDigits: 2}) + ' \u20ac'; }
+function bfUsd(n) { return '$' + (n || 0).toFixed(4); }
+
+function bfTrend(now, prev) {
+  if (!prev) return '';
+  var diff = Math.round((now - prev) / prev * 100);
+  if (!isFinite(diff) || diff === 0) return '';
+  var up = diff > 0;
+  return '<span style="font-size:9px;margin-left:7px;color:' + (up ? 'var(--green)' : '#ff8fa3') + '">' +
+         (up ? '\u2191' : '\u2193') + ' ' + Math.abs(diff) + ' %</span>';
+}
+
+async function loadUmami() {
+  var box = document.getElementById('bfUmami');
+  if (!box) return;
+  try {
+    var u = await (await fetch('/api/umami?tage=7')).json();
+    if (!u.ok) {
+      if (u.share) {
+        box.innerHTML =
+          '<div class="bfPanel" style="padding:0;overflow:hidden">' +
+          '<iframe src="' + esc(u.share) + '" title="Umami" ' +
+          'style="width:100%;height:720px;border:0;border-radius:12px;background:#0b1620" ' +
+          'loading="lazy" referrerpolicy="no-referrer"></iframe></div>' +
+          '<div style="font-size:9px;color:var(--dim);margin-top:8px">' +
+          'Live aus Umami \u00b7 <a href="' + esc(u.share) + '" target="_blank" rel="noreferrer" ' +
+          'style="color:var(--cyan);text-decoration:none">in neuem Tab \u00f6ffnen</a></div>';
+      } else {
+        box.innerHTML = '<div class="bfPanel"><div class="t">BESUCHER</div>' +
+          '<div class="empty" style="line-height:1.7">Nicht verbunden.<br>' + esc(u.error || '') + '</div></div>';
+      }
+      return;
+    }
+    var mins = Math.floor((u.avg_sec || 0) / 60), secs = (u.avg_sec || 0) % 60;
+    var h = '<div class="bfGrid">' +
+      '<div class="bfCard"><div class="k">BESUCHER 7T</div><div class="v">' + bfNum(u.visitors) +
+      bfTrend(u.visitors, u.visitors_prev) + '</div><div class="s">eindeutige Personen</div></div>' +
+      '<div class="bfCard"><div class="k">SITZUNGEN</div><div class="v">' + bfNum(u.visits) +
+      bfTrend(u.visits, u.visits_prev) + '</div><div class="s">Besuche gesamt</div></div>' +
+      '<div class="bfCard"><div class="k">SEITENAUFRUFE</div><div class="v">' + bfNum(u.pageviews) +
+      bfTrend(u.pageviews, u.pageviews_prev) + '</div><div class="s">Views</div></div>' +
+      '<div class="bfCard"><div class="k">ABSPRUNGRATE</div><div class="v">' + (u.bounce_pct || 0) + ' %</div>' +
+      '<div class="s">\u00d8 Dauer ' + mins + 'm ' + secs + 's</div></div>' +
+      '</div>';
+
+    function liste(titel, arr, farbe) {
+      var max = Math.max.apply(null, (arr || []).map(function(x) { return x.y; }).concat([1]));
+      var inner = (arr || []).length ? arr.map(function(x) {
+        var name = String(x.x || '/').replace(/^https?:\\/\\//, '');
+        if (name.length > 24) name = name.substring(0, 23) + '\u2026';
+        return '<div class="bfBar"><span class="n" title="' + esc(String(x.x)) + '">' + esc(name) + '</span>' +
+          '<span class="track"><span class="fill" style="width:' + Math.round(x.y / max * 100) +
+          '%;background:' + farbe + '"></span></span><span class="val">' + x.y + '</span></div>';
+      }).join('') : '<div class="empty">Noch keine Daten.</div>';
+      return '<div class="bfPanel"><div class="t">' + titel + '</div>' + inner + '</div>';
+    }
+    h += '<div class="bfWide">' + liste('MEISTBESUCHTE SEITEN', u.pages, '#5DCAA5') +
+         liste('WOHER DIE BESUCHER KOMMEN', u.refs, '#59d7ff') + '</div>';
+    box.innerHTML = h;
+  } catch (e) {
+    box.innerHTML = '<div class="bfPanel"><div class="empty">Umami nicht erreichbar.</div></div>';
+  }
+}
+
+async function loadBuroflow() {
+  var box = document.getElementById('bfInner');
+  try {
+    var d = await (await fetch('/api/buroflow')).json();
+    if (!d.ok) {
+      box.innerHTML = '<div class="bfErr"><b>Keine Verbindung zur Bueroflow-Datenbank.</b><br>' +
+        esc(d.error || 'unbekannter Fehler') +
+        '<br><br>Pruefe SUPABASE_DB_URL in der .env auf dem Server.</div>';
+      return;
+    }
+    var gen = d.generations || 0;
+    var ok = d.gen_ok || 0;
+    var quote = gen ? Math.round(ok / gen * 100) : 0;
+    var proGen = ok ? (d.cost_total || 0) / ok : 0;
+    var eurKurs = 0.92;
+
+    var html = '';
+    // Hero
+    html += '<div class="bfHero">' +
+      '<div><div class="lbl">CLAUDE-KOSTEN GESAMT</div>' +
+      '<div class="big green">' + bfUsd(d.cost_total) + '</div>' +
+      '<div class="sub">\u2248 ' + bfEur((d.cost_total || 0) * eurKurs) + ' \u00b7 7 Tage: ' + bfUsd(d.cost_7d) + '</div></div>' +
+      '<div style="text-align:right"><div class="lbl">GENERIERUNGEN</div>' +
+      '<div class="big">' + bfNum(gen) + '</div>' +
+      '<div class="sub">' + bfNum(d.gen_7d) + ' in 7 Tagen \u00b7 \u00d8 ' + bfUsd(proGen) + ' pro Stueck</div></div></div>';
+
+    // KPI-Karten
+    html += '<div class="bfGrid">' +
+      '<div class="bfCard"><div class="k">WARTELISTE</div><div class="v">' + bfNum(d.waitlist) + '</div>' +
+      '<div class="s">+' + bfNum(d.waitlist_7d) + ' in 7 Tagen</div></div>' +
+      '<div class="bfCard"><div class="k">REGISTRIERTE NUTZER</div><div class="v">' + bfNum(d.users) + '</div>' +
+      '<div class="s">+' + bfNum(d.users_7d) + ' in 7 Tagen</div></div>' +
+      '<div class="bfCard"><div class="k">AKTIVE ABOS</div><div class="v">' + bfNum(d.subs) + '</div>' +
+      '<div class="s">zahlende Kunden</div></div>' +
+      '<div class="bfCard"><div class="k">AKTIVE NUTZER 7T</div><div class="v">' + bfNum(d.active_users_7d) + '</div>' +
+      '<div class="s">mit mind. 1 Generierung</div></div>' +
+      '</div>';
+
+    // Nutzung
+    html += '<div class="bfSection">NUTZUNG &amp; KI</div><div class="bfWide">';
+    var pt = d.per_tool || [];
+    var maxT = Math.max.apply(null, pt.map(function(x) { return x.n; }).concat([1]));
+    html += '<div class="bfPanel"><div class="t">GENERIERUNGEN PRO TOOL</div>';
+    html += pt.length ? pt.map(function(x, i) {
+      return '<div class="bfBar"><span class="n">' + esc(x.tool) + '</span>' +
+        '<span class="track"><span class="fill" style="width:' + Math.round(x.n / maxT * 100) + '%;background:' +
+        BF_COLORS[i % BF_COLORS.length] + '"></span></span><span class="val">' + x.n + '</span></div>';
+    }).join('') : '<div class="empty">Noch keine Daten.</div>';
+    html += '</div>';
+
+    html += '<div class="bfPanel"><div class="t">KI-ERFOLGSQUOTE</div><div class="bfRing">' +
+      '<svg width="112" height="112" viewBox="0 0 112 112">' +
+      '<circle cx="56" cy="56" r="46" fill="none" stroke="rgba(255,255,255,.07)" stroke-width="11"/>' +
+      '<circle cx="56" cy="56" r="46" fill="none" stroke="#5DCAA5" stroke-width="11" stroke-linecap="round" ' +
+      'stroke-dasharray="' + (quote / 100 * 289).toFixed(1) + ' 289" transform="rotate(-90 56 56)"/></svg>' +
+      '<div class="txt"><div class="pct">' + quote + ' %</div><div class="cap">' + bfNum(ok) + ' OK \u00b7 ' +
+      bfNum(gen - ok) + ' FEHLER</div></div></div></div>';
+    html += '</div>';
+
+    // Verlauf + Token
+    html += '<div class="bfWide" style="margin-top:12px">';
+    var pd = d.per_day || [];
+    var maxD = Math.max.apply(null, pd.map(function(x) { return x.n; }).concat([1]));
+    html += '<div class="bfPanel"><div class="t">GENERIERUNGEN PRO TAG (14 TAGE)</div>';
+    if (pd.length) {
+      html += '<div class="bfSpark">' + pd.map(function(x) {
+        return '<span style="height:' + Math.max(2, Math.round(x.n / maxD * 70)) + 'px" title="' + x.d + ': ' + x.n + '"></span>';
+      }).join('') + '</div><div class="bfDays"><span>' + esc(pd[0].d) + '</span><span>' +
+        esc(pd[pd.length - 1].d) + '</span></div>';
+    } else { html += '<div class="empty">Noch keine Daten.</div>'; }
+    html += '</div>';
+
+    html += '<div class="bfPanel"><div class="t">TOKEN GESAMT</div>' +
+      '<div class="bfBar"><span class="n">Input</span><span class="track"><span class="fill" style="width:100%;background:#59d7ff"></span></span>' +
+      '<span class="val" style="width:auto">' + bfNum(d.tokens_in) + '</span></div>' +
+      '<div class="bfBar"><span class="n">Output</span><span class="track"><span class="fill" style="width:' +
+      Math.round((d.tokens_out || 0) / Math.max(d.tokens_in || 1, 1) * 100) + '%;background:#c792ea"></span></span>' +
+      '<span class="val" style="width:auto">' + bfNum(d.tokens_out) + '</span></div>' +
+      '<div class="s" style="font-size:9.5px;color:var(--dim);margin-top:12px">Kosten 7 Tage: ' + bfUsd(d.cost_7d) +
+      ' \u00b7 gesamt: ' + bfUsd(d.cost_total) + '</div></div>';
+    html += '</div>';
+
+    // Funnel + Plaene
+    html += '<div class="bfSection">WACHSTUM</div><div class="bfWide">';
+    var wl = d.waitlist || 0, us = d.users || 0, sb = d.subs || 0;
+    var base = Math.max(wl, us, sb, 1);
+    function step(name, val, ref, refName) {
+      var pct = ref ? Math.round(val / ref * 1000) / 10 : 0;
+      return '<div class="step"><div class="head"><b>' + name + '</b><span>' + bfNum(val) +
+        (refName ? ' \u00b7 ' + pct + ' % der ' + refName : '') + '</span></div>' +
+        '<div class="bfBar" style="margin:0"><span class="track"><span class="fill" style="width:' +
+        Math.round(val / base * 100) + '%;background:#5DCAA5"></span></span></div></div>';
+    }
+    html += '<div class="bfPanel bfFunnel"><div class="t">CONVERSION-FUNNEL</div>' +
+      step('Warteliste', wl, 0, '') + step('Registriert', us, wl, 'Warteliste') +
+      step('Zahlend', sb, us, 'Registrierten') + '</div>';
+
+    var pp = d.per_plan || [];
+    html += '<div class="bfPanel"><div class="t">AKTIVE ABOS NACH PLAN</div>';
+    html += pp.length ? pp.map(function(x, i) {
+      return '<div class="bfBar"><span class="n">' + esc(x.plan) + '</span>' +
+        '<span class="track"><span class="fill" style="width:' + Math.round(x.n / Math.max(sb, 1) * 100) +
+        '%;background:' + BF_COLORS[i % BF_COLORS.length] + '"></span></span><span class="val">' + x.n + '</span></div>';
+    }).join('') : '<div class="empty">Noch keine aktiven Abos.</div>';
+    html += '</div></div>';
+
+    html += '<div class="bfSection">BESUCHER (UMAMI)</div><div id="bfUmami">' +
+      '<div class="bfPanel"><div class="empty">Lade Besucherdaten...</div></div></div>';
+
+    html += '<div style="font-size:9px;color:var(--dim);margin-top:18px;line-height:1.7">' +
+      'Direkt aus Supabase \u00b7 Stand ' + new Date().toLocaleString('de-DE') +
+      ' \u00b7 Tabellen: ' + esc((d.tables || []).join(', ') || '-') + '</div>';
+
+    box.innerHTML = html;
+    loadUmami();
+  } catch (e) {
+    box.innerHTML = '<div class="bfErr"><b>Fehler beim Laden.</b><br>' + esc(String(e)) + '</div>';
+  }
+}
 
 /* ── Gehirn-View (Memory-Graph, Obsidian-Style) ── */
 var brainCanvas = document.getElementById('brain');
@@ -1066,7 +1577,7 @@ function drawBrain() {
     bctx.font = '11px Consolas, monospace';
     bctx.textAlign = 'center';
     bctx.fillStyle = 'rgba(120, 170, 200, .6)';
-    bctx.fillText('LADE GEDAECHTNIS...', brainCanvas.width / 2, brainCanvas.height / 2);
+    bctx.fillText('LADE GEDÄCHTNIS …', brainCanvas.width / 2, brainCanvas.height / 2);
     brainAnim = requestAnimationFrame(drawBrain);
     return;
   }
@@ -1269,7 +1780,7 @@ document.getElementById('bdclose').addEventListener('click', function() {
   document.getElementById('braindetail').style.display = 'none';
 });
 
-var VIEW_ORDER = [0, 2, 1];
+var VIEW_ORDER = [0, 2, 3, 1];
 function setView(v) {
   currentView = v;
   document.querySelectorAll('.vt').forEach(function(t) {
@@ -1277,15 +1788,26 @@ function setView(v) {
   });
   var brainMode = (v === 1);
   var agentMode = (v === 2);
+  var bfMode = (v === 3);
+  var overlay = (brainMode || agentMode || bfMode);
   brainCanvas.style.display = (brainMode || agentMode) ? 'block' : 'none';
-  canvas.style.display = (brainMode || agentMode) ? 'none' : 'block';
-  document.querySelector('.col-left').style.display = (brainMode || agentMode) ? 'none' : 'flex';
-  document.querySelector('.chat').style.display = (brainMode || agentMode) ? 'none' : 'flex';
-  document.getElementById('vtab').style.display = (brainMode || agentMode) ? 'none' : 'block';
+  canvas.style.display = overlay ? 'none' : 'block';
+  document.querySelector('.col-left').style.display = overlay ? 'none' : 'flex';
+  document.querySelector('.chat').style.display = overlay ? 'none' : 'flex';
+  document.getElementById('vtab').style.display = overlay ? 'none' : 'block';
+  document.getElementById('bfView').style.display = bfMode ? 'block' : 'none';
   document.getElementById('agentsView').style.display = agentMode ? 'block' : 'none';
   if (agentMode) { document.getElementById('agChart').innerHTML = ''; agLastHash = ''; renderAgents(lastBots); }
   document.getElementById('brainlegend').style.display = brainMode ? 'flex' : 'none';
   if (!brainMode) document.getElementById('braindetail').style.display = 'none';
+  if (bfMode) {
+    loadBuroflow();
+    if (bfTimer) clearInterval(bfTimer);
+    bfTimer = setInterval(loadBuroflow, 60000);
+  } else if (bfTimer) {
+    clearInterval(bfTimer);
+    bfTimer = null;
+  }
   if (brainMode || agentMode) {
     if (brainMode) loadBrain(false);
     if (brainAnim) cancelAnimationFrame(brainAnim);
@@ -1514,6 +2036,25 @@ function renderAgents(bots) {
   chart.innerHTML = html;
 }
 
+async function loadJobs() {
+  try {
+    var d = await (await fetch('/api/jobs')).json();
+    var js = d.jobs || [];
+    var panel = document.getElementById('jobPanel');
+    if (!js.length) { panel.style.display = 'none'; return; }
+    panel.style.display = 'block';
+    document.getElementById('joblist').innerHTML = js.map(function(j) {
+      var pct = j.gesamt ? Math.round(j.schritt / j.gesamt * 100) : 0;
+      var kl = j.status === 'fertig' ? ' fertig' : (j.status === 'fehler' ? ' fehler' : '');
+      return '<div class="jobitem"><div class="jobtop"><b>' + esc(j.titel) + '</b>' +
+        '<span>' + (j.status === 'laeuft' ? j.schritt + '/' + j.gesamt : j.status.toUpperCase()) + '</span></div>' +
+        '<div class="jobbar' + kl + '"><i style="width:' + pct + '%"></i></div>' +
+        (j.aktuell ? '<div class="jobstep">' + esc(j.aktuell) + '</div>' : '') + '</div>';
+    }).join('');
+  } catch (e) {}
+}
+setInterval(loadJobs, 8000); loadJobs();
+
 setInterval(load, 5000); load();
 
 /* ── Chat ── */
@@ -1529,27 +2070,104 @@ function addMsg(cls, who, text) {
   msgs.scrollTop = msgs.scrollHeight;
 }
 
+var verlaufLaeuft = false;
+async function ladeVerlauf(target) {
+  if (verlaufLaeuft) return;
+  verlaufLaeuft = true;
+  var box = document.getElementById('msgs');
+  try {
+    var d = await (await fetch('/api/chat/history?target=' + encodeURIComponent(target) + '&n=20')).json();
+    box.innerHTML = '';
+    var msgs = d.messages || [];
+    if (!msgs.length) {
+      box.innerHTML = '<div class="empty" style="margin:auto;text-align:center;font-size:10.5px">' +
+        'Noch kein Verlauf mit ' + esc(target.toUpperCase()) + '.</div>';
+    } else {
+      msgs.forEach(function(m) {
+        if (m.role === 'user') addMsg('me', '', m.text);
+        else addMsg('bot', target.toUpperCase(), m.text);
+      });
+      var hinweis = document.createElement('div');
+      hinweis.className = 'verlaufmark';
+      hinweis.textContent = '\u2014 frühere Unterhaltung \u2014';
+      box.appendChild(hinweis);
+    }
+    box.scrollTop = box.scrollHeight;
+  } catch (e) {
+    box.innerHTML = '<div class="empty" style="margin:auto;font-size:10.5px">Verlauf nicht ladbar.</div>';
+  }
+  verlaufLaeuft = false;
+}
+
+document.getElementById('target').addEventListener('change', function() {
+  ladeVerlauf(this.value);
+});
+ladeVerlauf(document.getElementById('target').value);
+
 input.addEventListener('keydown', async function(ev) {
   if (ev.key !== 'Enter' || busy) return;
   var text = input.value.trim();
   if (!text) return;
   var target = document.getElementById('target').value;
   input.value = '';
+  var leer = msgs.querySelector('.empty');
+  if (leer) leer.remove();
   addMsg('me', '', text);
   busy = true;
   setEnergy(1);
   document.body.classList.add('thinking');
   var bn = document.querySelector('.agNode[data-bot="' + target + '"]');
   if (bn) { bn.classList.add('busy'); var st = bn.querySelector('.agState'); if (st) st.textContent = 'DENKT ...'; }
-  document.getElementById('typing').textContent = target.toUpperCase() + ' DENKT...';
+  var t0 = Date.now();
+  function laufzeit() {
+    var s = Math.floor((Date.now() - t0) / 1000);
+    return String(Math.floor(s / 60)).padStart(2, '0') + ':' + String(s % 60).padStart(2, '0');
+  }
+  var ticker = setInterval(function() {
+    document.getElementById('typing').textContent =
+      target.toUpperCase() + ' ARBEITET ... ' + laufzeit();
+  }, 1000);
+  document.getElementById('typing').textContent = target.toUpperCase() + ' ARBEITET ... 00:00';
+
   try {
     var r = await fetch('/api/chat', { method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({ target: target, text: text }) });
     var d = await r.json();
-    addMsg('bot', target.toUpperCase(), d.answer || d.error || '(keine Antwort)');
+    if (d.error) {
+      addMsg('bot', 'SYSTEM', 'Fehler: ' + d.error);
+    } else {
+      // Antwort abholen, bis sie da ist (max. 20 Minuten)
+      var antwort = null, fehler = null;
+      var grenze = Date.now() + 20 * 60 * 1000;
+      while (Date.now() < grenze) {
+        var p;
+        try {
+          p = await (await fetch('/api/chat/poll?target=' + encodeURIComponent(d.target) +
+                                 '&id=' + encodeURIComponent(d.id))).json();
+        } catch (e) {
+          await new Promise(function(res) { setTimeout(res, 3000); });
+          continue;
+        }
+        if (p.status === 'done') { antwort = p.answer; break; }
+        if (p.status === 'error') { fehler = p.error; break; }
+        await new Promise(function(res) { setTimeout(res, 1200); });
+      }
+      if (antwort !== null) {
+        addMsg('bot', target.toUpperCase(), antwort);
+      } else if (fehler) {
+        addMsg('bot', 'SYSTEM', 'Fehler: ' + fehler);
+      } else {
+        addMsg('bot', 'SYSTEM', 'Nach 20 Minuten keine Antwort. Im Server-Log nachsehen: ' +
+               'docker compose logs ' + (d.target === 'jarvis' ? 'jarvis-core' : 'jarvis-' + d.target) + ' --tail 30');
+      }
+    }
   } catch (e) {
     addMsg('bot', 'SYSTEM', 'Fehler: ' + e);
+  }
+  clearInterval(ticker);
+  if (/^(reset|vergiss alles|speicher leeren)$/i.test(text)) {
+    setTimeout(function() { ladeVerlauf(target); }, 400);
   }
   busy = false;
   setEnergy(0);
@@ -1635,7 +2253,7 @@ async function vopen(path, kind) {
     var txt = await (await fetch('/api/vault/file?path=' + enc)).text();
     view.innerHTML = head + '<pre>' + esc(txt) + '</pre>';
   } else {
-    view.innerHTML = head + '<div class="empty">Binaerdatei - per Download oeffnen.</div>';
+    view.innerHTML = head + '<div class="empty">Binärdatei – per Download öffnen.</div>';
   }
 }
 
@@ -1726,11 +2344,11 @@ document.addEventListener('click', async function(ev) {
   if (del) {
     ev.stopPropagation();
     var p = del.getAttribute('data-del');
-    if (!confirm('Wirklich loeschen? ' + p)) return;
+    if (!confirm('Wirklich löschen? ' + p)) return;
     try {
       var r = await fetch('/api/vault/delete', { method: 'POST',
         headers: {'Content-Type': 'application/json'}, body: JSON.stringify({ path: p }) });
-      if (r.ok) { vload(vpath); document.getElementById('vview').innerHTML = '<div class="empty">Geloescht.</div>'; }
+      if (r.ok) { vload(vpath); document.getElementById('vview').innerHTML = '<div class="empty">Gelöscht.</div>'; }
     } catch (e) {}
     return;
   }

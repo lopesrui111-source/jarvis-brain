@@ -82,6 +82,7 @@ services:
     restart: unless-stopped
     env_file: .env
     volumes:
+      - ./skills-lib:/app/skills-lib:ro
       - ./vault:/app/vault
     depends_on:
       redis:

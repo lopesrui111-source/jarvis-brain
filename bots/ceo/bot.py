@@ -43,7 +43,7 @@ MODEL       = os.getenv("ORCHESTRATOR_MODEL", "claude-sonnet-4-6")
 EMBED_MODEL = "text-embedding-3-small"
 MAX_HISTORY = 12
 MAX_TOKENS  = 2000
-MAX_TOOL_ROUNDS = 5
+MAX_TOOL_ROUNDS = 10
 VAULT_DIR = "/app/vault"
 
 INBOX_KEY   = "bot:ceo:inbox"
@@ -543,6 +543,35 @@ def save_history(r, h):
         print(f"  [history] {e}", flush=True)
 
 
+
+# Erkennt Antworten, die nur eine Absicht ankuendigen, ohne sie auszufuehren
+ANNOUNCE_RE = re.compile(
+    r"(lass mich|ich (schaue|sehe|gehe|starte|pruefe|pr\u00fcfe|hole|lese|checke|melde|merke|speichere)"
+    r"|starte (jetzt|gleich|mal)|einen? moment|moment mal|bin dran|noch dran"
+    r"|mache mich (dran|ans)|fange (jetzt |gleich )?an|arbeite (das )?(jetzt|gleich)"
+    r"|gebe dir gleich|sage dir gleich|dauert (einen|kurz)|gehe (das )?(jetzt |gleich )?durch)", re.I)
+
+# Kurze Saetze im Stil "Jetzt alles merken." / "Dann weiter pruefen."
+INTENT_RE = re.compile(
+    r"^(jetzt|gleich|nun|dann|weiter|als n(ae|\u00e4)chstes|zuerst|noch)\b[^.!?]{0,70}\b\w{3,}(en|ern)\.?$",
+    re.I)
+
+
+def _ist_leere_ankuendigung(text):
+    """True, wenn der Bot nur ankuendigt statt zu handeln."""
+    if not text:
+        return False
+    t = " ".join(text.split())
+    if len(t) > 260:
+        return False
+    if ANNOUNCE_RE.search(t):
+        return True
+    # Sehr kurze Absichts-Saetze ohne jedes Ergebnis
+    if len(t) <= 90 and INTENT_RE.match(t):
+        return True
+    return False
+
+
 def think(history, user_text):
     context = ""
     if oai is not None:
@@ -554,6 +583,8 @@ def think(history, user_text):
     if context:
         messages[-1] = {"role": "user", "content": user_text + context}
     final_text = ""
+    tool_benutzt = False
+    nachfass_zahl = 0
     for _ in range(MAX_TOOL_ROUNDS):
         resp = client.messages.create(model=MODEL, max_tokens=MAX_TOKENS,
                                       system=SYS_CACHED, tools=TOOLS_CACHED, messages=messages)
@@ -562,10 +593,18 @@ def think(history, user_text):
         except Exception:
             pass
         parts = [b.text for b in resp.content if b.type == "text"]
-        if parts:
-            final_text = "".join(parts).strip()
+        _txt = "".join(parts).strip()
+        if _txt:
+            final_text = _txt
         if resp.stop_reason != "tool_use":
+            if nachfass_zahl < 2 and _ist_leere_ankuendigung(final_text):
+                nachfass_zahl += 1
+                print("  [nudge] Ankuendigung ohne Ausfuehrung erkannt — fasse nach", flush=True)
+                messages.append({"role": "assistant", "content": final_text})
+                messages.append({"role": "user", "content": "Du hast nur angekuendigt, aber nichts getan. Fuehre den Auftrag JETZT aus: rufe die noetigen Tools auf und antworte erst, wenn du das Ergebnis hast. Keine weitere Ankuendigung."})
+                continue
             break
+        tool_benutzt = True
         a_content, t_results = [], []
         for block in resp.content:
             if block.type == "text":
@@ -579,8 +618,30 @@ def think(history, user_text):
                                   "content": result})
         messages.append({"role": "assistant", "content": a_content})
         messages.append({"role": "user", "content": t_results})
+    # Runden aufgebraucht, aber noch keine echte Antwort -> Abschluss ohne Tools erzwingen
+    if tool_benutzt and (not final_text or resp.stop_reason == "tool_use"):
+        try:
+            messages.append({"role": "user", "content":
+                "Die Werkzeug-Runden sind aufgebraucht. Fasse JETZT zusammen, was du "
+                "herausgefunden hast, und nenne offene Punkte. Keine weiteren Tool-Aufrufe."})
+            resp2 = client.messages.create(model=MODEL, max_tokens=MAX_TOKENS,
+                                           system=SYS_CACHED, messages=messages)
+            try:
+                track_cost(MODEL, resp2.usage.input_tokens, resp2.usage.output_tokens,
+                           getattr(resp2.usage, 'cache_read_input_tokens', 0) or 0,
+                           getattr(resp2.usage, 'cache_creation_input_tokens', 0) or 0)
+            except Exception:
+                pass
+            t2 = "".join(b.text for b in resp2.content if b.type == "text").strip()
+            if t2:
+                final_text = t2
+                print("  [abschluss] Zusammenfassung nach Rundenlimit erzwungen", flush=True)
+        except Exception as e:
+            print(f"  [abschluss] {type(e).__name__}: {e}", flush=True)
+
     if not final_text:
-        final_text = "..."
+        final_text = ("Ich konnte den Auftrag nicht abschliessen — bitte in kleineren Schritten "
+                      "anfragen (z.B. erst Ordnerstruktur, dann einzelne Dateien).")
     history.append({"role": "assistant", "content": final_text})
     return final_text
 

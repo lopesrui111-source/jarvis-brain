@@ -43,7 +43,7 @@ FAST_MODEL  = os.getenv("BOT_MODEL", "claude-haiku-4-5-20251001")
 EMBED_MODEL = "text-embedding-3-small"
 MAX_HISTORY = 10
 MAX_TOKENS  = 2500
-MAX_TOOL_ROUNDS = 6
+MAX_TOOL_ROUNDS = 12
 
 CAMOFOX_URL = os.getenv("CAMOFOX_URL", "http://camofox:9377")
 VAULT_DIR = "/app/vault"
@@ -60,10 +60,15 @@ HISTORY_KEY = "bot:seo:history"
 REPLY_KEY   = "bot:seo:reply:{id}"
 
 # ── Recherche-Quellen (aus Ruis Original-Workflow) ────────────
-GF_TOPICS = ["e-rechnung", "kleinunternehmer", "rechnung", "umsatzsteuer",
-             "buchhaltung", "gewerbe", "selbststaendigkeit", "existenzgruendung", "steuern"]
+# WICHTIG: /home/... erfordert Login -> nur oeffentliche Pfade verwenden
+GF_TAGS = ["e-rechnung", "kleinunternehmer", "rechnung", "umsatzsteuer",
+           "buchhaltung", "gewerbe", "selbststaendigkeit", "existenzgruendung", "steuern"]
 GF_KEYWORDS = ["E-Rechnung", "Rechnung schreiben", "Kleinunternehmer",
                "Angebot erstellen", "Mahnung"]
+GF_NEUE = "https://www.gutefrage.net/fragen/neue"
+
+# Quora wird von Cloudflare geblockt -> standardmaessig aus
+QUORA_AKTIV = os.getenv("SEO_QUORA", "0") == "1"
 QUORA_KEYWORDS = ["Kleinunternehmer Rechnung", "E-Rechnung Pflicht",
                   "Rechnung schreiben Selbststaendige", "Mahnung schreiben"]
 
@@ -210,6 +215,22 @@ def tool_recall(inp):
 
 
 # ── CAMOFOX (nur lesen) ──────────────────────────────────────
+LOGIN_MARKER = ("einloggen", "anmelden mit", "passwort vergessen", "registrieren",
+                "__cf_chl", "just a moment", "cf-challenge")
+
+
+def _ist_blockiert(url, snapshot):
+    """Erkennt Login-Weiterleitungen und Bot-Schutz, damit wir nicht still scheitern."""
+    u = (url or "").lower()
+    s = (snapshot or "").lower()
+    if "/einloggen" in u or "/login" in u or "__cf_chl" in u:
+        return True
+    if len(s) < 900 and any(m in s for m in LOGIN_MARKER):
+        return True
+    treffer = sum(1 for m in LOGIN_MARKER if m in s)
+    return treffer >= 3 and len(s) < 5000
+
+
 def fetch_page(url):
     try:
         r = requests.post(f"{CAMOFOX_URL}/tabs",
@@ -221,7 +242,12 @@ def fetch_page(url):
                          params={"userId": BOT_USER_ID}, timeout=70)
         if s.status_code >= 400:
             return None, f"Snapshot-Fehler ({s.status_code})"
-        return s.json().get("snapshot", "")[:9000], None
+        daten = s.json()
+        snap = (daten.get("snapshot") or "")[:9000]
+        end_url = daten.get("url") or url
+        if _ist_blockiert(end_url, snap):
+            return None, f"BLOCKIERT (Login/Bot-Schutz) bei {end_url[:90]}"
+        return snap, None
     except Exception as e:
         return None, f"Browser nicht erreichbar ({type(e).__name__})"
 
@@ -286,29 +312,36 @@ def _ist_frisch(alter):
     return bool(FRISCH.search(alter or ""))
 
 
-def scan_gutefrage(max_quellen=6):
-    """Themen-Seiten (neueste zuerst) + Keyword-Suche mit 7-Tage-Filter."""
-    gefunden = []
-    quellen = []
-    for t in GF_TOPICS[:max_quellen]:
-        quellen.append((f"https://www.gutefrage.net/home/thema/{t}/neue", f"Thema: {t}"))
-    for k in GF_KEYWORDS[:max(0, max_quellen - len(GF_TOPICS))] or GF_KEYWORDS[:2]:
-        from urllib.parse import quote
-        quellen.append((f"https://www.gutefrage.net/home/suche/beitraege?begriff={quote(k)}&tage=7",
-                        f"Suche: {k}"))
-    for url, label in quellen:
+def scan_gutefrage(max_quellen=8):
+    """Oeffentliche Quellen: neueste Fragen, Tag-Seiten und Suche (kein Login noetig)."""
+    from urllib.parse import quote
+    gefunden, blockiert = [], []
+    quellen = [(GF_NEUE, "Neueste Fragen")]
+    for t in GF_TAGS[:5]:
+        quellen.append((f"https://www.gutefrage.net/tag/{t}", f"Tag: {t}"))
+    for k in GF_KEYWORDS[:3]:
+        quellen.append((f"https://www.gutefrage.net/suche?q={quote(k)}", f"Suche: {k}"))
+
+    for url, label in quellen[:max_quellen]:
         snap, err = fetch_page(url)
         if err:
             print(f"  [gf] {label}: {err}", flush=True)
+            if "BLOCKIERT" in err:
+                blockiert.append(label)
             continue
         gefunden += _extract_fragen(snap, f"gutefrage / {label}")
         time.sleep(1)
+    if blockiert:
+        print(f"  [gf] {len(blockiert)} Quellen blockiert: {', '.join(blockiert[:4])}", flush=True)
     return gefunden
 
 
 def scan_quora(max_quellen=3):
-    """Quora-Suche, auf die letzte Woche gefiltert."""
+    """Quora-Suche. Achtung: Cloudflare blockt haeufig — daher standardmaessig aus."""
     from urllib.parse import quote
+    if not QUORA_AKTIV:
+        print("  [quora] deaktiviert (Cloudflare-Schutz) — SEO_QUORA=1 zum Aktivieren", flush=True)
+        return []
     gefunden = []
     for k in QUORA_KEYWORDS[:max_quellen]:
         url = f"https://www.quora.com/search?q={quote(k)}&type=question&time=week"
@@ -427,7 +460,10 @@ def recherche(plattform="beide", mit_entwuerfen=True, max_entwuerfe=3, telegram=
         neu.append(f)
 
     if not neu:
-        msg = "Heute keine neuen passenden Fragen."
+        msg = ("Heute keine neuen passenden Fragen."
+               if fragen else
+               "Keine Fragen abrufbar — alle Quellen blockiert (Login/Bot-Schutz). "
+               "Im Server-Log steht, welche.")
         if telegram:
             send_telegram("🔍 Q&A-Recherche: " + msg)
         return msg
@@ -655,10 +691,44 @@ def save_history(r, h):
         pass
 
 
+
+# Erkennt Antworten, die nur eine Absicht ankuendigen, ohne sie auszufuehren
+ANNOUNCE_RE = re.compile(
+    r"(lass mich|ich (schaue|sehe|gehe|starte|pruefe|pr\u00fcfe|hole|lese|checke|melde|merke|speichere)"
+    r"|starte (jetzt|gleich|mal)|einen? moment|moment mal|bin dran|noch dran"
+    r"|mache mich (dran|ans)|fange (jetzt |gleich )?an|arbeite (das )?(jetzt|gleich)"
+    r"|gebe dir gleich|sage dir gleich|dauert (einen|kurz)|gehe (das )?(jetzt |gleich )?durch)", re.I)
+
+# Kurze Saetze im Stil "Jetzt alles merken." / "Dann weiter pruefen."
+INTENT_RE = re.compile(
+    r"^(jetzt|gleich|nun|dann|weiter|als n(ae|\u00e4)chstes|zuerst|noch)\b[^.!?]{0,70}\b\w{3,}(en|ern)\.?$",
+    re.I)
+
+
+def _ist_leere_ankuendigung(text):
+    """True, wenn der Bot nur ankuendigt statt zu handeln."""
+    if not text:
+        return False
+    t = " ".join(text.split())
+    if len(t) > 260:
+        return False
+    if ANNOUNCE_RE.search(t):
+        return True
+    # Absichts-Saetze pruefen (auch wenn sie nicht am Anfang stehen)
+    saetze = [s.strip() for s in re.split(r"[.!?]+", t) if s.strip()]
+    if len(t) <= 160:
+        for s in saetze:
+            if len(s) <= 90 and INTENT_RE.match(s):
+                return True
+    return False
+
+
 def think(history, user_text):
     history.append({"role": "user", "content": user_text})
     messages = list(history)
     final_text = ""
+    tool_benutzt = False
+    nachfass_zahl = 0
     for _ in range(MAX_TOOL_ROUNDS):
         resp = client.messages.create(model=MODEL, max_tokens=MAX_TOKENS,
                                       system=SYS_CACHED, tools=TOOLS_CACHED, messages=messages)
@@ -669,10 +739,18 @@ def think(history, user_text):
         except Exception:
             pass
         parts = [b.text for b in resp.content if b.type == "text"]
-        if parts:
-            final_text = "".join(parts).strip()
+        _txt = "".join(parts).strip()
+        if _txt:
+            final_text = _txt
         if resp.stop_reason != "tool_use":
+            if nachfass_zahl < 2 and _ist_leere_ankuendigung(final_text):
+                nachfass_zahl += 1
+                print("  [nudge] Ankuendigung ohne Ausfuehrung erkannt — fasse nach", flush=True)
+                messages.append({"role": "assistant", "content": final_text})
+                messages.append({"role": "user", "content": "Du hast nur angekuendigt, aber nichts getan. Fuehre den Auftrag JETZT aus: rufe die noetigen Tools auf und antworte erst, wenn du das Ergebnis hast. Keine weitere Ankuendigung."})
+                continue
             break
+        tool_benutzt = True
         a_content, t_results = [], []
         for block in resp.content:
             if block.type == "text":
@@ -685,8 +763,30 @@ def think(history, user_text):
                 t_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
         messages.append({"role": "assistant", "content": a_content})
         messages.append({"role": "user", "content": t_results})
+    # Runden aufgebraucht, aber noch keine echte Antwort -> Abschluss ohne Tools erzwingen
+    if tool_benutzt and (not final_text or resp.stop_reason == "tool_use"):
+        try:
+            messages.append({"role": "user", "content":
+                "Die Werkzeug-Runden sind aufgebraucht. Fasse JETZT zusammen, was du "
+                "herausgefunden hast, und nenne offene Punkte. Keine weiteren Tool-Aufrufe."})
+            resp2 = client.messages.create(model=MODEL, max_tokens=MAX_TOKENS,
+                                           system=SYS_CACHED, messages=messages)
+            try:
+                track_cost(MODEL, resp2.usage.input_tokens, resp2.usage.output_tokens,
+                           getattr(resp2.usage, 'cache_read_input_tokens', 0) or 0,
+                           getattr(resp2.usage, 'cache_creation_input_tokens', 0) or 0)
+            except Exception:
+                pass
+            t2 = "".join(b.text for b in resp2.content if b.type == "text").strip()
+            if t2:
+                final_text = t2
+                print("  [abschluss] Zusammenfassung nach Rundenlimit erzwungen", flush=True)
+        except Exception as e:
+            print(f"  [abschluss] {type(e).__name__}: {e}", flush=True)
+
     if not final_text:
-        final_text = "..."
+        final_text = ("Ich konnte den Auftrag nicht abschliessen — bitte in kleineren Schritten "
+                      "anfragen (z.B. erst Ordnerstruktur, dann einzelne Dateien).")
     history.append({"role": "assistant", "content": final_text})
     return final_text
 
@@ -722,6 +822,26 @@ def daily_thread():
         time.sleep(45)
 
 
+def _antwort_senden(r, queue, text):
+    """Antwort zustellen — auch wenn die Verbindung waehrend langer Arbeit abgelaufen ist."""
+    for versuch in range(3):
+        try:
+            r.rpush(queue, text)
+            r.expire(queue, 300)
+            return True
+        except Exception as e:
+            print(f"  [reply] Versuch {versuch + 1} fehlgeschlagen ({type(e).__name__}) — neue Verbindung", flush=True)
+            try:
+                r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
+                                socket_keepalive=True, health_check_interval=20,
+                                retry_on_timeout=True, socket_timeout=30)
+            except Exception:
+                pass
+            time.sleep(1)
+    print("  [reply] Antwort konnte NICHT zugestellt werden!", flush=True)
+    return False
+
+
 def main():
     print("=" * 58, flush=True)
     print("  SEO/Q&A-BOT — gutefrage + Quora (read-only)", flush=True)
@@ -739,7 +859,9 @@ def main():
     r = None
     for _ in range(30):
         try:
-            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
+                            socket_keepalive=True, health_check_interval=20,
+                            retry_on_timeout=True, socket_timeout=30)
             r.ping()
             print("  [redis] verbunden", flush=True)
             break
@@ -764,13 +886,11 @@ def main():
             text = (msg.get("text") or "").strip()
             reply_q = REPLY_KEY.format(id=req_id)
             if not text:
-                r.rpush(reply_q, "Leere Anfrage.")
-                r.expire(reply_q, 300)
+                _antwort_senden(r, reply_q, "Leere Anfrage.")
                 continue
             if text.lower() in ("reset", "vergiss alles"):
                 r.delete(HISTORY_KEY)
-                r.rpush(reply_q, "SEO-Kurzzeitgedaechtnis geleert.")
-                r.expire(reply_q, 300)
+                _antwort_senden(r, reply_q, "SEO-Kurzzeitgedaechtnis geleert.")
                 continue
             print(f"  Auftrag: {text[:80]}", flush=True)
             history = load_history(r)
@@ -780,8 +900,7 @@ def main():
                 answer = f"Fehler: {type(e).__name__}: {e}"
             save_history(r, history)
             print(f"  SEO: {answer[:100]}\n", flush=True)
-            r.rpush(reply_q, answer)
-            r.expire(reply_q, 300)
+            _antwort_senden(r, reply_q, answer)
         except KeyboardInterrupt:
             break
         except Exception as e:

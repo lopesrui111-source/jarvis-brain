@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-JARVIS Core v7.5 — v7.4 + IMMO-BOT-DELEGATION
+JARVIS Core v8 — v7.9 + AUFTRAGS-SYSTEM (mehrstufige Aufgaben im Hintergrund)
 Neu gegenueber v4:
 - Stil-Analyse: 'stil ionos' / 'stil gmail' liest die letzten gesendeten
   Mails (read-only), erstellt ein Schreibstil-Profil und speichert es
@@ -8,6 +8,30 @@ Neu gegenueber v4:
 - Gesendet-Ordner wird automatisch erkannt (\\Sent Flag, Fallback-Namen)
 - ask_ceo: delegiert Auftraege an den Bueroflow-CEO-Bot am Bus
 - ask_immo: dein Immobilien-Analyst (Rendite-Bewertungen, Scans, Telegram-Alerts an Rui).
+- BUEROFLOW-ZAHLEN: Bei Fragen zum Stand von Bueroflow (Warteliste, Nutzer, Abos, Umsatz, Nutzung,
+  Kosten, Wachstum) rufst du buroflow_zahlen auf und antwortest mit den echten Werten — nie schaetzen.
+- FACHWISSEN NUTZEN: Du hast eine Bibliothek mit 362 erprobten Fachanleitungen und 7 Experten-Personas.
+  Bevor du eine fachliche Aufgabe angehst (Preisgestaltung, SEO, Sicherheitsaudit, Vertragspruefung,
+  Produktstrategie, Finanzplanung ...), suche mit skill_suchen nach einer passenden Anleitung und lade
+  sie mit skill_laden. Das ist besser als aus dem Bauch zu antworten. Bei Bedarf persona_laden.
+- GROSSE AUFGABEN: Wenn ein Auftrag mehrere Arbeitsschritte braucht (ganzes Repo/Projekt analysieren,
+  Recherche ueber mehrere Quellen, etwas erarbeiten und dann sichern), lege mit job_anlegen einen
+  Auftrag an, statt alles in einem Zug zu versuchen. Zerlege in 2-8 Schritte; der letzte Schritt ist
+  meist das Sichern per remember. Du arbeitest ihn dann im Hintergrund ab — Rui muss nicht warten
+  und nichts geht verloren, auch nicht bei einem Neustart. Kleine Fragen beantwortest du weiter direkt.
+- AUFTRAEGE ZU ENDE BRINGEN: Wenn Rui sagt "merk dir das", "speichere das" oder "lerne daraus",
+  dann rufst du remember AUF (ein oder mehrere Male, thematisch getrennt) — ein Satz wie
+  "Jetzt alles merken" ohne Tool-Aufruf ist ein Fehler und speichert nichts.
+  Bei Recherche-Auftraegen gilt: erst sammeln, dann die Erkenntnisse per remember sichern,
+  dann Rui zusammenfassen.
+- HANDELN STATT ANKUENDIGEN: Kuendige niemals an, was du gleich tust ("Lass mich...", "Ich schaue...",
+  "Starte jetzt", "Einen Moment"). Rufe die noetigen Tools SOFORT im selben Zug auf und antworte erst,
+  wenn du das Ergebnis hast. Eine Antwort ohne Tool-Aufruf, die eine Handlung ankuendigt, ist ein Fehler.
+  Bei mehrstufigen Auftraegen arbeitest du die Schritte nacheinander ab, ohne zwischendurch zu fragen.
+- github_repos/github_browse/github_read/github_search/github_commits: Du kannst Ruis GitHub-Code
+  lesen — z.B. das Buroflow-Projekt (Repo 'Buroflow') oder dein eigenes Repo 'jarvis-brain'.
+  Nutze das, um Ruis Architektur, Konventionen und Stand wirklich zu kennen, statt zu raten.
+  STRIKT read-only: du kannst nichts committen, pushen oder aendern.
 - check_calendar: Ruis iCloud-Kalender lesen (Termine der naechsten Tage). Read-only — du kannst nichts eintragen oder aendern.
 - web_search/web_open/web_click: echtes Browsen via camofox
 """
@@ -48,10 +72,22 @@ MODEL       = os.getenv("ORCHESTRATOR_MODEL", "claude-sonnet-4-6")
 EMBED_MODEL = "text-embedding-3-small"   # 1536 Dimensionen, passt zur DB
 MAX_HISTORY = 16
 MAX_TOKENS  = 1024
-MAX_TOOL_ROUNDS = 5
+MAX_TOOL_ROUNDS = 14
 
 VAULT_DIR = "/app/vault"
 BOT_USER_ID = "jarvis"
+
+# Bueroflow-Datenbank (Supabase, read-only)
+SUPABASE_URL = os.getenv("SUPABASE_DB_URL", "")
+BF_T_WAITLIST = os.getenv("BF_TABLE_WAITLIST", "waitlist")
+BF_T_USERS    = os.getenv("BF_TABLE_USERS", "user_profiles")
+BF_T_SUBS     = os.getenv("BF_TABLE_SUBS", "subscriptions")
+BF_T_GEN      = os.getenv("BF_TABLE_GENERATIONS", "generations")
+BF_T_USAGE    = os.getenv("BF_TABLE_USAGE", "ai_usage")
+
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+GITHUB_USER = os.getenv("GITHUB_USER", "lopesrui111-source")
+GH_API = "https://api.github.com"
 
 ICLOUD_USER = os.getenv("ICLOUD_USER", "")
 ICLOUD_PASS = os.getenv("ICLOUD_PASS", "")
@@ -101,6 +137,10 @@ DEIN GEDAECHTNIS (Tools):
 - vault_note: Lege eine Markdown-Notiz im Wissens-Vault ab (fuer laengere Inhalte: Zusammenfassungen, Plaene, Recherchen).
 - check_mail / read_mail: Lies Ruis Postfaecher (ionos = Bueroflow-Business, gmail = privat). STRIKT read-only. Du kannst Mails zusammenfassen und Antwort-ENTWUERFE vorschlagen, aber nie senden.
 - ask_immo: dein Immobilien-Analyst (Rendite-Bewertungen, Scans, Telegram-Alerts an Rui).
+- github_repos/github_browse/github_read/github_search/github_commits: Du kannst Ruis GitHub-Code
+  lesen — z.B. das Buroflow-Projekt (Repo 'Buroflow') oder dein eigenes Repo 'jarvis-brain'.
+  Nutze das, um Ruis Architektur, Konventionen und Stand wirklich zu kennen, statt zu raten.
+  STRIKT read-only: du kannst nichts committen, pushen oder aendern.
 - check_calendar: Ruis iCloud-Kalender lesen (Termine der naechsten Tage). Read-only — du kannst nichts eintragen oder aendern.
 - web_search/web_open/web_click: Du kannst echt im Web browsen (Stealth-Browser). Nutze es fuer aktuelle Infos, Recherche, Preise, News. REGELN: nur lesen und recherchieren — nie einloggen, nie kaufen, nie posten, nie Formulare absenden.
 - Bevor du Texte/Mails/Posts fuer Rui entwirfst: recall nach "Schreibstil" und wende das Profil an (buroflow = geschaeftlich, privat = persoenlich).
@@ -218,6 +258,90 @@ TOOLS = [
         "name": "ask_immo",
         "description": "Delegiert an den IMMO-BOT (Immobilien-Investment-Analyst): Angebote bewerten (URL), ImmoScout-Mails scannen, Kleinanzeigen-Suchen pruefen, fruehere Objekte nachschlagen. Kann bis zu 4 Minuten dauern.",
         "input_schema": {"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]},
+    },
+    {
+        "name": "buroflow_zahlen",
+        "description": ("Liest die aktuellen Bueroflow-Kennzahlen direkt aus Supabase: Warteliste, "
+                        "registrierte Nutzer, aktive Abos und Plaene, Generierungen je Tool, KI-Kosten, "
+                        "aktive Nutzer und Conversion-Funnel. Read-only. Nutze das bei allen Fragen zum "
+                        "Stand von Bueroflow, statt zu schaetzen."),
+        "input_schema": {"type": "object", "properties": {
+            "tage": {"type": "integer", "description": "Vergleichszeitraum in Tagen (Standard 7, max 90)"}}},
+    },
+    {
+        "name": "skill_suchen",
+        "description": ("Durchsucht die Skill-Bibliothek (362 Fachanleitungen: Engineering, Marketing, Finanzen, "
+                        "Recht/Compliance, Produkt, Research, C-Level-Beratung u.a.). Ohne query bekommst du die "
+                        "Bereichsuebersicht. Nutze das, BEVOR du eine Fachaufgabe angehst — die Anleitungen "
+                        "enthalten erprobte Vorgehensweisen, Checklisten und Frameworks."),
+        "input_schema": {"type": "object", "properties": {"query": {"type": "string"}}},
+    },
+    {
+        "name": "skill_laden",
+        "description": "Laedt eine Fachanleitung vollstaendig (Name aus skill_suchen).",
+        "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}, "required": ["name"]},
+    },
+    {
+        "name": "persona_laden",
+        "description": ("Laedt eine Experten-Persona (z.B. startup-cto, finance-lead, growth-marketer, "
+                        "solo-founder, product-manager, devops-engineer, content-strategist) und denkt "
+                        "anschliessend aus deren Blickwinkel. Ohne name bekommst du die Liste."),
+        "input_schema": {"type": "object", "properties": {"name": {"type": "string"}}},
+    },
+    {
+        "name": "job_anlegen",
+        "description": ("Legt einen mehrstufigen Auftrag an, den du im Hintergrund Schritt fuer Schritt abarbeitest. "
+                        "Nutze das IMMER fuer groessere Aufgaben (Repo/Projekt analysieren, mehrstufige Recherche, "
+                        "Konzept erarbeiten und sichern) statt zu versuchen, alles in einem Zug zu erledigen. "
+                        "Zerlege die Aufgabe in 2-8 konkrete, aufeinander aufbauende Schritte. "
+                        "Der letzte Schritt sollte typischerweise das Sichern der Erkenntnisse (remember) sein."),
+        "input_schema": {"type": "object", "properties": {
+            "titel": {"type": "string", "description": "kurzer Name des Auftrags"},
+            "auftrag": {"type": "string", "description": "das Gesamtziel in 1-3 Saetzen"},
+            "schritte": {"type": "array", "items": {"type": "string"},
+                         "description": "2-8 konkrete Arbeitsschritte in sinnvoller Reihenfolge"}},
+            "required": ["titel", "auftrag", "schritte"]},
+    },
+    {
+        "name": "job_status",
+        "description": "Zeigt den Stand der Auftraege (ohne id: die letzten 8; mit id: einen bestimmten samt Ergebnis).",
+        "input_schema": {"type": "object", "properties": {"id": {"type": "integer"}}},
+    },
+    {
+        "name": "job_abbrechen",
+        "description": "Bricht einen laufenden Auftrag ab.",
+        "input_schema": {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]},
+    },
+    {
+        "name": "github_repos",
+        "description": "Listet Ruis GitHub-Repositories (Name, Sprache, letzte Aenderung). Read-only.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "github_browse",
+        "description": "Zeigt den Inhalt eines Ordners in einem Repo (Ordner + Dateien). repo z.B. 'Buroflow', path z.B. 'src/app'. Read-only.",
+        "input_schema": {"type": "object", "properties": {
+            "repo": {"type": "string"}, "path": {"type": "string"}}, "required": ["repo"]},
+    },
+    {
+        "name": "github_read",
+        "description": "Liest eine Datei aus einem Repo im Klartext. Damit kannst du Ruis Code studieren und daraus lernen. Read-only.",
+        "input_schema": {"type": "object", "properties": {
+            "repo": {"type": "string"}, "path": {"type": "string"},
+            "max_zeichen": {"type": "integer"}}, "required": ["repo", "path"]},
+    },
+    {
+        "name": "github_search",
+        "description": "Durchsucht den Code (optional auf ein Repo begrenzt) und liefert Fundstellen als Dateipfade. Read-only.",
+        "input_schema": {"type": "object", "properties": {
+            "query": {"type": "string"}, "repo": {"type": "string"}}, "required": ["query"]},
+    },
+    {
+        "name": "github_commits",
+        "description": "Zeigt die letzten Commits eines Repos (optional zu einem bestimmten Pfad). Read-only.",
+        "input_schema": {"type": "object", "properties": {
+            "repo": {"type": "string"}, "pfad": {"type": "string"},
+            "anzahl": {"type": "integer"}}, "required": ["repo"]},
     },
     {
         "name": "check_calendar",
@@ -533,6 +657,537 @@ def tool_vault_note(inp: dict) -> str:
 CAMOFOX_URL = os.getenv("CAMOFOX_URL", "http://camofox:9377")
 
 
+# ── BUEROFLOW-ZAHLEN (Supabase, strikt read-only) ────────────
+def tool_buroflow_zahlen(inp):
+    if not SUPABASE_URL:
+        return "Bueroflow-Datenbank nicht konfiguriert (SUPABASE_DB_URL fehlt)."
+    tage = min(max(int(inp.get("tage") or 7), 1), 90)
+    try:
+        conn = psycopg2.connect(SUPABASE_URL, connect_timeout=10)
+    except Exception as e:
+        return f"Keine Verbindung zur Bueroflow-DB: {type(e).__name__}: {str(e)[:120]}"
+
+    def eins(cur, *sqls):
+        """Erste Abfrage, die einen Wert liefert (Spaltennamen koennen abweichen)."""
+        for s in sqls:
+            try:
+                cur.execute(s)
+                row = cur.fetchone()
+                if row and row[0] is not None:
+                    return row[0]
+            except Exception:
+                cur.connection.rollback()
+        return 0
+
+    def viele(cur, sql):
+        try:
+            cur.execute(sql)
+            return cur.fetchall()
+        except Exception:
+            cur.connection.rollback()
+            return []
+
+    z = {}
+    try:
+        with conn, conn.cursor() as cur:
+            iv = f"interval '{tage} days'"
+            z["warteliste"] = int(eins(cur, f"SELECT COUNT(*) FROM {BF_T_WAITLIST}"))
+            z["warteliste_neu"] = int(eins(cur, f"SELECT COUNT(*) FROM {BF_T_WAITLIST} WHERE created_at > now() - {iv}"))
+            z["nutzer"] = int(eins(cur, f"SELECT COUNT(*) FROM {BF_T_USERS}", "SELECT COUNT(*) FROM users"))
+            z["nutzer_neu"] = int(eins(cur, f"SELECT COUNT(*) FROM {BF_T_USERS} WHERE created_at > now() - {iv}"))
+            z["abos"] = int(eins(cur, f"SELECT COUNT(*) FROM {BF_T_SUBS} WHERE status = 'active'"))
+            z["generierungen"] = int(eins(cur, f"SELECT COUNT(*) FROM {BF_T_GEN}"))
+            z["gen_neu"] = int(eins(cur, f"SELECT COUNT(*) FROM {BF_T_GEN} WHERE created_at > now() - {iv}"))
+            z["kosten"] = float(eins(cur, f"SELECT SUM(cost_usd) FROM {BF_T_USAGE}",
+                                          f"SELECT SUM(cost) FROM {BF_T_USAGE}",
+                                          f"SELECT SUM(cost_usd) FROM {BF_T_GEN}"))
+            z["kosten_zeitraum"] = float(eins(cur,
+                f"SELECT SUM(cost_usd) FROM {BF_T_USAGE} WHERE created_at > now() - {iv}",
+                f"SELECT SUM(cost) FROM {BF_T_USAGE} WHERE created_at > now() - {iv}"))
+            z["aktive_nutzer"] = int(eins(cur,
+                f"SELECT COUNT(DISTINCT user_id) FROM {BF_T_GEN} WHERE created_at > now() - {iv}"))
+            z["tools"] = [(r[0] or "?", int(r[1])) for r in viele(cur,
+                f"SELECT tool, COUNT(*) FROM {BF_T_GEN} GROUP BY tool ORDER BY COUNT(*) DESC LIMIT 6")]
+            z["plaene"] = [(r[0] or "?", int(r[1])) for r in viele(cur,
+                f"SELECT plan, COUNT(*) FROM {BF_T_SUBS} WHERE status='active' GROUP BY plan")]
+        conn.close()
+    except Exception as e:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        return f"Fehler beim Lesen: {type(e).__name__}: {str(e)[:150]}"
+
+    wl, nu, ab = z["warteliste"], z["nutzer"], z["abos"]
+    zeilen = [
+        f"BUEROFLOW-ZAHLEN (Zeitraum: letzte {tage} Tage)",
+        f"- Warteliste: {wl} (+{z['warteliste_neu']})",
+        f"- Registrierte Nutzer: {nu} (+{z['nutzer_neu']})",
+        f"- Aktive Abos: {ab}" + (f" — {', '.join(f'{p}: {n}' for p, n in z['plaene'])}" if z["plaene"] else ""),
+        f"- Aktive Nutzer im Zeitraum: {z['aktive_nutzer']}",
+        f"- Generierungen: {z['generierungen']} gesamt, {z['gen_neu']} im Zeitraum",
+        f"- KI-Kosten: ${z['kosten']:.4f} gesamt, ${z['kosten_zeitraum']:.4f} im Zeitraum",
+    ]
+    if z["tools"]:
+        zeilen.append("- Nutzung je Tool: " + ", ".join(f"{t} {n}x" for t, n in z["tools"]))
+    if wl:
+        zeilen.append(f"- Funnel: Warteliste {wl} -> registriert {nu} ({nu/wl*100:.0f}%) -> zahlend {ab}"
+                      + (f" ({ab/nu*100:.0f}% der Registrierten)" if nu else ""))
+    return "\n".join(zeilen)
+
+
+# ── SKILL-BIBLIOTHEK (claude-skills, read-only) ──────────────
+SKILLS_DIR = os.getenv("SKILLS_DIR", "/app/skills-lib")
+SKILL_INDEX = []          # [{name, beschreibung, kategorie, pfad}]
+PERSONA_INDEX = []        # [{name, pfad}]
+SKILL_MAX_ZEICHEN = 14000
+
+
+def _frontmatter(pfad):
+    """Liest name/description/category aus dem YAML-Kopf einer SKILL.md."""
+    name = beschreibung = kategorie = ""
+    try:
+        with open(pfad, encoding="utf-8", errors="replace") as f:
+            if f.readline().strip() != "---":
+                return None
+            for _ in range(40):
+                zeile = f.readline()
+                if not zeile or zeile.strip() == "---":
+                    break
+                z = zeile.strip()
+                if z.startswith("name:"):
+                    name = z.split(":", 1)[1].strip().strip('"\'')
+                elif z.startswith("description:"):
+                    beschreibung = z.split(":", 1)[1].strip().strip('"\'')
+                elif z.startswith("category:"):
+                    kategorie = z.split(":", 1)[1].strip().strip('"\'')
+    except Exception:
+        return None
+    if not name:
+        name = os.path.basename(os.path.dirname(pfad))
+    return {"name": name, "beschreibung": beschreibung[:400],
+            "kategorie": kategorie or pfad.replace(SKILLS_DIR, "").strip("/").split("/")[0],
+            "pfad": pfad}
+
+
+def skills_indexieren():
+    """Baut den Index einmalig beim Start. Duplikate (.gemini) werden uebersprungen."""
+    global SKILL_INDEX, PERSONA_INDEX
+    SKILL_INDEX, PERSONA_INDEX = [], []
+    if not os.path.isdir(SKILLS_DIR):
+        print("  [skills] Bibliothek nicht gemountet", flush=True)
+        return
+    gesehen = set()
+    for wurzel, dirs, dateien in os.walk(SKILLS_DIR):
+        dirs[:] = [d for d in dirs if d not in (".gemini", ".hermes", ".vibe", ".git", "node_modules")]
+        if "SKILL.md" in dateien:
+            eintrag = _frontmatter(os.path.join(wurzel, "SKILL.md"))
+            if eintrag and eintrag["name"].lower() not in gesehen:
+                gesehen.add(eintrag["name"].lower())
+                SKILL_INDEX.append(eintrag)
+    pdir = os.path.join(SKILLS_DIR, "agents", "personas")
+    if os.path.isdir(pdir):
+        for f in sorted(os.listdir(pdir)):
+            if f.endswith(".md") and f not in ("README.md", "TEMPLATE.md"):
+                PERSONA_INDEX.append({"name": f[:-3], "pfad": os.path.join(pdir, f)})
+    print(f"  [skills] {len(SKILL_INDEX)} Skills, {len(PERSONA_INDEX)} Personas indexiert", flush=True)
+
+
+def tool_skill_suchen(inp):
+    query = (inp.get("query") or "").strip().lower()
+    if not SKILL_INDEX:
+        return "Skill-Bibliothek nicht verfuegbar."
+    if not query:
+        kats = {}
+        for s in SKILL_INDEX:
+            kats[s["kategorie"]] = kats.get(s["kategorie"], 0) + 1
+        return (f"{len(SKILL_INDEX)} Skills in diesen Bereichen:\n" +
+                "\n".join(f"  {k} ({v})" for k, v in sorted(kats.items(), key=lambda x: -x[1])) +
+                "\n\nSuche mit einem Stichwort, z.B. 'pricing', 'seo', 'security'.")
+    woerter = [w for w in re.split(r"[^a-z0-9aeoeueaeoeuess]+", query) if len(w) > 2]
+    treffer = []
+    for s in SKILL_INDEX:
+        heu = f"{s['name']} {s['beschreibung']} {s['kategorie']}".lower()
+        punkte = sum(3 if w in s["name"].lower() else (1 if w in heu else 0) for w in woerter)
+        if punkte:
+            treffer.append((punkte, s))
+    if not treffer:
+        return f"Keine Skills zu '{query}' gefunden."
+    treffer.sort(key=lambda t: -t[0])
+    zeilen = [f"- {s['name']} [{s['kategorie']}]: {s['beschreibung'][:180]}" for _, s in treffer[:12]]
+    return (f"{len(treffer)} Treffer (max 12 gezeigt):\n" + "\n".join(zeilen) +
+            "\n\nMit skill_laden(name) holst du die vollstaendige Anleitung.")
+
+
+def tool_skill_laden(inp):
+    name = (inp.get("name") or "").strip().lower()
+    if not name:
+        return "Fehler: name noetig."
+    if not SKILL_INDEX:
+        return "Skill-Bibliothek nicht verfuegbar."
+    treffer = [s for s in SKILL_INDEX if s["name"].lower() == name] or \
+              [s for s in SKILL_INDEX if name in s["name"].lower()]
+    if not treffer:
+        return f"Skill '{name}' nicht gefunden — nutze skill_suchen."
+    s = treffer[0]
+    try:
+        with open(s["pfad"], encoding="utf-8", errors="replace") as f:
+            inhalt = f.read()
+    except Exception as e:
+        return f"Fehler beim Lesen: {e}"
+    if len(inhalt) > SKILL_MAX_ZEICHEN:
+        inhalt = inhalt[:SKILL_MAX_ZEICHEN] + "\n\n[... gekuerzt]"
+    return f"=== SKILL: {s['name']} [{s['kategorie']}] ===\n{inhalt}"
+
+
+def tool_persona_laden(inp):
+    name = (inp.get("name") or "").strip().lower()
+    if not PERSONA_INDEX:
+        return "Keine Personas verfuegbar."
+    if not name:
+        return "Verfuegbare Personas:\n" + "\n".join(f"  - {p['name']}" for p in PERSONA_INDEX)
+    treffer = [p for p in PERSONA_INDEX if name in p["name"].lower()]
+    if not treffer:
+        return ("Persona nicht gefunden. Verfuegbar:\n" +
+                "\n".join(f"  - {p['name']}" for p in PERSONA_INDEX))
+    try:
+        with open(treffer[0]["pfad"], encoding="utf-8", errors="replace") as f:
+            inhalt = f.read()[:SKILL_MAX_ZEICHEN]
+    except Exception as e:
+        return f"Fehler: {e}"
+    return f"=== PERSONA: {treffer[0]['name']} ===\n{inhalt}"
+
+
+# ── AUFTRAGS-SYSTEM (mehrstufige Aufgaben) ───────────────────
+JOB_MAX_SCHRITTE = int(os.getenv("JOB_MAX_SCHRITTE", "8"))
+JOB_RUNDEN = int(os.getenv("JOB_RUNDEN_PRO_SCHRITT", "12"))
+JOB_NOTIZ_LIMIT = 7000
+
+
+def init_jobs():
+    try:
+        conn = pg_conn()
+        with conn, conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS jobs (
+                id SERIAL PRIMARY KEY,
+                titel TEXT,
+                auftrag TEXT,
+                schritte JSONB,
+                aktueller_schritt INT DEFAULT 0,
+                notizen TEXT DEFAULT '',
+                status TEXT DEFAULT 'offen',
+                ergebnis TEXT,
+                created_at TIMESTAMPTZ DEFAULT now(),
+                updated_at TIMESTAMPTZ DEFAULT now())""")
+        conn.close()
+        print("  [jobs] Tabelle bereit", flush=True)
+    except Exception as e:
+        print(f"  [jobs] {e}", flush=True)
+
+
+def _job_update(job_id, **felder):
+    if not felder:
+        return
+    sets = ", ".join(f"{k} = %s" for k in felder)
+    werte = list(felder.values()) + [job_id]
+    try:
+        conn = pg_conn()
+        with conn, conn.cursor() as cur:
+            cur.execute(f"UPDATE jobs SET {sets}, updated_at = now() WHERE id = %s", werte)
+        conn.close()
+    except Exception as e:
+        print(f"  [jobs] update: {e}", flush=True)
+
+
+def _job_holen(job_id=None):
+    """Naechsten offenen Job holen, oder einen bestimmten."""
+    try:
+        conn = pg_conn()
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if job_id:
+                cur.execute("SELECT * FROM jobs WHERE id = %s", (job_id,))
+            else:
+                cur.execute("SELECT * FROM jobs WHERE status IN ('offen','laeuft') "
+                            "ORDER BY id ASC LIMIT 1")
+            row = cur.fetchone()
+        conn.close()
+        return dict(row) if row else None
+    except Exception as e:
+        print(f"  [jobs] holen: {e}", flush=True)
+        return None
+
+
+def tool_job_anlegen(inp):
+    titel = (inp.get("titel") or "").strip()
+    auftrag = (inp.get("auftrag") or "").strip()
+    schritte = inp.get("schritte") or []
+    if not titel or not auftrag:
+        return "Fehler: titel und auftrag noetig."
+    if not isinstance(schritte, list) or not schritte:
+        return "Fehler: schritte muss eine Liste mit mindestens einem Schritt sein."
+    schritte = [str(s).strip() for s in schritte if str(s).strip()][:JOB_MAX_SCHRITTE]
+    try:
+        conn = pg_conn()
+        with conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO jobs (titel, auftrag, schritte) VALUES (%s, %s, %s) RETURNING id",
+                        (titel[:200], auftrag, json.dumps(schritte, ensure_ascii=False)))
+            jid = cur.fetchone()[0]
+        conn.close()
+        print(f"  [jobs] #{jid} angelegt: {titel} ({len(schritte)} Schritte)", flush=True)
+        return (f"Auftrag #{jid} angelegt: {titel}\n"
+                f"Schritte: {len(schritte)}\n" +
+                "\n".join(f"  {i+1}. {s}" for i, s in enumerate(schritte)) +
+                "\n\nIch arbeite ihn im Hintergrund ab. Frag mit job_status nach dem Stand.")
+    except Exception as e:
+        return f"Fehler: {e}"
+
+
+def tool_job_status(inp):
+    jid = inp.get("id")
+    try:
+        conn = pg_conn()
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            if jid:
+                cur.execute("SELECT * FROM jobs WHERE id = %s", (int(jid),))
+                rows = cur.fetchall()
+            else:
+                cur.execute("SELECT * FROM jobs ORDER BY id DESC LIMIT 8")
+                rows = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        return f"Fehler: {e}"
+    if not rows:
+        return "Keine Auftraege vorhanden."
+    out = []
+    for r in rows:
+        schritte = r["schritte"] or []
+        n = len(schritte)
+        i = r["aktueller_schritt"] or 0
+        zeile = f"#{r['id']} [{r['status']}] {r['titel']} — Schritt {min(i+1, n)}/{n}"
+        if r["status"] == "fertig" and r.get("ergebnis"):
+            zeile += f"\n   Ergebnis: {r['ergebnis'][:400]}"
+        elif r["status"] == "laeuft" and i < n:
+            zeile += f"\n   Laeuft gerade: {schritte[i]}"
+        elif r["status"] == "fehler":
+            zeile += f"\n   Abgebrochen: {(r.get('ergebnis') or '')[:200]}"
+        out.append(zeile)
+    return "\n".join(out)
+
+
+def tool_job_abbrechen(inp):
+    jid = inp.get("id")
+    if not jid:
+        return "Fehler: id noetig."
+    _job_update(int(jid), status="abgebrochen")
+    return f"Auftrag #{jid} abgebrochen."
+
+
+JOB_SYS = """Du bist JARVIS und arbeitest EINEN Schritt eines groesseren Auftrags ab.
+Nutze die Tools, um den Schritt wirklich auszufuehren — nicht ankuendigen, sondern tun.
+Antworte am Ende KURZ und faktisch: was hast du herausgefunden oder erledigt.
+Diese Antwort wird als Arbeitsnotiz gespeichert und ist die Grundlage fuer die naechsten Schritte.
+Keine Floskeln, keine Wiederholung des Auftrags — nur die Substanz."""
+
+
+def _job_schritt_ausfuehren(job, schritt):
+    """Ein Schritt = eigener, begrenzter Agent-Lauf mit frischem Kontext."""
+    notizen = (job.get("notizen") or "")[-JOB_NOTIZ_LIMIT:]
+    prompt = (f"GESAMT-AUFTRAG: {job['auftrag']}\n\n"
+              f"BISHERIGE ARBEITSNOTIZEN:\n{notizen or '(noch keine)'}\n\n"
+              f"DEIN SCHRITT JETZT: {schritt}")
+    messages = [{"role": "user", "content": prompt}]
+    final = ""
+    for _ in range(JOB_RUNDEN):
+        resp = client.messages.create(model=MODEL, max_tokens=MAX_TOKENS,
+                                      system=JOB_SYS, tools=TOOLS_CACHED, messages=messages)
+        try:
+            track_cost(MODEL, resp.usage.input_tokens, resp.usage.output_tokens,
+                       getattr(resp.usage, 'cache_read_input_tokens', 0) or 0,
+                       getattr(resp.usage, 'cache_creation_input_tokens', 0) or 0)
+        except Exception:
+            pass
+        txt = "".join(b.text for b in resp.content if b.type == "text").strip()
+        if txt:
+            final = txt
+        if resp.stop_reason != "tool_use":
+            break
+        a_content, t_results = [], []
+        for block in resp.content:
+            if block.type == "text":
+                a_content.append({"type": "text", "text": block.text})
+            elif block.type == "tool_use":
+                a_content.append({"type": "tool_use", "id": block.id,
+                                  "name": block.name, "input": block.input})
+                res = run_tool(block.name, block.input or {})
+                print(f"    [job-tool] {block.name} -> {str(res)[:70]}", flush=True)
+                t_results.append({"type": "tool_result", "tool_use_id": block.id, "content": res})
+        messages.append({"role": "assistant", "content": a_content})
+        messages.append({"role": "user", "content": t_results})
+    return final or "(kein Ergebnis)"
+
+
+def job_worker():
+    """Arbeitet offene Auftraege Schritt fuer Schritt ab. Fortschritt wird persistiert."""
+    while True:
+        try:
+            job = _job_holen()
+            if not job:
+                time.sleep(15)
+                continue
+            jid = job["id"]
+            schritte = job["schritte"] or []
+            i = job["aktueller_schritt"] or 0
+            if i >= len(schritte):
+                _job_update(jid, status="fertig")
+                continue
+            if job["status"] == "offen":
+                _job_update(jid, status="laeuft")
+            schritt = schritte[i]
+            print(f"  [jobs] #{jid} Schritt {i+1}/{len(schritte)}: {schritt}", flush=True)
+            try:
+                ergebnis = _job_schritt_ausfuehren(job, schritt)
+            except Exception as e:
+                print(f"  [jobs] #{jid} Fehler: {type(e).__name__}: {e}", flush=True)
+                _job_update(jid, status="fehler", ergebnis=f"{type(e).__name__}: {e}")
+                continue
+            notizen = (job.get("notizen") or "") + f"\n\n### Schritt {i+1}: {schritt}\n{ergebnis}"
+            notizen = notizen[-JOB_NOTIZ_LIMIT:]
+            neuer_index = i + 1
+            if neuer_index >= len(schritte):
+                _job_update(jid, notizen=notizen, aktueller_schritt=neuer_index,
+                            status="fertig", ergebnis=ergebnis[:4000])
+                print(f"  [jobs] #{jid} FERTIG", flush=True)
+                try:
+                    tool_remember({"title": f"Auftrag: {job['titel']}",
+                                   "content": f"{job['auftrag']}\n\nErgebnis:\n{notizen[-3000:]}"})
+                except Exception:
+                    pass
+            else:
+                _job_update(jid, notizen=notizen, aktueller_schritt=neuer_index)
+        except Exception as e:
+            print(f"  [jobs] Worker: {type(e).__name__}: {e}", flush=True)
+            time.sleep(10)
+
+
+# ── GITHUB (read-only: lesen, nie schreiben) ─────────────────
+def _gh(path, params=None):
+    if not GITHUB_TOKEN:
+        return None, "GitHub nicht konfiguriert (GITHUB_TOKEN fehlt)."
+    try:
+        r = requests.get(f"{GH_API}{path}", params=params or {}, timeout=30,
+                         headers={"Authorization": f"Bearer {GITHUB_TOKEN}",
+                                  "Accept": "application/vnd.github+json",
+                                  "X-GitHub-Api-Version": "2022-11-28"})
+        if r.status_code == 404:
+            return None, "Nicht gefunden (Pfad/Repo pruefen)."
+        if r.status_code == 401:
+            return None, "GitHub-Token ungueltig oder abgelaufen."
+        if r.status_code >= 400:
+            return None, f"GitHub-Fehler {r.status_code}: {r.text[:150]}"
+        return r.json(), None
+    except Exception as e:
+        return None, f"GitHub nicht erreichbar: {type(e).__name__}"
+
+
+def _repo_full(repo):
+    repo = (repo or "").strip()
+    return repo if "/" in repo else f"{GITHUB_USER}/{repo}"
+
+
+def tool_github_repos(inp):
+    data, err = _gh("/user/repos", {"sort": "updated", "per_page": 30, "affiliation": "owner,collaborator"})
+    if err:
+        return err
+    if not data:
+        return "Keine Repos gefunden."
+    lines = []
+    for r in data[:30]:
+        upd = (r.get("updated_at") or "")[:10]
+        priv = "privat" if r.get("private") else "oeffentlich"
+        lang = r.get("language") or "-"
+        lines.append(f"- {r.get('full_name')} ({priv}, {lang}, aktualisiert {upd})")
+    return f"{len(data)} Repositories:\n" + "\n".join(lines)
+
+
+def tool_github_browse(inp):
+    repo = _repo_full(inp.get("repo"))
+    path = (inp.get("path") or "").strip().strip("/")
+    data, err = _gh(f"/repos/{repo}/contents/{path}")
+    if err:
+        return err
+    if isinstance(data, dict):
+        return f"'{path}' ist eine Datei — nutze github_read."
+    dirs = [d for d in data if d.get("type") == "dir"]
+    files = [d for d in data if d.get("type") == "file"]
+    out = [f"{repo}/{path or ''} — {len(dirs)} Ordner, {len(files)} Dateien"]
+    for d in sorted(dirs, key=lambda x: x["name"]):
+        out.append(f"  [DIR ] {d['name']}/")
+    for f in sorted(files, key=lambda x: x["name"]):
+        kb = round((f.get("size") or 0) / 1024, 1)
+        out.append(f"  [FILE] {f['name']} ({kb} KB)")
+    return "\n".join(out[:80])
+
+
+def tool_github_read(inp):
+    repo = _repo_full(inp.get("repo"))
+    path = (inp.get("path") or "").strip().strip("/")
+    if not path:
+        return "Fehler: Dateipfad fehlt."
+    data, err = _gh(f"/repos/{repo}/contents/{path}")
+    if err:
+        return err
+    if isinstance(data, list):
+        return f"'{path}' ist ein Ordner — nutze github_browse."
+    if (data.get("size") or 0) > 400000:
+        return f"Datei zu gross ({round(data['size']/1024)} KB)."
+    try:
+        import base64
+        content = base64.b64decode(data.get("content", "")).decode("utf-8", errors="replace")
+    except Exception as e:
+        return f"Konnte Datei nicht dekodieren ({type(e).__name__}) — evtl. Binaerdatei."
+    limit = min(int(inp.get("max_zeichen") or 12000), 20000)
+    if len(content) > limit:
+        content = content[:limit] + f"\n\n[... gekuerzt, insgesamt {len(content)} Zeichen]"
+    return f"=== {repo}/{path} ===\n{content}"
+
+
+def tool_github_search(inp):
+    query = (inp.get("query") or "").strip()
+    if not query:
+        return "Fehler: leere Suche."
+    repo = inp.get("repo")
+    q = query + (f" repo:{_repo_full(repo)}" if repo else f" user:{GITHUB_USER}")
+    data, err = _gh("/search/code", {"q": q, "per_page": 20})
+    if err:
+        return err
+    items = data.get("items", []) if isinstance(data, dict) else []
+    if not items:
+        return "Keine Treffer."
+    lines = [f"{data.get('total_count', len(items))} Treffer (max 20 gezeigt):"]
+    for it in items[:20]:
+        lines.append(f"- {it.get('repository', {}).get('full_name')}/{it.get('path')}")
+    return "\n".join(lines)
+
+
+def tool_github_commits(inp):
+    repo = _repo_full(inp.get("repo"))
+    params = {"per_page": min(int(inp.get("anzahl") or 10), 30)}
+    if inp.get("pfad"):
+        params["path"] = inp["pfad"]
+    data, err = _gh(f"/repos/{repo}/commits", params)
+    if err:
+        return err
+    if not data:
+        return "Keine Commits gefunden."
+    lines = [f"Letzte Commits in {repo}:"]
+    for c in data:
+        commit = c.get("commit", {})
+        datum = (commit.get("author", {}).get("date") or "")[:10]
+        msg = (commit.get("message") or "").split("\n")[0][:80]
+        lines.append(f"- {datum} {msg}")
+    return "\n".join(lines)
+
+
 # ── iCLOUD-KALENDER (CalDAV, strikt read-only) ───────────────
 def tool_check_calendar(inp):
     if not ICLOUD_USER or not ICLOUD_PASS:
@@ -658,7 +1313,9 @@ def tool_ask_immo(inp):
     if not task:
         return "Fehler: leerer Auftrag."
     try:
-        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
+                            socket_keepalive=True, health_check_interval=20,
+                            retry_on_timeout=True, socket_timeout=30)
         req_id = str(uuid.uuid4())
         r.rpush("bot:immo:inbox", json.dumps({"id": req_id, "text": task}, ensure_ascii=False))
         resp = r.blpop(f"bot:immo:reply:{req_id}", timeout=280)
@@ -674,7 +1331,9 @@ def tool_ask_ceo(inp: dict) -> str:
     if not task:
         return "Fehler: leerer Auftrag."
     try:
-        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+        r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
+                            socket_keepalive=True, health_check_interval=20,
+                            retry_on_timeout=True, socket_timeout=30)
         req_id = str(uuid.uuid4())
         r.rpush("bot:ceo:inbox", json.dumps({"id": req_id, "text": task}, ensure_ascii=False))
         resp = r.blpop(f"bot:ceo:reply:{req_id}", timeout=150)
@@ -704,6 +1363,30 @@ def run_tool(name: str, inp: dict) -> str:
         return tool_web_open(inp)
     if name == "web_click":
         return tool_web_click(inp)
+    if name == "buroflow_zahlen":
+        return tool_buroflow_zahlen(inp)
+    if name == "skill_suchen":
+        return tool_skill_suchen(inp)
+    if name == "skill_laden":
+        return tool_skill_laden(inp)
+    if name == "persona_laden":
+        return tool_persona_laden(inp)
+    if name == "job_anlegen":
+        return tool_job_anlegen(inp)
+    if name == "job_status":
+        return tool_job_status(inp)
+    if name == "job_abbrechen":
+        return tool_job_abbrechen(inp)
+    if name == "github_repos":
+        return tool_github_repos(inp)
+    if name == "github_browse":
+        return tool_github_browse(inp)
+    if name == "github_read":
+        return tool_github_read(inp)
+    if name == "github_search":
+        return tool_github_search(inp)
+    if name == "github_commits":
+        return tool_github_commits(inp)
     if name == "check_calendar":
         return tool_check_calendar(inp)
     if name == "ask_immo":
@@ -946,6 +1629,48 @@ if TOOLS_CACHED:
     TOOLS_CACHED[-1]["cache_control"] = {"type": "ephemeral"}
 
 
+
+# Erkennt Antworten, die nur eine Absicht ankuendigen, ohne sie auszufuehren
+ANNOUNCE_RE = re.compile(
+    r"(lass mich|ich (schaue|sehe|gehe|starte|pruefe|pr\u00fcfe|hole|lese|checke|melde|merke|speichere)"
+    r"|starte (jetzt|gleich|mal)|einen? moment|moment mal|bin dran|noch dran"
+    r"|mache mich (dran|ans)|fange (jetzt |gleich )?an|arbeite (das )?(jetzt|gleich)"
+    r"|gebe dir gleich|sage dir gleich|dauert (einen|kurz)|gehe (das )?(jetzt |gleich )?durch)", re.I)
+
+# Kurze Saetze im Stil "Jetzt alles merken." / "Dann weiter pruefen."
+INTENT_RE = re.compile(
+    r"^(jetzt|gleich|nun|dann|weiter|als n(ae|\u00e4)chstes|zuerst|noch)\b[^.!?]{0,70}\b\w{3,}(en|ern)\.?$",
+    re.I)
+
+
+MEMORY_TRIGGER = re.compile(
+    r"(merk(e|en)?\s+(dir|es|das|alles)|merk\s+dir|speicher(e|n|st)?\b|behalte?\b"
+    r"|lern(e|en)?\s+(daraus|davon)|ins\s+ged(ae|\u00e4)chtnis|praeg|pr\u00e4g"
+    r"|halt(e)?\s+.{0,12}fest|schreib(e)?\s+.{0,12}auf|notier)", re.I)
+
+
+def _verlangt_speichern(text):
+    return bool(MEMORY_TRIGGER.search(text or ""))
+
+
+def _ist_leere_ankuendigung(text):
+    """True, wenn der Bot nur ankuendigt statt zu handeln."""
+    if not text:
+        return False
+    t = " ".join(text.split())
+    if len(t) > 260:
+        return False
+    if ANNOUNCE_RE.search(t):
+        return True
+    # Absichts-Saetze pruefen (auch wenn sie nicht am Anfang stehen)
+    saetze = [s.strip() for s in re.split(r"[.!?]+", t) if s.strip()]
+    if len(t) <= 160:
+        for s in saetze:
+            if len(s) <= 90 and INTENT_RE.match(s):
+                return True
+    return False
+
+
 def think(history, user_text):
     """Agent-Loop wie im lokalen v5: Claude darf Tools nutzen, bis end_turn."""
     # AUTO-RECALL: relevantes Langzeitwissen als Kontext mitgeben
@@ -961,6 +1686,10 @@ def think(history, user_text):
         messages[-1] = {"role": "user", "content": user_text + context}
 
     final_text = ""
+    tool_benutzt = False
+    nachfass_zahl = 0
+    genutzte_tools = set()
+    braucht_remember = _verlangt_speichern(user_text)
     for _round in range(MAX_TOOL_ROUNDS):
         resp = client.messages.create(
             model=MODEL, max_tokens=MAX_TOKENS, system=SYS_CACHED,
@@ -972,11 +1701,19 @@ def think(history, user_text):
             pass
 
         text_parts = [b.text for b in resp.content if b.type == "text"]
-        if text_parts:
-            final_text = "".join(text_parts).strip()
+        _txt = "".join(text_parts).strip()
+        if _txt:
+            final_text = _txt
 
         if resp.stop_reason != "tool_use":
+            if nachfass_zahl < 2 and _ist_leere_ankuendigung(final_text):
+                nachfass_zahl += 1
+                print("  [nudge] Ankuendigung ohne Ausfuehrung erkannt — fasse nach", flush=True)
+                messages.append({"role": "assistant", "content": final_text})
+                messages.append({"role": "user", "content": "Du hast nur angekuendigt, aber nichts getan. Fuehre den Auftrag JETZT aus: rufe die noetigen Tools auf und antworte erst, wenn du das Ergebnis hast. Keine weitere Ankuendigung."})
+                continue
             break
+        tool_benutzt = True
 
         # Tool-Aufrufe ausfuehren
         assistant_content = []
@@ -989,6 +1726,7 @@ def think(history, user_text):
                     "type": "tool_use", "id": block.id,
                     "name": block.name, "input": block.input,
                 })
+                genutzte_tools.add(block.name)
                 result = run_tool(block.name, block.input or {})
                 print(f"  [tool] {block.name} -> {result[:100]}", flush=True)
                 tool_results.append({
@@ -998,31 +1736,130 @@ def think(history, user_text):
         messages.append({"role": "assistant", "content": assistant_content})
         messages.append({"role": "user", "content": tool_results})
 
+    # Auftrag verlangte Speichern, aber remember wurde nicht aufgerufen -> ERZWINGEN
+    if braucht_remember and "remember" not in genutzte_tools:
+        print("  [zwang] Auftrag verlangte Speichern — erzwinge remember", flush=True)
+        try:
+            messages.append({"role": "assistant", "content": final_text or "..."})
+            messages.append({"role": "user", "content":
+                "Du hast noch nichts gespeichert. Rufe JETZT remember auf und sichere die "
+                "wichtigsten Erkenntnisse (aussagekraeftiger Titel, substanzieller Inhalt). "
+                "Bei mehreren Themen mehrere Aufrufe."})
+            for versuch in range(3):
+                rz = client.messages.create(
+                    model=MODEL, max_tokens=MAX_TOKENS, system=SYS_CACHED,
+                    tools=TOOLS_CACHED, messages=messages,
+                    tool_choice={"type": "tool", "name": "remember"})
+                try:
+                    track_cost(MODEL, rz.usage.input_tokens, rz.usage.output_tokens,
+                               getattr(rz.usage, 'cache_read_input_tokens', 0) or 0,
+                               getattr(rz.usage, 'cache_creation_input_tokens', 0) or 0)
+                except Exception:
+                    pass
+                a_content, t_results, gespeichert = [], [], []
+                for block in rz.content:
+                    if block.type == "text":
+                        a_content.append({"type": "text", "text": block.text})
+                    elif block.type == "tool_use":
+                        a_content.append({"type": "tool_use", "id": block.id,
+                                          "name": block.name, "input": block.input})
+                        res = run_tool(block.name, block.input or {})
+                        print(f"  [zwang-tool] {block.name} -> {str(res)[:80]}", flush=True)
+                        if block.name == "remember":
+                            gespeichert.append((block.input or {}).get("title", "?"))
+                            genutzte_tools.add("remember")
+                        t_results.append({"type": "tool_result", "tool_use_id": block.id, "content": res})
+                if not t_results:
+                    break
+                messages.append({"role": "assistant", "content": a_content})
+                messages.append({"role": "user", "content": t_results})
+                if gespeichert:
+                    titel = ", ".join(gespeichert)
+                    if final_text and "gespeichert" not in final_text.lower():
+                        final_text = final_text.rstrip(".") + f"\n\nGespeichert: {titel}"
+                    elif not final_text:
+                        final_text = f"Gespeichert: {titel}"
+                    break
+        except Exception as e:
+            print(f"  [zwang] {type(e).__name__}: {e}", flush=True)
+
+    # Runden aufgebraucht, aber noch keine echte Antwort -> Abschluss ohne Tools erzwingen
+    if tool_benutzt and (not final_text or resp.stop_reason == "tool_use"):
+        try:
+            messages.append({"role": "user", "content":
+                "Die Werkzeug-Runden sind aufgebraucht. Fasse JETZT zusammen, was du "
+                "herausgefunden hast, und nenne offene Punkte. Keine weiteren Tool-Aufrufe."})
+            resp2 = client.messages.create(model=MODEL, max_tokens=MAX_TOKENS,
+                                           system=SYS_CACHED, messages=messages)
+            try:
+                track_cost(MODEL, resp2.usage.input_tokens, resp2.usage.output_tokens,
+                           getattr(resp2.usage, 'cache_read_input_tokens', 0) or 0,
+                           getattr(resp2.usage, 'cache_creation_input_tokens', 0) or 0)
+            except Exception:
+                pass
+            t2 = "".join(b.text for b in resp2.content if b.type == "text").strip()
+            if t2:
+                final_text = t2
+                print("  [abschluss] Zusammenfassung nach Rundenlimit erzwungen", flush=True)
+        except Exception as e:
+            print(f"  [abschluss] {type(e).__name__}: {e}", flush=True)
+
     if not final_text:
-        final_text = "..."
+        final_text = ("Ich konnte den Auftrag nicht abschliessen — bitte in kleineren Schritten "
+                      "anfragen (z.B. erst Ordnerstruktur, dann einzelne Dateien).")
     # Ins Kurzzeitgedaechtnis nur die saubere Antwort (ohne Tool-Zwischenschritte)
     history.append({"role": "assistant", "content": final_text})
     return final_text
 
 
 # ── HAUPTSCHLEIFE ────────────────────────────────────────────
+def _antwort_senden(r, queue, text):
+    """Antwort zustellen — auch wenn die Verbindung waehrend langer Arbeit abgelaufen ist."""
+    for versuch in range(3):
+        try:
+            r.rpush(queue, text)
+            r.expire(queue, 300)
+            return True
+        except Exception as e:
+            print(f"  [reply] Versuch {versuch + 1} fehlgeschlagen ({type(e).__name__}) — neue Verbindung", flush=True)
+            try:
+                r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
+                                socket_keepalive=True, health_check_interval=20,
+                                retry_on_timeout=True, socket_timeout=30)
+            except Exception:
+                pass
+            time.sleep(1)
+    print("  [reply] Antwort konnte NICHT zugestellt werden!", flush=True)
+    return False
+
+
 def main():
     print("=" * 58, flush=True)
-    print("  JARVIS CORE v6 — GEDAECHTNIS + NIGHTLY + MAIL + STIL + CEO", flush=True)
+    print("  JARVIS CORE v7.9 — GEDAECHTNIS, MAIL, WEB, KALENDER, GITHUB, BOTS", flush=True)
     print(f"  Modell    : {MODEL}", flush=True)
     print(f"  Extraktion: {EXTRACT_MODEL}", flush=True)
     print(f"  Embeddings: {EMBED_MODEL if oai else 'DEAKTIVIERT (kein Key)'}", flush=True)
     print(f"  Nightly   : taeglich {NIGHTLY_HOUR:02d}:00", flush=True)
     print(f"  Kalender  : {'aktiv' if (ICLOUD_USER and ICLOUD_PASS) else 'nicht konfiguriert'}", flush=True)
+    print(f"  GitHub    : {'aktiv (' + GITHUB_USER + ')' if GITHUB_TOKEN else 'nicht konfiguriert'}", flush=True)
+    print(f"  Bueroflow : {'DB verbunden' if SUPABASE_URL else 'nicht konfiguriert'}", flush=True)
+    print(f"  Auftraege : max {JOB_MAX_SCHRITTE} Schritte, {JOB_RUNDEN} Runden je Schritt", flush=True)
+    print(f"  Skills    : {len(SKILL_INDEX)} Anleitungen, {len(PERSONA_INDEX)} Personas", flush=True)
     for k, acc in MAIL_ACCOUNTS.items():
         status = "aktiv" if (acc["user"] and acc["pass"]) else "nicht konfiguriert"
         print(f"  Mail {k:<6}: {status}", flush=True)
     print("=" * 58, flush=True)
 
+    skills_indexieren()
+    init_jobs()
+    threading.Thread(target=job_worker, daemon=True).start()
+
     r = None
     for attempt in range(30):
         try:
-            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True)
+            r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
+                            socket_keepalive=True, health_check_interval=20,
+                            retry_on_timeout=True, socket_timeout=30)
             r.ping()
             print("  [redis] verbunden", flush=True)
             break
@@ -1051,27 +1888,23 @@ def main():
             reply_q = REPLY_KEY.format(id=req_id)
 
             if not text:
-                r.rpush(reply_q, "Leere Anfrage.")
-                r.expire(reply_q, 120)
+                _antwort_senden(r, reply_q, "Leere Anfrage.")
                 continue
 
             low = text.lower()
             if low in ("reset", "vergiss alles", "speicher leeren"):
                 r.delete(HISTORY_KEY)
-                r.rpush(reply_q, "Kurzzeitgedaechtnis geleert. (Langzeitgedaechtnis bleibt.)")
-                r.expire(reply_q, 120)
+                _antwort_senden(r, reply_q, "Kurzzeitgedaechtnis geleert. (Langzeitgedaechtnis bleibt.)")
                 continue
 
             if low in ("konsolidiere", "konsolidieren", "nightly"):
                 result = consolidate(r)
-                r.rpush(reply_q, result)
-                r.expire(reply_q, 120)
+                _antwort_senden(r, reply_q, result)
                 continue
 
             if low.startswith("stil "):
                 acct = low.split(None, 1)[1].strip()
-                r.rpush(reply_q, analyze_style(acct))
-                r.expire(reply_q, 120)
+                _antwort_senden(r, reply_q, analyze_style(acct))
                 continue
 
             print(f"  Du: {text}", flush=True)
@@ -1085,8 +1918,7 @@ def main():
             log_exchange(r, text, answer)
             print(f"  JARVIS: {answer}\n", flush=True)
 
-            r.rpush(reply_q, answer)
-            r.expire(reply_q, 120)
+            _antwort_senden(r, reply_q, answer)
 
         except KeyboardInterrupt:
             break
