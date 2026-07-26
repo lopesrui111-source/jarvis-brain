@@ -89,6 +89,9 @@ GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GITHUB_USER = os.getenv("GITHUB_USER", "lopesrui111-source")
 GH_API = "https://api.github.com"
 
+# Google-Kalender: private iCal-Adressen (kommagetrennt), read-only
+GOOGLE_ICS = [u.strip() for u in os.getenv("GOOGLE_ICS_URLS", "").split(",") if u.strip()]
+
 ICLOUD_USER = os.getenv("ICLOUD_USER", "")
 ICLOUD_PASS = os.getenv("ICLOUD_PASS", "")
 
@@ -1189,10 +1192,89 @@ def tool_github_commits(inp):
 
 
 # ── iCLOUD-KALENDER (CalDAV, strikt read-only) ───────────────
+def _google_termine(days):
+    """Liest Termine aus den privaten iCal-Adressen (Google Kalender). Read-only."""
+    from datetime import timedelta, date as _date
+    import icalendar
+    try:
+        import recurring_ical_events
+        wiederholungen = True
+    except Exception:
+        wiederholungen = False
+
+    start = datetime.now()
+    ende = start + timedelta(days=days)
+    events = []
+    fehler = []
+
+    for url in GOOGLE_ICS[:5]:
+        try:
+            r = requests.get(url, timeout=30)
+            if r.status_code >= 400:
+                fehler.append(f"HTTP {r.status_code}")
+                continue
+            cal = icalendar.Calendar.from_ical(r.text)
+        except Exception as e:
+            fehler.append(f"{type(e).__name__}")
+            continue
+
+        name = str(cal.get("X-WR-CALNAME") or "Kalender")
+
+        if wiederholungen:
+            try:
+                treffer = recurring_ical_events.of(cal).between(start, ende)
+            except Exception:
+                treffer = [c for c in cal.walk("VEVENT")]
+        else:
+            treffer = [c for c in cal.walk("VEVENT")]
+
+        for ev in treffer:
+            try:
+                dt = ev.get("DTSTART").dt
+                summ = str(ev.get("SUMMARY") or "(ohne Titel)")
+                ort = str(ev.get("LOCATION") or "").strip()
+                if isinstance(dt, datetime):
+                    naiv = dt.replace(tzinfo=None) if dt.tzinfo else dt
+                    if not (start <= naiv <= ende):
+                        continue
+                    label = naiv.strftime("%a %d.%m. %H:%M")
+                    dte = ev.get("DTEND")
+                    if dte is not None and isinstance(dte.dt, datetime):
+                        e2 = dte.dt.replace(tzinfo=None) if dte.dt.tzinfo else dte.dt
+                        label += e2.strftime("-%H:%M")
+                    sortier = naiv
+                else:
+                    tag = datetime.combine(dt, datetime.min.time())
+                    if not (start.replace(hour=0, minute=0) <= tag <= ende):
+                        continue
+                    label = tag.strftime("%a %d.%m.") + " ganztaegig"
+                    sortier = tag
+                zeile = f"{label} | {summ}"
+                if ort:
+                    zeile += f" ({ort[:40]})"
+                zeile += f" [{name}]"
+                events.append((sortier, zeile))
+            except Exception:
+                continue
+
+    if not events:
+        if fehler:
+            return f"Kalender nicht lesbar: {', '.join(fehler[:3])}"
+        return f"Keine Termine in den naechsten {days} Tagen."
+    events.sort(key=lambda x: x[0])
+    kopf = f"Termine der naechsten {days} Tage:"
+    if not wiederholungen:
+        kopf += " (Serientermine evtl. unvollstaendig)"
+    return kopf + "\n" + "\n".join(z for _, z in events[:40])
+
+
 def tool_check_calendar(inp):
-    if not ICLOUD_USER or not ICLOUD_PASS:
-        return "iCloud nicht konfiguriert — ICLOUD_USER/ICLOUD_PASS in .env fehlen."
     days = min(max(int(inp.get("days") or 7), 1), 30)
+    if GOOGLE_ICS:
+        return _google_termine(days)
+    if not ICLOUD_USER or not ICLOUD_PASS:
+        return ("Kein Kalender konfiguriert — GOOGLE_ICS_URLS (Google) oder "
+                "ICLOUD_USER/ICLOUD_PASS (iCloud) in der .env setzen.")
     try:
         import caldav
         from datetime import timedelta, date as _date
@@ -1840,7 +1922,8 @@ def main():
     print(f"  Extraktion: {EXTRACT_MODEL}", flush=True)
     print(f"  Embeddings: {EMBED_MODEL if oai else 'DEAKTIVIERT (kein Key)'}", flush=True)
     print(f"  Nightly   : taeglich {NIGHTLY_HOUR:02d}:00", flush=True)
-    print(f"  Kalender  : {'aktiv' if (ICLOUD_USER and ICLOUD_PASS) else 'nicht konfiguriert'}", flush=True)
+    _kal = f"Google ({len(GOOGLE_ICS)} Kalender)" if GOOGLE_ICS else ("iCloud" if (ICLOUD_USER and ICLOUD_PASS) else "nicht konfiguriert")
+    print(f"  Kalender  : {_kal}", flush=True)
     print(f"  GitHub    : {'aktiv (' + GITHUB_USER + ')' if GITHUB_TOKEN else 'nicht konfiguriert'}", flush=True)
     print(f"  Bueroflow : {'DB verbunden' if SUPABASE_URL else 'nicht konfiguriert'}", flush=True)
     print(f"  Auftraege : max {JOB_MAX_SCHRITTE} Schritte, {JOB_RUNDEN} Runden je Schritt", flush=True)
