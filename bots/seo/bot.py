@@ -231,6 +231,54 @@ def _ist_blockiert(url, snapshot):
     return treffer >= 3 and len(s) < 5000
 
 
+CONSENT_HINWEIS = ("consent to cookies", "cookie", "datenschutz-einstellung",
+                   "privatsphaere", "privatsph\u00e4re", "einwilligung")
+# Reihenfolge = Prioritaet: erst ablehnen, nur zur Not akzeptieren
+CONSENT_ABLEHNEN = ("ablehnen", "reject", "nur notwendige", "nur essenzielle", "necessary only",
+                    "decline", "weiter ohne", "nicht akzeptieren", "alle ablehnen")
+CONSENT_ANNEHMEN = ("akzeptieren", "zustimmen", "einverstanden", "accept", "agree", "alle erlauben")
+
+
+def _ist_consent(snapshot):
+    kopf = " ".join((snapshot or "").split())[:600].lower()
+    return any(w in kopf for w in CONSENT_HINWEIS)
+
+
+def _consent_ref(snapshot):
+    """Sucht den Consent-Button. Datenschutzfreundlich: Ablehnen vor Akzeptieren."""
+    zeilen = [z for z in (snapshot or "").splitlines() if "button" in z.lower()]
+    for begriffe in (CONSENT_ABLEHNEN, CONSENT_ANNEHMEN):
+        for z in zeilen:
+            zl = z.lower()
+            if not any(w in zl for w in begriffe):
+                continue
+            m = re.search(r"\[ref=([A-Za-z0-9_-]+)\]", z)
+            if m:
+                return m.group(1), z.strip()[:70]
+    return None, None
+
+
+def _klick(tab, ref):
+    try:
+        r = requests.post(f"{CAMOFOX_URL}/tabs/{tab}/click",
+                          json={"userId": BOT_USER_ID, "sessionKey": "main", "ref": ref}, timeout=40)
+        return r.status_code < 400
+    except Exception:
+        return False
+
+
+def _snapshot(tab):
+    try:
+        s = requests.get(f"{CAMOFOX_URL}/tabs/{tab}/snapshot",
+                         params={"userId": BOT_USER_ID}, timeout=70)
+        if s.status_code >= 400:
+            return None, None
+        d = s.json()
+        return (d.get("snapshot") or ""), (d.get("url") or "")
+    except Exception:
+        return None, None
+
+
 def fetch_page(url):
     try:
         r = requests.post(f"{CAMOFOX_URL}/tabs",
@@ -243,11 +291,27 @@ def fetch_page(url):
         if s.status_code >= 400:
             return None, f"Snapshot-Fehler ({s.status_code})"
         daten = s.json()
-        snap = (daten.get("snapshot") or "")[:9000]
+        snap = daten.get("snapshot") or ""
         end_url = daten.get("url") or url
+
+        # Cookie-Dialog wegklicken (nur dieser eine Klick, sonst wird nichts bedient)
+        if _ist_consent(snap):
+            ref, beschriftung = _consent_ref(snap)
+            if ref:
+                if _klick(tab, ref):
+                    print(f"  [consent] weggeklickt: {beschriftung}", flush=True)
+                    time.sleep(1.2)
+                    neu, neue_url = _snapshot(tab)
+                    if neu:
+                        snap, end_url = neu, (neue_url or end_url)
+            else:
+                print("  [consent] Dialog erkannt, aber kein Button gefunden", flush=True)
+
         if _ist_blockiert(end_url, snap):
             return None, f"BLOCKIERT (Login/Bot-Schutz) bei {end_url[:90]}"
-        return snap, None
+        if _ist_consent(snap) and len(snap) < 8000:
+            return None, "BLOCKIERT (Cookie-Dialog liess sich nicht schliessen)"
+        return snap[:9000], None
     except Exception as e:
         return None, f"Browser nicht erreichbar ({type(e).__name__})"
 
