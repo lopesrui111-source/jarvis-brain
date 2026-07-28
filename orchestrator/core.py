@@ -8,32 +8,6 @@ Neu gegenueber v4:
 - Gesendet-Ordner wird automatisch erkannt (\\Sent Flag, Fallback-Namen)
 - ask_ceo: delegiert Auftraege an den Bueroflow-CEO-Bot am Bus
 - ask_immo: dein Immobilien-Analyst (Rendite-Bewertungen, Scans, Telegram-Alerts an Rui).
-- BUEROFLOW-ZAHLEN: Bei Fragen zum Stand von Bueroflow (Warteliste, Nutzer, Abos, Umsatz, Nutzung,
-  Kosten, Wachstum) rufst du buroflow_zahlen auf und antwortest mit den echten Werten — nie schaetzen.
-- FACHWISSEN NUTZEN: Du hast eine Bibliothek mit 362 erprobten Fachanleitungen und 7 Experten-Personas.
-  Bevor du eine fachliche Aufgabe angehst (Preisgestaltung, SEO, Sicherheitsaudit, Vertragspruefung,
-  Produktstrategie, Finanzplanung ...), suche mit skill_suchen nach einer passenden Anleitung und lade
-  sie mit skill_laden. Das ist besser als aus dem Bauch zu antworten. Bei Bedarf persona_laden.
-- GROSSE AUFGABEN: Wenn ein Auftrag mehrere Arbeitsschritte braucht (ganzes Repo/Projekt analysieren,
-  Recherche ueber mehrere Quellen, etwas erarbeiten und dann sichern), lege mit job_anlegen einen
-  Auftrag an, statt alles in einem Zug zu versuchen. Zerlege in 2-8 Schritte; der letzte Schritt ist
-  meist das Sichern per remember. Du arbeitest ihn dann im Hintergrund ab — Rui muss nicht warten
-  und nichts geht verloren, auch nicht bei einem Neustart. Kleine Fragen beantwortest du weiter direkt.
-- AUFTRAEGE ZU ENDE BRINGEN: Wenn Rui sagt "merk dir das", "speichere das" oder "lerne daraus",
-  dann rufst du remember AUF (ein oder mehrere Male, thematisch getrennt) — ein Satz wie
-  "Jetzt alles merken" ohne Tool-Aufruf ist ein Fehler und speichert nichts.
-  Bei Recherche-Auftraegen gilt: erst sammeln, dann die Erkenntnisse per remember sichern,
-  dann Rui zusammenfassen.
-- HANDELN STATT ANKUENDIGEN: Kuendige niemals an, was du gleich tust ("Lass mich...", "Ich schaue...",
-  "Starte jetzt", "Einen Moment"). Rufe die noetigen Tools SOFORT im selben Zug auf und antworte erst,
-  wenn du das Ergebnis hast. Eine Antwort ohne Tool-Aufruf, die eine Handlung ankuendigt, ist ein Fehler.
-  Bei mehrstufigen Auftraegen arbeitest du die Schritte nacheinander ab, ohne zwischendurch zu fragen.
-- github_repos/github_browse/github_read/github_search/github_commits: Du kannst Ruis GitHub-Code
-  lesen — z.B. das Buroflow-Projekt (Repo 'Buroflow') oder dein eigenes Repo 'jarvis-brain'.
-  Nutze das, um Ruis Architektur, Konventionen und Stand wirklich zu kennen, statt zu raten.
-  STRIKT read-only: du kannst nichts committen, pushen oder aendern.
-- check_calendar: Ruis iCloud-Kalender lesen (Termine der naechsten Tage). Read-only — du kannst nichts eintragen oder aendern.
-- web_search/web_open/web_click: echtes Browsen via camofox
 """
 
 import os
@@ -53,6 +27,8 @@ from email.header import decode_header
 import psycopg2
 import psycopg2.extras
 from anthropic import Anthropic
+from protokoll import (protokoll_init, protokoll_melden,
+                       PROTOKOLL_TOOLS, PROTOKOLL_PROMPT, protokoll_tool_ausfuehren)
 from openai import OpenAI
 
 # ── KONFIGURATION ────────────────────────────────────────────
@@ -166,6 +142,48 @@ WICHTIG:
 - Speichere nichts Belangloses — Qualitaet vor Quantitaet im Gedaechtnis.
 """
 
+SYSTEM += """
+- BUEROFLOW-ZAHLEN: Bei Fragen zum Stand von Bueroflow (Warteliste, Nutzer, Abos, Umsatz, Nutzung,
+  Kosten, Wachstum) rufst du buroflow_zahlen auf und antwortest mit den echten Werten — nie schaetzen.
+- FACHWISSEN NUTZEN: Du hast eine Bibliothek mit 362 erprobten Fachanleitungen und 7 Experten-Personas.
+  Bevor du eine fachliche Aufgabe angehst (Preisgestaltung, SEO, Sicherheitsaudit, Vertragspruefung,
+  Produktstrategie, Finanzplanung ...), suche mit skill_suchen nach einer passenden Anleitung und lade
+  sie mit skill_laden. Das ist besser als aus dem Bauch zu antworten. Bei Bedarf persona_laden.
+- GROSSE AUFGABEN: Wenn ein Auftrag mehrere Arbeitsschritte braucht (ganzes Repo/Projekt analysieren,
+  Recherche ueber mehrere Quellen, etwas erarbeiten und dann sichern), lege mit job_anlegen einen
+  Auftrag an, statt alles in einem Zug zu versuchen. Zerlege in 2-8 Schritte; der letzte Schritt ist
+  meist das Sichern per remember. Du arbeitest ihn dann im Hintergrund ab — Rui muss nicht warten
+  und nichts geht verloren, auch nicht bei einem Neustart. Kleine Fragen beantwortest du weiter direkt.
+- AUFTRAEGE ZU ENDE BRINGEN: Wenn Rui sagt "merk dir das", "speichere das" oder "lerne daraus",
+  dann rufst du remember AUF (ein oder mehrere Male, thematisch getrennt) — ein Satz wie
+  "Jetzt alles merken" ohne Tool-Aufruf ist ein Fehler und speichert nichts.
+  Bei Recherche-Auftraegen gilt: erst sammeln, dann die Erkenntnisse per remember sichern,
+  dann Rui zusammenfassen.
+- HANDELN STATT ANKUENDIGEN: Kuendige niemals an, was du gleich tust ("Lass mich...", "Ich schaue...",
+  "Starte jetzt", "Einen Moment"). Rufe die noetigen Tools SOFORT im selben Zug auf und antworte erst,
+  wenn du das Ergebnis hast. Eine Antwort ohne Tool-Aufruf, die eine Handlung ankuendigt, ist ein Fehler.
+  Bei mehrstufigen Auftraegen arbeitest du die Schritte nacheinander ab, ohne zwischendurch zu fragen.
+- github_repos/github_browse/github_read/github_search/github_commits: Du kannst Ruis GitHub-Code
+  lesen — z.B. das Buroflow-Projekt (Repo 'Buroflow') oder dein eigenes Repo 'jarvis-brain'.
+  Nutze das, um Ruis Architektur, Konventionen und Stand wirklich zu kennen, statt zu raten.
+  STRIKT read-only: du kannst nichts committen, pushen oder aendern.
+- check_calendar: Ruis iCloud-Kalender lesen (Termine der naechsten Tage). Read-only — du kannst nichts eintragen oder aendern.
+- web_search/web_open/web_click: echtes Browsen via camofox
+"""
+
+SYSTEM += """
+- AUFGABEN AUS MAILS: Wenn du Mails liest und darin etwas steckt, das Rui erledigen muss
+  (Frist, Rueckfrage, offene Rechnung, Terminbestaetigung, Behoerdenpost), legst du es mit
+  aufgabe_anlegen an — kurzer handlungsorientierter Titel, Details mit Absender und Kontext,
+  faellig-Datum wenn eine Frist genannt ist. Es erscheint dann im Dashboard unter DIESE WOCHE.
+  Reine Werbung, Newsletter und Benachrichtigungen ignorierst du.
+- GEMEINSAMER VAULT: CEO, Marketing, Immo und SEO legen ihre Ergebnisse im Vault ab
+  (Creatives in assets/, SEO-Entwuerfe in seo/, Tagesnotizen in daily/). Fragt Rui nach etwas,
+  das ein Bot erstellt hat, schaust du mit vault_liste nach — BEVOR du sagst, du wuesstest
+  nichts davon. Du hast Zugriff, nutze ihn.
+""" + PROTOKOLL_PROMPT + "\n"
+
+
 # ── TOOLS (Claude Tool-Use Definitionen) ─────────────────────
 TOOLS = [
     {
@@ -261,6 +279,46 @@ TOOLS = [
         "name": "ask_immo",
         "description": "Delegiert an den IMMO-BOT (Immobilien-Investment-Analyst): Angebote bewerten (URL), ImmoScout-Mails scannen, Kleinanzeigen-Suchen pruefen, fruehere Objekte nachschlagen. Kann bis zu 4 Minuten dauern.",
         "input_schema": {"type": "object", "properties": {"task": {"type": "string"}}, "required": ["task"]},
+    },
+    {
+        "name": "aufgabe_anlegen",
+        "description": ("Legt eine Aufgabe an, die im Dashboard unter DIESE WOCHE erscheint. "
+                        "Nutze das IMMER, wenn du beim Mails-Lesen etwas findest, das Rui erledigen "
+                        "muss: Fristen, Rueckfragen, offene Rechnungen, Termine zum Bestaetigen. "
+                        "Kurzer, handlungsorientierter Titel ('Rechnung 2026-04 an Groß & Partner "
+                        "nachfassen'), Details mit Absender und Kontext."),
+        "input_schema": {"type": "object", "properties": {
+            "titel": {"type": "string"}, "details": {"type": "string"},
+            "quelle": {"type": "string", "description": "mail, kalender, gespraech"},
+            "faellig": {"type": "string", "description": "YYYY-MM-DD, falls eine Frist genannt ist"}},
+            "required": ["titel"]},
+    },
+    {
+        "name": "aufgaben_liste",
+        "description": "Zeigt die offenen Aufgaben.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "aufgabe_erledigt",
+        "description": "Hakt eine Aufgabe ab (id aus aufgaben_liste).",
+        "input_schema": {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]},
+    },
+    {
+        "name": "vault_liste",
+        "description": ("Zeigt, was im gemeinsamen Vault liegt — auch was CEO, Marketing, Immo und SEO "
+                        "dort abgelegt haben (Creatives, Entwuerfe, Berichte, Tagesnotizen). "
+                        "Nutze das, bevor du sagst du wuesstest nichts von einer Datei."),
+        "input_schema": {"type": "object", "properties": {
+            "ordner": {"type": "string", "description": "z.B. 'assets' oder 'seo', leer = Wurzel"},
+            "seit_tagen": {"type": "number", "description": "nur Dateien der letzten X Tage"}}},
+    },
+    {
+        "name": "vault_lesen",
+        "description": ("Liest eine Datei aus dem Vault (Textdateien im Klartext; bei Bildern bekommst du "
+                        "Groesse und Erstellzeit als Bestaetigung, dass sie existiert)."),
+        "input_schema": {"type": "object", "properties": {
+            "pfad": {"type": "string", "description": "z.B. 'seo/2026-07-26_frage.md'"},
+            "max_zeichen": {"type": "integer"}}, "required": ["pfad"]},
     },
     {
         "name": "buroflow_zahlen",
@@ -658,6 +716,153 @@ def tool_vault_note(inp: dict) -> str:
 
 # ── WEB-ZUGRIFF (camofox, anti-detect Browser) ───────────────
 CAMOFOX_URL = os.getenv("CAMOFOX_URL", "http://camofox:9377")
+
+
+# ── AUFGABEN (aus Mails, Gespraechen, Terminen) ──────────────
+def init_aufgaben():
+    try:
+        conn = pg_conn()
+        with conn, conn.cursor() as cur:
+            cur.execute("""CREATE TABLE IF NOT EXISTS aufgaben (
+                id SERIAL PRIMARY KEY,
+                titel TEXT,
+                details TEXT,
+                quelle TEXT,
+                faellig DATE,
+                erledigt BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMPTZ DEFAULT now())""")
+        conn.close()
+        print("  [aufgaben] Tabelle bereit", flush=True)
+    except Exception as e:
+        print(f"  [aufgaben] {e}", flush=True)
+
+
+def tool_aufgabe_anlegen(inp):
+    titel = (inp.get("titel") or "").strip()
+    if not titel:
+        return "Fehler: titel noetig."
+    faellig = (inp.get("faellig") or "").strip() or None
+    try:
+        conn = pg_conn()
+        with conn, conn.cursor() as cur:
+            cur.execute("SELECT id FROM aufgaben WHERE titel = %s AND NOT erledigt "
+                        "AND created_at > now() - interval '14 days'", (titel[:200],))
+            if cur.fetchone():
+                conn.close()
+                return f"Gibt es schon: {titel}"
+            cur.execute("INSERT INTO aufgaben (titel, details, quelle, faellig) "
+                        "VALUES (%s, %s, %s, %s) RETURNING id",
+                        (titel[:200], (inp.get("details") or "")[:600],
+                         (inp.get("quelle") or "mail")[:60], faellig))
+            aid = cur.fetchone()[0]
+        conn.close()
+        return f"Aufgabe #{aid} angelegt: {titel}"
+    except Exception as e:
+        return f"Fehler: {e}"
+
+
+def tool_aufgaben_liste(inp):
+    try:
+        conn = pg_conn()
+        with conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("SELECT id, titel, details, quelle, faellig FROM aufgaben "
+                        "WHERE NOT erledigt ORDER BY faellig NULLS LAST, id DESC LIMIT 20")
+            rows = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        return f"Fehler: {e}"
+    if not rows:
+        return "Keine offenen Aufgaben."
+    zeilen = []
+    for r in rows:
+        z = f"#{r['id']} {r['titel']}"
+        if r["faellig"]:
+            z += f" (bis {r['faellig'].strftime('%d.%m.')})"
+        if r["quelle"]:
+            z += f" [{r['quelle']}]"
+        zeilen.append(z)
+    return f"{len(rows)} offene Aufgaben:\n" + "\n".join(zeilen)
+
+
+def tool_aufgabe_erledigt(inp):
+    aid = inp.get("id")
+    if not aid:
+        return "Fehler: id noetig."
+    try:
+        conn = pg_conn()
+        with conn, conn.cursor() as cur:
+            cur.execute("UPDATE aufgaben SET erledigt = TRUE WHERE id = %s", (int(aid),))
+            n = cur.rowcount
+        conn.close()
+        return "Als erledigt markiert." if n else "Aufgabe nicht gefunden."
+    except Exception as e:
+        return f"Fehler: {e}"
+
+
+# ── VAULT LESEN (sehen, was die Bots produziert haben) ───────
+VAULT_TEXT = (".md", ".txt", ".json", ".yml", ".yaml", ".csv", ".html")
+
+
+def _vault_pfad_sicher(rel):
+    voll = os.path.realpath(os.path.join(VAULT_DIR, (rel or "").strip().lstrip("/")))
+    wurzel = os.path.realpath(VAULT_DIR)
+    return voll if (voll == wurzel or voll.startswith(wurzel + os.sep)) else None
+
+
+def tool_vault_liste(inp):
+    """Zeigt, was im Vault liegt — auch was die anderen Bots abgelegt haben."""
+    ordner = (inp.get("ordner") or "").strip()
+    voll = _vault_pfad_sicher(ordner)
+    if not voll or not os.path.isdir(voll):
+        return f"Ordner '{ordner}' gibt es im Vault nicht."
+    seit_tagen = inp.get("seit_tagen")
+    grenze = (time.time() - float(seit_tagen) * 86400) if seit_tagen else 0
+    dirs, dateien = [], []
+    try:
+        for name in sorted(os.listdir(voll)):
+            if name.startswith("."):
+                continue
+            p = os.path.join(voll, name)
+            if os.path.isdir(p):
+                dirs.append(name)
+            else:
+                st = os.stat(p)
+                if st.st_mtime < grenze:
+                    continue
+                dateien.append((st.st_mtime, name, st.st_size))
+    except Exception as e:
+        return f"Fehler: {e}"
+    dateien.sort(reverse=True)
+    kopf = f"vault/{ordner}" if ordner else "vault/"
+    zeilen = [f"{kopf} — {len(dirs)} Ordner, {len(dateien)} Dateien"]
+    for d in dirs:
+        zeilen.append(f"  [ORDNER] {d}/")
+    for mt, name, size in dateien[:40]:
+        wann = datetime.fromtimestamp(mt).strftime("%d.%m. %H:%M")
+        zeilen.append(f"  {name}  ({round(size/1024, 1)} KB, {wann})")
+    if not dirs and not dateien:
+        zeilen.append("  (leer)")
+    return "\n".join(zeilen)
+
+
+def tool_vault_lesen(inp):
+    """Liest eine Textdatei aus dem Vault (Notizen, Entwuerfe, Berichte)."""
+    pfad = (inp.get("pfad") or "").strip()
+    voll = _vault_pfad_sicher(pfad)
+    if not voll or not os.path.isfile(voll):
+        return f"Datei '{pfad}' gibt es im Vault nicht — nutze vault_liste."
+    name = os.path.basename(voll).lower()
+    if not name.endswith(VAULT_TEXT):
+        st = os.stat(voll)
+        return (f"'{pfad}' ist keine Textdatei ({round(st.st_size/1024, 1)} KB, "
+                f"erstellt {datetime.fromtimestamp(st.st_mtime).strftime('%d.%m.%Y %H:%M')}). "
+                f"Sie existiert also — anschauen kannst du sie im Dashboard unter VAULT.")
+    try:
+        with open(voll, encoding="utf-8", errors="replace") as f:
+            inhalt = f.read(int(inp.get("max_zeichen") or 8000))
+    except Exception as e:
+        return f"Fehler beim Lesen: {e}"
+    return f"=== vault/{pfad} ===\n{inhalt}"
 
 
 # ── BUEROFLOW-ZAHLEN (Supabase, strikt read-only) ────────────
@@ -1426,6 +1631,8 @@ def tool_ask_ceo(inp: dict) -> str:
         return f"Fehler bei der Delegation: {e}"
 
 
+TOOLS = TOOLS + PROTOKOLL_TOOLS
+
 def run_tool(name: str, inp: dict) -> str:
     if name == "remember":
         return tool_remember(inp)
@@ -1445,6 +1652,16 @@ def run_tool(name: str, inp: dict) -> str:
         return tool_web_open(inp)
     if name == "web_click":
         return tool_web_click(inp)
+    if name == "aufgabe_anlegen":
+        return tool_aufgabe_anlegen(inp)
+    if name == "aufgaben_liste":
+        return tool_aufgaben_liste(inp)
+    if name == "aufgabe_erledigt":
+        return tool_aufgabe_erledigt(inp)
+    if name == "vault_liste":
+        return tool_vault_liste(inp)
+    if name == "vault_lesen":
+        return tool_vault_lesen(inp)
     if name == "buroflow_zahlen":
         return tool_buroflow_zahlen(inp)
     if name == "skill_suchen":
@@ -1934,7 +2151,9 @@ def main():
     print("=" * 58, flush=True)
 
     skills_indexieren()
+    protokoll_init()
     init_jobs()
+    init_aufgaben()
     threading.Thread(target=job_worker, daemon=True).start()
 
     r = None

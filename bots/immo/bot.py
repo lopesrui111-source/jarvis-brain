@@ -28,6 +28,7 @@ from email.header import decode_header
 import psycopg2
 import psycopg2.extras
 from anthropic import Anthropic
+from protokoll import protokoll_init, protokoll_melden
 from openai import OpenAI
 
 BOT_NAME = "immo"
@@ -380,6 +381,9 @@ def analyze_listing(url, notify=True, force=False):
                     and not warnungen)
     text = format_angebot(d, calc, url, plattform)
     mark_seen(url, d.get("titel") or url, calc["rendite"], qualifiziert, d, "; ".join(warnungen))
+    protokoll_melden("immo", "Objekt bewertet",
+                     f"{d.get('titel', '?')[:80]} — {calc['rendite']:.1f} % "
+                     f"({'qualifiziert' if qualifiziert else 'nicht qualifiziert'})", "")
     if qualifiziert and notify:
         send_telegram(text)
     return text + ("\n\n📲 Telegram gesendet." if qualifiziert and notify and TELEGRAM_TOKEN else "")
@@ -557,6 +561,43 @@ def scan_kleinanzeigen(background=True):
     return f"{total_new} neue Angebote gefunden.\n\n" + "\n\n---\n\n".join(results)
 
 
+def bewerte_eckdaten(inp):
+    """Bewertung aus selbst eingegebenen Eckdaten — unabhaengig von Portalen."""
+    try:
+        kaufpreis = float(str(inp.get("kaufpreis") or 0).replace(".", "").replace(",", "."))
+        qm = float(str(inp.get("qm") or 0).replace(",", "."))
+    except Exception:
+        return "Kaufpreis und Quadratmeter bitte als Zahlen angeben."
+    ort = (inp.get("ort") or "").strip()
+    if not kaufpreis or not qm or not ort:
+        return "Ich brauche mindestens: Kaufpreis, Quadratmeter und Ort."
+
+    quelle = "selbst angegeben"
+    miete_qm = inp.get("miete_qm")
+    if miete_qm:
+        try:
+            miete_qm = float(str(miete_qm).replace(",", "."))
+        except Exception:
+            miete_qm = None
+    if not miete_qm:
+        miete_qm, quelle = _miete_fuer_ort(ort, qm)
+        if not miete_qm:
+            return (f"Mietspiegel fuer {ort} nicht ermittelbar. Gib die erwartete Kaltmiete "
+                    f"pro m2 mit an, dann rechne ich.")
+
+    d = {"titel": inp.get("titel") or f"{qm:.0f} m2 in {ort}", "ort": ort,
+         "kaufpreis": kaufpreis, "qm": qm, "zimmer": inp.get("zimmer"),
+         "miete_qm": miete_qm, "miete_quelle": quelle,
+         "anmerkung": inp.get("anmerkung") or "Aus Eckdaten berechnet."}
+    calc = calc_szenarien(kaufpreis, qm, miete_qm)
+    warnungen = pruefe_plausibilitaet(d, calc)
+    text = format_angebot(d, calc, inp.get("url") or "(manuell eingegeben)", "Eckdaten")
+    if inp.get("url"):
+        mark_seen(inp["url"], d["titel"], calc["rendite"],
+                  calc["rendite"] >= MIN_RENDITE and not warnungen, d, "; ".join(warnungen))
+    return text
+
+
 # ── TOOLS ────────────────────────────────────────────────────
 TOOLS = [
     {"name": "analyze_listing",
@@ -565,6 +606,16 @@ TOOLS = [
          "url": {"type": "string"},
          "force": {"type": "boolean", "description": "true = auch bewerten wenn schon bekannt"}},
          "required": ["url"]}},
+    {"name": "bewerte_eckdaten",
+     "description": ("Bewertet ein Objekt aus selbst genannten Eckdaten — der zuverlaessigste Weg, "
+                     "weil ImmoScout automatisierte Zugriffe per CAPTCHA blockiert. Rui nennt "
+                     "Kaufpreis, Quadratmeter und Ort (Miete optional, wird sonst recherchiert), "
+                     "du lieferst Rendite und beide Finanzierungsszenarien."),
+     "input_schema": {"type": "object", "properties": {
+         "kaufpreis": {"type": "number"}, "qm": {"type": "number"}, "ort": {"type": "string"},
+         "zimmer": {"type": "number"}, "miete_qm": {"type": "number"},
+         "titel": {"type": "string"}, "url": {"type": "string"}},
+         "required": ["kaufpreis", "qm", "ort"]}},
     {"name": "scan_mails",
      "description": "Bewertet ImmoScout24-Mails der letzten X Stunden (Standard 24) direkt aus dem Mail-Inhalt. Antwortet sofort; Ergebnisse und Zusammenfassung kommen per Telegram.",
      "input_schema": {"type": "object", "properties": {
@@ -585,6 +636,8 @@ TOOLS = [
 def run_tool(name, inp):
     if name == "analyze_listing":
         return analyze_listing((inp.get("url") or "").strip(), force=bool(inp.get("force")))
+    if name == "bewerte_eckdaten":
+        return bewerte_eckdaten(inp)
     if name == "scan_mails":
         return scan_immoscout_mails(hours=min(int(inp.get("hours") or 24), 168))
     if name == "scan_kleinanzeigen":
@@ -617,6 +670,9 @@ PERSOENLICHKEIT:
 - recall nutzen fuer fruehere Objekte/Entscheidungen; wichtige Bewertungen per remember sichern.
 
 DEINE QUELLEN:
+- Eckdaten von Rui (bewerte_eckdaten): der zuverlaessigste Weg. Wenn er Zahlen nennt —
+  auch beilaeufig wie "179k, 75qm, Pleidelsheim" — rechnest du sofort.
+- ImmoScout-Exposeseiten sind NICHT abrufbar (CAPTCHA). Frag stattdessen nach den Eckdaten.
 - ImmoScout24: NUR ueber scan_mails (Angebote werden aus den Benachrichtigungs-Mails bewertet, Exposé-Seiten werden nicht aufgerufen)
 - Kleinanzeigen: analyze_listing (einzelne URL) oder scan_kleinanzeigen (gespeicherte Suchen)
 - Du laeufst NUR auf Anfrage — kein automatisches Scannen.
@@ -780,6 +836,7 @@ def _antwort_senden(r, queue, text):
 
 
 def main():
+    protokoll_init()
     print("=" * 58, flush=True)
     print("  IMMO-BOT — Investment-Analyst unter JARVIS", flush=True)
     print(f"  Kriterien : >= {MIN_RENDITE}% Rendite | {ZINS}% Zins | NK {NK_PROZENT}%", flush=True)

@@ -66,6 +66,7 @@ services:
     env_file: .env
     volumes:
       - ./vault:/app/vault
+      - ./skills-lib:/app/skills-lib:ro
     ports:
       - "100.89.106.8:8090:8090" 
       - "127.0.0.1:8090:8090"
@@ -118,6 +119,7 @@ services:
       - ./vault:/app/vault
       - ./skills-repo/skills:/app/skills:ro
       - ./brand:/app/brand:ro
+      - ./skills-lib:/app/skills-lib:ro
     depends_on:
       redis:
         condition: service_healthy

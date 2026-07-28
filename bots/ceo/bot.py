@@ -24,6 +24,7 @@ from email.header import decode_header
 import psycopg2
 import psycopg2.extras
 from anthropic import Anthropic
+from protokoll import protokoll_init, protokoll_melden
 from skills import (skills_indexieren, SKILL_TOOLS, SKILL_PROMPT,
                     skill_tool_ausfuehren, skill_banner)
 from openai import OpenAI
@@ -97,6 +98,16 @@ und schreibt Antwort-ENTWUERFE in Ruis Stil. Er postet nichts — Rui prueft und
 DEIN WEB-ZUGRIFF (web_search/web_open/web_click): Echtes Browsen fuer Markt-Recherche, Wettbewerber, Preise, Trends. Nur lesen — nie einloggen, kaufen, posten oder Formulare absenden.
 
 {SKILL_PROMPT}
+
+REVIEW-ANFRAGEN: Beginnt eine Anfrage mit [REVIEW], legt dir das Marketing einen Entwurf vor.
+Dann gilt: Nutze deine Skills (skill_suchen zu Copywriting/Positionierung), aber antworte KURZ.
+Format:
+  Zeile 1: PASST  oder  UEBERARBEITEN
+  Danach bei UEBERARBEITEN maximal 3 konkrete Aenderungen, je eine Zeile, umsetzbar formuliert
+  ("Headline kuerzen auf 5 Woerter", nicht "mehr Emotion").
+Keine Grundsatzdiskussion, keine Delegation, kein Lob. Du bist die Qualitaetskontrolle:
+streng bei Klarheit, fachlicher Richtigkeit und Ton — aber entscheidungsfreudig.
+Wenn es gut genug ist, sag PASST. Perfektion blockiert nur.
 
 EISERNE REGELN:
 - Alles Externe (Posts, Antworten, Mails) ist ENTWURF zur Freigabe — du postest/sendest nichts.
@@ -492,7 +503,7 @@ def tool_ask_marketing(inp):
                             socket_keepalive=True, health_check_interval=20,
                             retry_on_timeout=True, socket_timeout=30)
         req_id = str(uuid.uuid4())
-        rr.rpush("bot:marketing:inbox", json.dumps({"id": req_id, "text": task}, ensure_ascii=False))
+        rr.rpush("bot:marketing:inbox", json.dumps({"id": req_id, "text": "[von-ceo] " + task}, ensure_ascii=False))
         resp = rr.blpop(f"bot:marketing:reply:{req_id}", timeout=240)
         if resp is None:
             return "Marketing-Bot antwortet nicht (Timeout) — laeuft der jarvis-marketing Container?"
@@ -683,6 +694,7 @@ def _antwort_senden(r, queue, text):
 
 
 def main():
+    protokoll_init()
     skills_indexieren()
     print("=" * 58, flush=True)
     print("  BUEROFLOW-CEO — Bot am JARVIS-Bus", flush=True)
@@ -734,6 +746,10 @@ def main():
                 answer = f"Fehler: {type(e).__name__}: {e}"
                 print(f"  [think] {answer}", flush=True)
             save_history(r, history)
+            try:
+                protokoll_melden("ceo", "Anfrage beantwortet", text[:120], "")
+            except Exception:
+                pass
             print(f"  CEO: {answer[:100]}\n", flush=True)
             _antwort_senden(r, reply_q, answer)
         except KeyboardInterrupt:

@@ -51,11 +51,26 @@ IMG_EXT  = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
 # Bot-Registry: Queue-Namen + Hierarchie fuers Frontend
 BOTS = {
-    "jarvis":       {"label": "JARVIS",        "inbox": "jarvis:inbox",        "reply": "jarvis:reply:{id}",        "parent": None,           "desc": "orchestrator",              "history": "jarvis:history"},
-    "buroflow-ceo": {"label": "CEO",           "inbox": "bot:ceo:inbox",       "reply": "bot:ceo:reply:{id}",       "parent": "jarvis",       "desc": "strategie & entscheidungen", "history": "bot:ceo:history"},
-    "marketing":    {"label": "MARKETING",     "inbox": "bot:marketing:inbox", "reply": "bot:marketing:reply:{id}", "parent": "buroflow-ceo", "desc": "content, creatives, skills", "history": "bot:marketing:history"},
-    "immo":         {"label": "IMMO",          "inbox": "bot:immo:inbox",      "reply": "bot:immo:reply:{id}",      "parent": "jarvis",       "desc": "rendite-analysen, telegram", "history": "bot:immo:history"},
-    "seo":          {"label": "SEO",           "inbox": "bot:seo:inbox",       "reply": "bot:seo:reply:{id}",       "parent": "buroflow-ceo", "desc": "gutefrage + quora, entwuerfe", "history": "bot:seo:history"},
+    "jarvis":       {"label": "JARVIS",        "inbox": "jarvis:inbox",        "reply": "jarvis:reply:{id}",        "parent": None,           "desc": "orchestrator",              "history": "jarvis:history",
+                     "rolle": "Zentrale Steuerung — nimmt Auftraege an, delegiert an die Fachbots, verwaltet Gedaechtnis und Auftraege.",
+                     "faehig": ["Gedaechtnis (Langzeit + naechtliche Konsolidierung)", "Mail lesen (IONOS + Gmail)", "Google-Kalender", "Web-Recherche", "GitHub lesen", "Bueroflow-Zahlen", "Vault", "Auftrags-System", "Aufgabenverwaltung"],
+                     "bib": True},
+    "buroflow-ceo": {"label": "CEO",           "inbox": "bot:ceo:inbox",       "reply": "bot:ceo:reply:{id}",       "parent": "jarvis",       "desc": "strategie & entscheidungen", "history": "bot:ceo:history",
+                     "rolle": "Strategische Entscheidungen fuer Bueroflow, Qualitaetskontrolle der Marketing-Entwuerfe.",
+                     "faehig": ["Entscheidungs-Framework", "Review von Marketing-Entwuerfen", "Web-Recherche", "Mail lesen", "delegiert an Marketing und SEO"],
+                     "bib": True},
+    "marketing":    {"label": "MARKETING",     "inbox": "bot:marketing:inbox", "reply": "bot:marketing:reply:{id}", "parent": "buroflow-ceo", "desc": "content, creatives, skills", "history": "bot:marketing:history",
+                     "rolle": "Erstellt Posts und Creatives — mit Brand-Pflicht, Layout-Vielfalt und CEO-Review.",
+                     "faehig": ["Creatives rendern (14 Layouts)", "Bilder generieren (MuAPI)", "48 Marketing-Spezialskills", "CEO-Review einholen", "Texte im Vault ablegen"],
+                     "bib": True},
+    "immo":         {"label": "IMMO",          "inbox": "bot:immo:inbox",      "reply": "bot:immo:reply:{id}",      "parent": "jarvis",       "desc": "rendite-analysen, telegram", "history": "bot:immo:history",
+                     "rolle": "Bewertet Immobilien nach Ruis Kriterien: 4 % Rendite, 5,5 % Zins, 11 % Nebenkosten.",
+                     "faehig": ["Rendite-Berechnung (beide Szenarien)", "Plausibilitaetspruefung", "ImmoScout-Mails auswerten", "Kleinanzeigen-Suchen", "Telegram-Meldungen"],
+                     "bib": False},
+    "seo":          {"label": "SEO",           "inbox": "bot:seo:inbox",       "reply": "bot:seo:reply:{id}",       "parent": "buroflow-ceo", "desc": "gutefrage + quora, entwuerfe", "history": "bot:seo:history",
+                     "rolle": "Findet taeglich passende Fragen auf gutefrage.net und schreibt Antwort-Entwuerfe in Ruis Stil.",
+                     "faehig": ["Taeglicher Lauf um 08:00", "Relevanzfilter", "Entwuerfe in vault/seo/", "Postet selbst nichts"],
+                     "bib": False},
 }
 
 app = FastAPI()
@@ -390,26 +405,28 @@ def umami(tage: int = 7):
     return JSONResponse(out)
 
 
-@app.get("/api/heute")
-def heute():
-    """Nur was heute wirklich ansteht — Termine und offene Punkte."""
-    out = {"posten": []}
+@app.get("/api/woche")
+def woche():
+    """Diese Woche: Termine, Aufgaben aus Mails, laufende Arbeiten — nach Art gruppiert."""
+    from datetime import timedelta
+    out = {"gruppen": []}
+    heute_d = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+    wochenende = heute_d + timedelta(days=7)
 
-    def add(art, text, detail="", dringend=False):
-        out["posten"].append({"art": art, "text": text[:70], "detail": detail, "dringend": dringend})
+    def gruppe(name, art, posten):
+        if posten:
+            out["gruppen"].append({"name": name, "art": art, "posten": posten})
 
-    # ── 1) Termine heute und morgen ──
+    # ── Termine der Woche ──
+    termine = []
     try:
         import icalendar
-        from datetime import timedelta
         try:
             import recurring_ical_events
             wdh = True
         except Exception:
             wdh = False
-        heute_d = datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
-        ende = heute_d + timedelta(days=2)
-        termine = []
+        roh = []
         for url in GOOGLE_ICS[:5]:
             try:
                 cal = icalendar.Calendar.from_ical(requests.get(url, timeout=20).text)
@@ -418,7 +435,7 @@ def heute():
             treffer = []
             if wdh:
                 try:
-                    treffer = recurring_ical_events.of(cal).between(heute_d, ende)
+                    treffer = recurring_ical_events.of(cal).between(heute_d, wochenende)
                 except Exception:
                     treffer = list(cal.walk("VEVENT"))
             else:
@@ -427,26 +444,60 @@ def heute():
                 try:
                     dt = ev.get("DTSTART").dt
                     titel = str(ev.get("SUMMARY") or "Termin")
+                    ort = str(ev.get("LOCATION") or "").strip()
                     if isinstance(dt, datetime):
                         n = dt.replace(tzinfo=None) if dt.tzinfo else dt
-                        if not (heute_d <= n < ende):
+                        if not (heute_d <= n < wochenende):
                             continue
-                        wann = "heute" if n.date() == heute_d.date() else "morgen"
-                        termine.append((n, titel, f"{wann} {n.strftime('%H:%M')}"))
+                        roh.append((n, titel, n, ort, False))
                     else:
                         tag = datetime.combine(dt, datetime.min.time())
-                        if not (heute_d <= tag < ende):
+                        if not (heute_d <= tag < wochenende):
                             continue
-                        wann = "heute" if tag.date() == heute_d.date() else "morgen"
-                        termine.append((tag, titel, f"{wann}, ganztägig"))
+                        roh.append((tag, titel, tag, ort, True))
                 except Exception:
                     continue
-        for _, titel, wann in sorted(termine, key=lambda x: x[0])[:5]:
-            add("termin", titel, wann, True)
+        WT = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
+
+        # Wiederkehrende Termine buendeln statt siebenmal zu zeigen
+        nach_titel = {}
+        for eintrag in sorted(roh, key=lambda x: x[0]):
+            nach_titel.setdefault(eintrag[1], []).append(eintrag)
+
+        gebuendelt = []
+        for titel, vorkommen in nach_titel.items():
+            erster = vorkommen[0]
+            _, _, wann, ort, ganztags = erster
+            tage = (wann.date() - heute_d.date()).days
+            praefix = "heute" if tage == 0 else ("morgen" if tage == 1 else WT[wann.weekday()])
+
+            if len(vorkommen) == 1:
+                detail = f"{praefix}, ganztägig" if ganztags else f"{praefix} {wann.strftime('%H:%M')}"
+            else:
+                uhrzeiten = {v[2].strftime("%H:%M") for v in vorkommen if not v[4]}
+                gleiche_zeit = len(uhrzeiten) == 1
+                zeit = uhrzeiten.pop() if gleiche_zeit else ""
+                if len(vorkommen) >= 5:
+                    rhythmus = "täglich"
+                elif len(vorkommen) >= 2:
+                    rhythmus = f"{len(vorkommen)}× diese Woche"
+                detail = rhythmus + (f" {zeit}" if zeit else "")
+                if tage <= 1:
+                    detail += f" · nächster {praefix}"
+                else:
+                    detail += f" · ab {praefix}"
+            if ort:
+                detail += f" · {ort[:24]}"
+            gebuendelt.append((erster[0], {"text": titel[:70], "detail": detail,
+                                           "heute": tage == 0}))
+
+        for _, t in sorted(gebuendelt, key=lambda x: x[0])[:12]:
+            termine.append(t)
     except Exception:
         pass
+    gruppe("TERMINE", "termin", termine)
 
-    # ── 2) Offene Punkte aus der Datenbank ──
+    # ── Aus der Datenbank ──
     try:
         conn = pg()
         with conn, conn.cursor() as cur:
@@ -458,23 +509,98 @@ def heute():
                     conn.rollback()
                     return []
 
+            aufgaben = []
+            for r in sicher("SELECT titel, details, quelle, faellig FROM aufgaben "
+                            "WHERE NOT erledigt ORDER BY faellig NULLS LAST, id DESC LIMIT 8"):
+                d = []
+                if r[3]:
+                    d.append("bis " + r[3].strftime("%d.%m."))
+                if r[2]:
+                    d.append(r[2])
+                aufgaben.append({"text": (r[0] or "")[:70],
+                                 "detail": " · ".join(d) or (r[1] or "")[:50],
+                                 "heute": bool(r[3] and r[3] <= datetime.now().date())})
+            gruppe("AUFGABEN", "aufgabe", aufgaben)
+
+            laufend = []
             for r in sicher("SELECT titel, aktueller_schritt, jsonb_array_length(schritte) FROM jobs "
                             "WHERE status = 'laeuft' ORDER BY id DESC LIMIT 3"):
-                add("job", r[0] or "Auftrag", f"läuft — Schritt {min((r[1] or 0)+1, r[2] or 1)}/{r[2] or 1}", True)
+                laufend.append({"text": (r[0] or "Auftrag")[:70],
+                                "detail": f"Schritt {min((r[1] or 0)+1, r[2] or 1)}/{r[2] or 1}",
+                                "heute": True})
+            gruppe("LÄUFT GERADE", "job", laufend)
 
+            offen = []
             for r in sicher("SELECT titel, to_char(created_at,'DD.MM.') FROM qa_seen "
                             "WHERE entwurf_datei <> '' AND NOT erledigt ORDER BY id DESC LIMIT 4"):
-                add("seo", r[0] or "Entwurf", f"Entwurf vom {r[1]} — zu posten")
-
-            # Immo: ohne Doppelte, nur die letzten 2 Tage
+                offen.append({"text": (r[0] or "Entwurf")[:70],
+                              "detail": f"Entwurf vom {r[1]} — zu posten", "heute": False})
             for r in sicher("SELECT DISTINCT ON (titel) titel, rendite FROM immo_seen "
-                            "WHERE qualifiziert AND created_at > now() - interval '2 days' "
-                            "ORDER BY titel, created_at DESC LIMIT 4"):
-                add("immo", r[0] or "Objekt", f"{float(r[1] or 0):.1f} % Rendite — prüfen")
+                            "WHERE qualifiziert AND created_at > now() - interval '3 days' "
+                            "ORDER BY titel, created_at DESC LIMIT 3"):
+                offen.append({"text": (r[0] or "Objekt")[:70],
+                              "detail": f"{float(r[1] or 0):.1f} % Rendite — prüfen", "heute": False})
+            gruppe("ZU ERLEDIGEN", "offen", offen)
         conn.close()
     except Exception as e:
         out["fehler"] = str(e)[:120]
 
+    out["anzahl"] = sum(len(g["posten"]) for g in out["gruppen"])
+    return JSONResponse(out)
+
+
+SKILL_KATEGORIEN_CACHE = {"stand": 0, "daten": []}
+
+
+def _skill_kategorien():
+    """Zaehlt die Anleitungen je Bereich (aus dem gemounteten Repo)."""
+    import time as _t
+    if SKILL_KATEGORIEN_CACHE["daten"] and _t.time() - SKILL_KATEGORIEN_CACHE["stand"] < 3600:
+        return SKILL_KATEGORIEN_CACHE["daten"]
+    pfad = os.getenv("SKILLS_DIR", "/app/skills-lib")
+    kats = {}
+    if os.path.isdir(pfad):
+        for wurzel, dirs, dateien in os.walk(pfad):
+            dirs[:] = [d for d in dirs if d not in (".gemini", ".git", "node_modules", ".github")]
+            if "SKILL.md" in dateien:
+                rel = os.path.relpath(wurzel, pfad).split(os.sep)
+                kat = rel[0] if rel and rel[0] != "." else "sonstige"
+                kats[kat] = kats.get(kat, 0) + 1
+    daten = sorted([{"name": k, "n": v} for k, v in kats.items()], key=lambda x: -x["n"])
+    SKILL_KATEGORIEN_CACHE.update({"stand": _t.time(), "daten": daten})
+    return daten
+
+
+@app.get("/api/bot")
+def bot_details(id: str = ""):
+    id = (id or "").strip().lower()
+    if id not in BOTS:
+        return JSONResponse({"error": "unbekannt"}, status_code=404)
+    meta = BOTS[id]
+    out = {"id": id, "label": meta["label"], "desc": meta.get("desc", ""),
+           "rolle": meta.get("rolle", ""), "faehig": meta.get("faehig", []),
+           "kategorien": _skill_kategorien() if meta.get("bib") else [],
+           "arbeiten": [], "kosten_7d": 0.0, "requests_7d": 0}
+    try:
+        conn = pg()
+        with conn, conn.cursor() as cur:
+            try:
+                cur.execute("SELECT aktion, ergebnis, datei, to_char(created_at,'DD.MM. HH24:MI') "
+                            "FROM arbeit_log WHERE bot = %s ORDER BY id DESC LIMIT 6", (id,))
+                out["arbeiten"] = [{"aktion": r[0], "ergebnis": (r[1] or "")[:110],
+                                    "datei": r[2] or "", "zeit": r[3]} for r in cur.fetchall()]
+            except Exception:
+                conn.rollback()
+            try:
+                cur.execute("SELECT COALESCE(SUM(cost_usd),0), COUNT(*) FROM cost_ledger "
+                            "WHERE bot = %s AND created_at > now() - interval '7 days'", (id,))
+                row = cur.fetchone()
+                out["kosten_7d"] = float(row[0]); out["requests_7d"] = int(row[1])
+            except Exception:
+                conn.rollback()
+        conn.close()
+    except Exception:
+        pass
     return JSONResponse(out)
 
 
@@ -725,6 +851,34 @@ HTML = """<!DOCTYPE html>
   @keyframes adrift2 { from { transform: translate(0, 0) scale(1.1); } to { transform: translate(-80px, 60px) scale(.95); } }
   .agInner { max-width: 1040px; width: 100%; margin: auto; }
   .agSvg { position: absolute; top: 0; left: 0; pointer-events: none; }
+  .botModal { position: fixed; top: 50%; left: 50%; width: min(560px, 92vw); max-height: 82vh;
+              transform: translate(-50%, -50%) scale(.97); opacity: 0; pointer-events: none;
+              transition: opacity .22s, transform .22s; z-index: 12; overflow-y: auto;
+              background: rgba(7, 16, 25, .97); backdrop-filter: blur(18px);
+              border: 1px solid rgba(89, 215, 255, .25); border-radius: 16px; padding: 20px 22px;
+              box-shadow: 0 18px 60px rgba(0, 0, 0, .55); scrollbar-width: thin; }
+  .botModal.open { opacity: 1; transform: translate(-50%, -50%) scale(1); pointer-events: auto; }
+  .bmHead { display: flex; align-items: center; justify-content: space-between;
+            border-bottom: 1px solid rgba(89, 215, 255, .14); padding-bottom: 12px; margin-bottom: 14px; }
+  .bmName { font-size: 14px; letter-spacing: .18em; color: #f2fbff; font-weight: 600; }
+  .bmBody { font-size: 11.5px; line-height: 1.65; color: var(--txt); }
+  .bmAbschnitt { margin-bottom: 16px; }
+  .bmAbschnitt:last-child { margin-bottom: 0; }
+  .bmTitel { font-size: 8.5px; letter-spacing: .3em; color: var(--cyan); margin-bottom: 7px; opacity: .85; }
+  .bmZeile { display: flex; gap: 8px; padding: 3px 0; color: var(--txt); }
+  .bmZeile::before { content: "\2022"; color: var(--green); flex: none; }
+  .bmChips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .bmChip { font-size: 9.5px; padding: 4px 9px; border-radius: 12px; color: var(--txt);
+            background: rgba(89, 215, 255, .09); border: 1px solid rgba(89, 215, 255, .18); }
+  .bmChip b { color: var(--cyan); font-weight: 400; margin-left: 4px; }
+  .bmArbeit { font-size: 10.5px; color: var(--dim); padding: 5px 0;
+              border-bottom: 1px solid rgba(89, 215, 255, .06); }
+  .bmArbeit:last-child { border-bottom: none; }
+  .bmArbeit b { color: var(--txt); font-weight: 400; }
+  .bmZahlen { display: flex; gap: 20px; }
+  .bmZahl { }
+  .bmZahl .v { font-size: 18px; color: #f2fbff; font-weight: 600; }
+  .bmZahl .k { font-size: 8.5px; letter-spacing: .2em; color: var(--dim); }
   .agZoom { position: absolute; right: 22px; bottom: 26px; display: flex; flex-direction: column;
             gap: 8px; z-index: 6; }
   .agZbtn { width: 38px; height: 38px; display: flex; align-items: center; justify-content: center;
@@ -760,8 +914,13 @@ HTML = """<!DOCTYPE html>
   .agMono { width: 26px; height: 26px; border-radius: 50%; flex: none; display: flex;
             align-items: center; justify-content: center; font-size: 9.5px; font-weight: 500;
             letter-spacing: 0; }
-  .agName { font-size: 13px; letter-spacing: .12em; font-weight: 600; color: #f6fcff; }
-  .agDesc { font-size: 9.5px; color: var(--dim); margin: 9px 0 11px; line-height: 1.55; }
+  .agName { font-size: 13px; letter-spacing: .12em; font-weight: 600; color: #f6fcff;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agDesc { font-size: 9.5px; color: var(--dim); margin: 9px 0 11px; line-height: 1.45;
+            height: 27px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2;
+            -webkit-box-orient: vertical; }
+  .agNode { display: flex; flex-direction: column; }
+  .agSpark { margin-top: auto; }
   .agDiv { border-top: 0.5px solid rgba(255, 255, 255, .09); margin: 0 0 8px; }
   .agRow { display: flex; align-items: center; justify-content: space-between; font-size: 9.5px;
            color: var(--dim); margin-bottom: 4px; font-variant-numeric: tabular-nums; }
@@ -793,10 +952,20 @@ HTML = """<!DOCTYPE html>
             max-height: 130px; overflow: hidden; }
   .logbox div { color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .logbox b { color: var(--cyan); font-weight: 400; }
-  .hitem { display: flex; gap: 8px; align-items: flex-start; padding: 6px 0;
+  #heuteListe { max-height: 34vh; overflow-y: auto; padding-right: 8px; margin-right: -4px; }
+  .wgruppe { margin-bottom: 12px; }
+  .wgruppe:last-child { margin-bottom: 0; }
+  .wtitel { font-size: 8.5px; letter-spacing: .22em; color: var(--cyan); opacity: .85;
+            margin-bottom: 5px; display: flex; align-items: center; gap: 6px;
+            position: sticky; top: 0; background: rgba(12, 26, 38, .96);
+            padding: 3px 0; z-index: 1; }
+  .wtitel b { color: var(--dim); font-weight: 400; margin-left: auto; letter-spacing: 0; }
+  .wsym { opacity: .9; }
+  .hitem { display: flex; gap: 8px; align-items: flex-start; padding: 5px 0 5px 4px;
            border-bottom: 1px solid rgba(89, 215, 255, .06); font-size: 11px; }
   .hitem:last-child { border-bottom: none; }
-  .hitem .sym { flex: none; width: 15px; text-align: center; font-size: 10px; opacity: .85; }
+  .hitem { border-left: 2px solid rgba(89, 215, 255, .12); }
+  .hitem.dringend { border-left-color: var(--green); }
   .hitem .txt { flex: 1; min-width: 0; }
   .hitem .txt b { display: block; color: var(--txt); font-weight: 400; overflow: hidden;
                   text-overflow: ellipsis; white-space: nowrap; }
@@ -950,6 +1119,8 @@ HTML = """<!DOCTYPE html>
                             max-height: none; margin: 172px 12px 12px; }
     body.view-0 .chat { position: relative; top: 0; right: 0; bottom: 0; width: auto;
                         height: 62vh; margin: 0 12px 14px; }
+    #heuteListe { max-height: 46vh; }
+    ::-webkit-scrollbar { width: 9px; height: 9px; }
     body.view-0 footer { position: relative; padding: 4px 16px 28px; font-size: 9px; }
     body.view-0 .vtab { position: fixed; left: auto; right: 10px; bottom: 12px; top: auto;
                         transform: none; writing-mode: horizontal-tb; border: 1px solid var(--glass-line);
@@ -1002,8 +1173,20 @@ HTML = """<!DOCTYPE html>
     .vgrid { grid-template-columns: repeat(2, 1fr); }
   }
 
-  ::-webkit-scrollbar { width: 5px; }
-  ::-webkit-scrollbar-thumb { background: rgba(89, 215, 255, .2); border-radius: 3px; }
+  /* Bildlaufleisten im HUD-Stil */
+  * { scrollbar-width: thin; scrollbar-color: rgba(89, 215, 255, .28) transparent; }
+  ::-webkit-scrollbar { width: 7px; height: 7px; }
+  ::-webkit-scrollbar-track { background: rgba(89, 215, 255, .04); border-radius: 8px;
+                              margin: 3px 0; }
+  ::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, rgba(89, 215, 255, .45), rgba(93, 202, 165, .32));
+    border-radius: 8px; border: 1px solid rgba(89, 215, 255, .16);
+    background-clip: padding-box; transition: background .25s; }
+  ::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(180deg, rgba(89, 215, 255, .8), rgba(93, 202, 165, .6));
+    box-shadow: 0 0 10px rgba(89, 215, 255, .45); }
+  ::-webkit-scrollbar-thumb:active { background: rgba(89, 215, 255, .95); }
+  ::-webkit-scrollbar-corner { background: transparent; }
 </style>
 </head>
 <body class="view-0">
@@ -1024,7 +1207,7 @@ HTML = """<!DOCTYPE html>
 
   <div class="col-left">
     <div class="panel" id="heutePanel" style="display:none">
-      <h3>HEUTE <span id="heuteZahl" style="color:var(--dim);font-size:9px"></span> <span class="chev"></span></h3>
+      <h3>DIESE WOCHE <span id="heuteZahl" style="color:var(--dim);font-size:9px"></span> <span class="chev"></span></h3>
       <div id="heuteListe"></div>
     </div>
 
@@ -1059,6 +1242,13 @@ HTML = """<!DOCTYPE html>
       <span class="agZbtn" data-zoom="in">+</span>
       <span class="agZbtn" data-zoom="out">\u2212</span>
       <span class="agZbtn" data-zoom="reset">\u21ba</span>
+    </div>
+    <div class="botModal" id="botModal">
+      <div class="bmHead">
+        <span class="bmName" id="bmName"></span>
+        <span class="vclose" id="bmClose">\u2715</span>
+      </div>
+      <div class="bmBody" id="bmBody"></div>
     </div>
     <div class="agInner">
       <div id="agChart" style="position:relative;"></div>
@@ -2242,7 +2432,7 @@ function renderAgents(bots) {
     var enterDelay = firstRender ? (' style-delay') : '';
     html += '<div class="agNode' + (isBusy ? ' busy' : '') + (isRoot ? ' agCoreNode' : '') + (firstRender ? ' enter' : '') +
       '" data-bot="' + esc(b.id) + '" style="' +
-      'left:' + p.x + 'px; top:' + p.y + 'px; width:' + p.w + 'px; min-height:' + CH + 'px; ' +
+      'left:' + p.x + 'px; top:' + p.y + 'px; width:' + p.w + 'px; height:' + CH + 'px; ' +
       (firstRender ? 'animation-delay:' + (depth * 130) + 'ms; ' : '') +
       'background:linear-gradient(160deg, ' + col + (isRoot ? '26' : '1c') + ', rgba(9,22,33,.62)); border:0.5px solid ' + col + (b.online ? (isRoot ? '77' : '55') : '22') +
       (isRoot ? '; box-shadow: 0 0 30px rgba(89,215,255,.14), 0 6px 26px rgba(0,0,0,.35), inset 0 1px 0 rgba(255,255,255,.08)' : '') + '">' +
@@ -2265,24 +2455,29 @@ function renderAgents(bots) {
   chart.innerHTML = html;
 }
 
-var HEUTE_SYM = { termin: "\u25f7", job: "\u25d0", seo: "\u270e", immo: "\u2302" };
+var GRUPPEN_SYM = { termin: "\u25f7", aufgabe: "\u2709", job: "\u25d0", offen: "\u270e" };
 
 async function loadHeute() {
   try {
-    var d = await (await fetch('/api/heute')).json();
-    var p = d.posten || [];
+    var d = await (await fetch('/api/woche')).json();
+    var g = d.gruppen || [];
     var panel = document.getElementById('heutePanel');
-    if (!p.length) { panel.style.display = 'none'; return; }
+    if (!d.anzahl) { panel.style.display = 'none'; return; }
     panel.style.display = 'block';
-    document.getElementById('heuteZahl').textContent = p.length > 0 ? '(' + p.length + ')' : '';
-    document.getElementById('heuteListe').innerHTML = p.slice(0, 10).map(function(x) {
-      return '<div class="hitem' + (x.dringend ? ' dringend' : '') + '">' +
-        '<span class="sym">' + (HEUTE_SYM[x.art] || '\u00b7') + '</span>' +
-        '<span class="txt"><b>' + esc(x.text) + '</b>' +
-        (x.detail ? '<span>' + esc(x.detail) + '</span>' : '') + '</span></div>';
+    document.getElementById('heuteZahl').textContent = '(' + d.anzahl + ')';
+    document.getElementById('heuteListe').innerHTML = g.map(function(gr) {
+      return '<div class="wgruppe"><div class="wtitel">' +
+        '<span class="wsym">' + (GRUPPEN_SYM[gr.art] || '\u00b7') + '</span>' +
+        esc(gr.name) + ' <b>' + gr.posten.length + '</b></div>' +
+        gr.posten.map(function(p) {
+          return '<div class="hitem' + (p.heute ? ' dringend' : '') + '">' +
+            '<span class="txt"><b>' + esc(p.text) + '</b>' +
+            (p.detail ? '<span>' + esc(p.detail) + '</span>' : '') + '</span></div>';
+        }).join('') + '</div>';
     }).join('');
   } catch (e) {}
 }
+
 setInterval(loadHeute, 30000); loadHeute();
 
 async function loadJobs() {
@@ -2545,10 +2740,63 @@ document.getElementById('agChart').addEventListener('click', function(ev) {
   if (agDragMoved) { agDragMoved = false; return; }
   var card = ev.target.closest('.agNode');
   if (!card) return;
-  var id = card.getAttribute('data-bot');
-  document.getElementById('target').value = id;
-  document.getElementById('input').focus();
+  botDetails(card.getAttribute('data-bot'));
 });
+
+async function botDetails(id) {
+  var modal = document.getElementById('botModal');
+  document.getElementById('bmName').textContent = id.toUpperCase();
+  document.getElementById('bmBody').innerHTML = '<div class="empty">Lade ...</div>';
+  modal.classList.add('open');
+  try {
+    var b = await (await fetch('/api/bot?id=' + encodeURIComponent(id))).json();
+    document.getElementById('bmName').textContent = b.label || id.toUpperCase();
+    var h = '';
+    if (b.rolle) {
+      h += '<div class="bmAbschnitt"><div class="bmTitel">ROLLE</div>' + esc(b.rolle) + '</div>';
+    }
+    h += '<div class="bmAbschnitt"><div class="bmTitel">ZAHLEN (7 TAGE)</div><div class="bmZahlen">' +
+      '<div class="bmZahl"><div class="v">' + fmt(b.kosten_7d || 0) + '</div><div class="k">KOSTEN</div></div>' +
+      '<div class="bmZahl"><div class="v">' + (b.requests_7d || 0) + '</div><div class="k">AUFRUFE</div></div>' +
+      '</div></div>';
+    if ((b.faehig || []).length) {
+      h += '<div class="bmAbschnitt"><div class="bmTitel">WAS ER KANN</div>' +
+        b.faehig.map(function(f) { return '<div class="bmZeile">' + esc(f) + '</div>'; }).join('') + '</div>';
+    }
+    if ((b.kategorien || []).length) {
+      var gesamt = b.kategorien.reduce(function(a, k) { return a + k.n; }, 0);
+      h += '<div class="bmAbschnitt"><div class="bmTitel">SKILL-BIBLIOTHEK — ' + gesamt +
+        ' ANLEITUNGEN</div><div class="bmChips">' +
+        b.kategorien.slice(0, 14).map(function(k) {
+          return '<span class="bmChip">' + esc(k.name) + '<b>' + k.n + '</b></span>';
+        }).join('') + '</div></div>';
+    }
+    if ((b.arbeiten || []).length) {
+      h += '<div class="bmAbschnitt"><div class="bmTitel">ZULETZT GEMACHT</div>' +
+        b.arbeiten.map(function(a) {
+          return '<div class="bmArbeit"><b>' + esc(a.zeit) + '</b> — ' + esc(a.aktion) +
+            (a.ergebnis ? ': ' + esc(a.ergebnis) : '') +
+            (a.datei ? ' <span style="color:var(--cyan)">vault/' + esc(a.datei) + '</span>' : '') + '</div>';
+        }).join('') + '</div>';
+    }
+    h += '<div class="bmAbschnitt"><div class="bmTitel">CHAT</div>' +
+      '<span class="bmChip" id="bmChat" style="cursor:pointer">Mit ' + esc(b.label) + ' schreiben</span></div>';
+    document.getElementById('bmBody').innerHTML = h;
+    var btn = document.getElementById('bmChat');
+    if (btn) btn.addEventListener('click', function() {
+      document.getElementById('target').value = id;
+      botModalZu();
+      setView(0);
+      setTimeout(function() { document.getElementById('input').focus(); }, 120);
+    });
+  } catch (e) {
+    document.getElementById('bmBody').innerHTML = '<div class="empty">Details nicht ladbar.</div>';
+  }
+}
+
+function botModalZu() { document.getElementById('botModal').classList.remove('open'); }
+document.getElementById('bmClose').addEventListener('click', botModalZu);
+document.addEventListener('keydown', function(ev) { if (ev.key === 'Escape') botModalZu(); });
 document.getElementById('agentsView').addEventListener('wheel', function(ev) {
   if (window.innerWidth < 820 && !ev.ctrlKey) return;   // Handy: scrollen erlauben
   ev.preventDefault();

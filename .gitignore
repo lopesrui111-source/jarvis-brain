@@ -5,3 +5,5 @@ vault/
 camofox/
 skills-repo/
 skills-lib/
+.env.backup*
+.env.bak

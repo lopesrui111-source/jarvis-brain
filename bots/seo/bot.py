@@ -23,6 +23,7 @@ import requests
 import psycopg2
 import psycopg2.extras
 from anthropic import Anthropic
+from protokoll import protokoll_init, protokoll_melden
 from openai import OpenAI
 
 BOT_NAME = "seo"
@@ -491,6 +492,7 @@ def entwurf_schreiben(frage, stil_kontext=""):
             f.write(antwort + "\n")
     except Exception as e:
         return None, f"Vault-Fehler: {e}"
+    protokoll_melden("seo", "Antwort-Entwurf geschrieben", titel[:150], f"seo/{datei}")
     return {"antwort": antwort, "datei": datei, "unsicher": d.get("unsicher", "")}, None
 
 
@@ -664,6 +666,10 @@ TOOLS = [
     {"name": "entwurf",
      "description": "Schreibt einen Antwort-Entwurf zu EINER konkreten Frage-URL (gutefrage oder Quora).",
      "input_schema": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}},
+    {"name": "tagesrecherche",
+     "description": ("Startet die Tagesrecherche sofort — dieselbe, die automatisch laeuft. "
+                     "Ergebnis landet im Vault unter seo/, kein Telegram."),
+     "input_schema": {"type": "object", "properties": {}}},
     {"name": "senden",
      "description": "Schickt vorhandene Entwuerfe aus dem Vault per Telegram — nur wenn Rui aktiv danach fragt.",
      "input_schema": {"type": "object", "properties": {
@@ -690,6 +696,8 @@ def run_tool(name, inp):
                          mit_entwuerfen=inp.get("mit_entwuerfen", True),
                          max_entwuerfe=min(int(inp.get("max_entwuerfe") or 3), 5),
                          telegram=bool(inp.get("telegram", False)))
+    if name == "tagesrecherche":
+        return tagesrecherche("manuell angestossen")
     if name == "senden":
         return entwuerfe_senden(limit=min(int(inp.get("limit") or 5), 10))
     if name == "entwurf":
@@ -855,8 +863,49 @@ def think(history, user_text):
     return final_text
 
 
+def _lauf_marker():
+    return os.path.join(VAULT_DIR, VAULT_SUB, ".letzter_lauf")
+
+
+def _letzter_lauf():
+    """Wann lief die Tagesrecherche zuletzt? (ueberlebt Neustarts)"""
+    try:
+        with open(_lauf_marker(), encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def _lauf_vermerken(tag):
+    try:
+        os.makedirs(os.path.dirname(_lauf_marker()), exist_ok=True)
+        with open(_lauf_marker(), "w", encoding="utf-8") as f:
+            f.write(tag)
+    except Exception as e:
+        print(f"  [auto] Marker: {e}", flush=True)
+
+
+def tagesrecherche(grund="automatisch"):
+    now = datetime.now()
+    print(f"  [auto] Tagesrecherche startet ({grund})", flush=True)
+    res = recherche(plattform="beide", mit_entwuerfen=True,
+                    max_entwuerfe=DAILY_ENTWUERFE, telegram=False)
+    print(f"  [auto] fertig: {str(res)[:140]}", flush=True)
+    try:
+        with open(os.path.join(_vault_pfad(), "_tagesbericht.md"), "a", encoding="utf-8") as f:
+            f.write(f"\n\n## {now.strftime('%d.%m.%Y %H:%M')}\n\n{res}\n")
+    except Exception:
+        pass
+    _lauf_vermerken(now.strftime("%Y-%m-%d"))
+    try:
+        protokoll_melden("seo", "Tagesrecherche", str(res)[:200], "seo/_tagesbericht.md")
+    except Exception:
+        pass
+    return res
+
+
 def daily_thread():
-    """Laeuft einmal taeglich zur konfigurierten Uhrzeit. Ergebnis nur in den Vault."""
+    """Taeglicher Lauf. Holt nach, wenn der Bot zur eigentlichen Zeit nicht lief."""
     if not DAILY_TIME or ":" not in DAILY_TIME:
         print("  [auto] kein Tageslauf konfiguriert", flush=True)
         return
@@ -865,48 +914,31 @@ def daily_thread():
     except Exception:
         print(f"  [auto] SEO_DAILY_TIME ungueltig: {DAILY_TIME}", flush=True)
         return
-    letzter = None
+
+    letzter = _letzter_lauf()
+    print(f"  [auto] Tageslauf {DAILY_TIME} aktiv (zuletzt: {letzter or 'noch nie'})", flush=True)
+    time.sleep(30)   # erst hochfahren lassen
+
     while True:
         try:
             now = datetime.now()
             heute = now.strftime("%Y-%m-%d")
-            if now.hour == hh and now.minute >= mm and letzter != heute:
-                letzter = heute
-                print(f"  [auto] Tagesrecherche startet ({DAILY_TIME})", flush=True)
-                res = recherche(plattform="beide", mit_entwuerfen=True,
-                                max_entwuerfe=DAILY_ENTWUERFE, telegram=False)
-                print(f"  [auto] fertig: {str(res)[:120]}", flush=True)
+            faellig_ab = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            # Nachholen: Zeitpunkt vorbei UND heute noch nicht gelaufen
+            if now >= faellig_ab and _letzter_lauf() != heute:
+                grund = "planmaessig" if now.hour == hh else f"nachgeholt, geplant war {DAILY_TIME}"
                 try:
-                    with open(os.path.join(_vault_pfad(), "_tagesbericht.md"), "a", encoding="utf-8") as f:
-                        f.write(f"\n\n## {now.strftime('%d.%m.%Y %H:%M')}\n\n{res}\n")
-                except Exception:
-                    pass
+                    tagesrecherche(grund)
+                except Exception as e:
+                    print(f"  [auto] Lauf fehlgeschlagen: {type(e).__name__}: {e}", flush=True)
+                    _lauf_vermerken(heute)   # nicht in Dauerschleife wiederholen
         except Exception as e:
             print(f"  [auto] {type(e).__name__}: {e}", flush=True)
-        time.sleep(45)
-
-
-def _antwort_senden(r, queue, text):
-    """Antwort zustellen — auch wenn die Verbindung waehrend langer Arbeit abgelaufen ist."""
-    for versuch in range(3):
-        try:
-            r.rpush(queue, text)
-            r.expire(queue, 300)
-            return True
-        except Exception as e:
-            print(f"  [reply] Versuch {versuch + 1} fehlgeschlagen ({type(e).__name__}) — neue Verbindung", flush=True)
-            try:
-                r = redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
-                                socket_keepalive=True, health_check_interval=20,
-                                retry_on_timeout=True, socket_timeout=30)
-            except Exception:
-                pass
-            time.sleep(1)
-    print("  [reply] Antwort konnte NICHT zugestellt werden!", flush=True)
-    return False
+        time.sleep(60)
 
 
 def main():
+    protokoll_init()
     print("=" * 58, flush=True)
     print("  SEO/Q&A-BOT — gutefrage + Quora (read-only)", flush=True)
     print(f"  Telegram  : {'aktiv' if (TELEGRAM_TOKEN and TELEGRAM_CHAT) else 'nicht konfiguriert'}", flush=True)
