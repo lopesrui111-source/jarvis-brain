@@ -50,7 +50,7 @@ CAMOFOX_URL = os.getenv("CAMOFOX_URL", "http://camofox:9377")
 VAULT_DIR = "/app/vault"
 VAULT_SUB = "seo"
 
-DAILY_TIME = os.getenv("SEO_DAILY_TIME", "08:00")      # HH:MM, leer = kein Auto-Lauf
+DAILY_TIME = os.getenv("SEO_DAILY_TIME", "08:00").strip().split()[0] if os.getenv("SEO_DAILY_TIME", "08:00").strip() else ""
 DAILY_ENTWUERFE = int(os.getenv("SEO_DAILY_ENTWUERFE", "3"))
 
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
@@ -62,11 +62,22 @@ REPLY_KEY   = "bot:seo:reply:{id}"
 
 # ── Recherche-Quellen (aus Ruis Original-Workflow) ────────────
 # WICHTIG: /home/... erfordert Login -> nur oeffentliche Pfade verwenden
-GF_TAGS = ["e-rechnung", "kleinunternehmer", "rechnung", "umsatzsteuer",
-           "buchhaltung", "gewerbe", "selbststaendigkeit", "existenzgruendung", "steuern"]
+# Alle Slugs am 28.07.2026 gegen gutefrage geprueft (Format: /tag/<slug>/1).
+# "e-rechnung" existiert dort NICHT — genau das erzeugte frueher die 404-Fehler.
+GF_TAGS = ["rechnung", "selbstaendigkeit", "steuererklaerung", "umsatzsteuer",
+           "gewerbe", "steuerrecht", "freiberufler", "mahnung",
+           "unternehmen", "kleinunternehmer", "finanzamt", "gruendung",
+           "handwerk", "buchhaltung", "steuern", "selbststaendigkeit",
+           "existenzgruendung"]
 GF_KEYWORDS = ["E-Rechnung", "Rechnung schreiben", "Kleinunternehmer",
                "Angebot erstellen", "Mahnung"]
 GF_NEUE = "https://www.gutefrage.net/fragen/neue"
+# Wie viele Tag-Seiten pro Lauf durchgesehen werden (Default 8 von 17).
+GF_TAG_ANZAHL = int(os.getenv("SEO_GF_TAGS", "8"))
+# Zusaetzlich der allgemeine Fragen-Strom (wenig ergiebig, daher nur 1 Seite).
+GF_SEITEN = int(os.getenv("SEO_GF_SEITEN", "1"))
+# Suchseiten liefern 404 — nur zuschalten, falls gutefrage sie zurueckbringt.
+GF_ALT_QUELLEN = os.getenv("SEO_ALT_QUELLEN", "0") == "1"
 
 # Quora wird von Cloudflare geblockt -> standardmaessig aus
 QUORA_AKTIV = os.getenv("SEO_QUORA", "0") == "1"
@@ -245,15 +256,33 @@ def _ist_consent(snapshot):
     return any(w in kopf for w in CONSENT_HINWEIS)
 
 
+_404_MARKER = ("fehler 404", "error 404", "gibt's nicht mehr", "gibt es nicht mehr",
+               "seite nicht gefunden", "page not found")
+
+
+def _ist_404(snapshot):
+    """Gutefrage liefert bei toten Tag-/Suchseiten eine 404-Seite mit Status 200."""
+    s = " ".join((snapshot or "").split()).lower()
+    return any(m in s for m in _404_MARKER)
+
+
 def _consent_ref(snapshot):
-    """Sucht den Consent-Button. Datenschutzfreundlich: Ablehnen vor Akzeptieren."""
-    zeilen = [z for z in (snapshot or "").splitlines() if "button" in z.lower()]
+    """Sucht den Consent-Button. Datenschutzfreundlich: Ablehnen vor Akzeptieren.
+
+    Camofox liefert die Referenz als [e1] (nicht [ref=e1]) und der Consent-Dialog
+    besteht teils aus Links statt Buttons — beides wird hier beruecksichtigt.
+    """
+    zeilen = [z for z in (snapshot or "").splitlines()
+              if ("button" in z.lower() or "link" in z.lower())]
     for begriffe in (CONSENT_ABLEHNEN, CONSENT_ANNEHMEN):
         for z in zeilen:
             zl = z.lower()
             if not any(w in zl for w in begriffe):
                 continue
-            m = re.search(r"\[ref=([A-Za-z0-9_-]+)\]", z)
+            # Bezahlangebote nie anklicken (contentpass o.ae.)
+            if any(w in zl for w in ("contentpass", "€", "eur", "monat", "month", "login")):
+                continue
+            m = re.search(r"\[(?:ref=)?([A-Za-z]?\d+[A-Za-z0-9_-]*)\]", z)
             if m:
                 return m.group(1), z.strip()[:70]
     return None, None
@@ -280,7 +309,19 @@ def _snapshot(tab):
         return None, None
 
 
+def _tab_schliessen(tab):
+    """Tab freigeben. Ohne das laeuft camofox nach wenigen Abrufen voll."""
+    if not tab:
+        return
+    try:
+        requests.delete(f"{CAMOFOX_URL}/tabs/{tab}",
+                        params={"userId": BOT_USER_ID}, timeout=20)
+    except Exception:
+        pass
+
+
 def fetch_page(url):
+    tab = None
     try:
         r = requests.post(f"{CAMOFOX_URL}/tabs",
                           json={"userId": BOT_USER_ID, "sessionKey": "main", "url": url}, timeout=70)
@@ -295,19 +336,25 @@ def fetch_page(url):
         snap = daten.get("snapshot") or ""
         end_url = daten.get("url") or url
 
-        # Cookie-Dialog wegklicken (nur dieser eine Klick, sonst wird nichts bedient)
-        if _ist_consent(snap):
+        # Cookie-Dialog wegklicken (bis zu 2 Versuche, sonst wird nichts bedient)
+        for _versuch in range(2):
+            if not _ist_consent(snap):
+                break
             ref, beschriftung = _consent_ref(snap)
-            if ref:
-                if _klick(tab, ref):
-                    print(f"  [consent] weggeklickt: {beschriftung}", flush=True)
-                    time.sleep(1.2)
-                    neu, neue_url = _snapshot(tab)
-                    if neu:
-                        snap, end_url = neu, (neue_url or end_url)
-            else:
+            if not ref:
                 print("  [consent] Dialog erkannt, aber kein Button gefunden", flush=True)
+                break
+            if not _klick(tab, ref):
+                print(f"  [consent] Klick fehlgeschlagen: {beschriftung}", flush=True)
+                break
+            print(f"  [consent] weggeklickt: {beschriftung}", flush=True)
+            time.sleep(1.5)
+            neu, neue_url = _snapshot(tab)
+            if neu:
+                snap, end_url = neu, (neue_url or end_url)
 
+        if _ist_404(snap):
+            return None, f"SEITE-404 (Quelle existiert nicht mehr) bei {end_url[:90]}"
         if _ist_blockiert(end_url, snap):
             return None, f"BLOCKIERT (Login/Bot-Schutz) bei {end_url[:90]}"
         if _ist_consent(snap) and len(snap) < 8000:
@@ -315,6 +362,8 @@ def fetch_page(url):
         return snap[:9000], None
     except Exception as e:
         return None, f"Browser nicht erreichbar ({type(e).__name__})"
+    finally:
+        _tab_schliessen(tab)
 
 
 def send_telegram(text):
@@ -370,34 +419,72 @@ def _extract_fragen(snapshot, quelle):
         return []
 
 
-FRISCH = re.compile(r"(minute|stunde|heute|gerade|vor 1 tag|gestern)", re.I)
+# "vor 2 Tagen, 9 Stunden" enthielt frueher "stunde" und galt damit faelschlich
+# als frisch. Jetzt zaehlen Stunden nur, wenn KEINE Tagesangabe davorsteht.
+FRISCH = re.compile(
+    r"(vor \d+ (?:sekunde|minute)"
+    r"|vor (?:1|2|3|4|5|6|7|8|9|1\d|2[0-3]) stunde"
+    r"|heute|gerade|soeben|vor 1 tag|vor einem tag|gestern)", re.I)
+_ALT = re.compile(r"vor \d+\s*(tag|tagen|woche|monat|jahr)", re.I)
 
 
 def _ist_frisch(alter):
-    return bool(FRISCH.search(alter or ""))
+    t = (alter or "").strip()
+    if not t:
+        return False
+    # "vor 2 Tagen, 9 Stunden" -> alt, egal was dahinter steht
+    m = _ALT.search(t)
+    if m:
+        zahl = re.match(r"vor (\d+)", t[m.start():])
+        if zahl and int(zahl.group(1)) > 1:
+            return False
+        if "woche" in m.group(0).lower() or "monat" in m.group(0).lower() \
+           or "jahr" in m.group(0).lower():
+            return False
+    return bool(FRISCH.search(t))
 
 
-def scan_gutefrage(max_quellen=8):
-    """Oeffentliche Quellen: neueste Fragen, Tag-Seiten und Suche (kein Login noetig)."""
+def scan_gutefrage(max_quellen=12):
+    """Oeffentliche Quellen ohne Login.
+
+    Hauptquelle sind die Themenseiten /tag/<slug>/1 — dort stehen fachlich
+    passende Fragen. Der allgemeine Strom /fragen/neue kommt ergaenzend dazu,
+    liefert aber selten Relevantes (Anime, Urlaub, Beziehungsfragen).
+    Die Tags rotieren taeglich, damit ueber die Zeit alle drankommen.
+    """
     from urllib.parse import quote
-    gefunden, blockiert = [], []
-    quellen = [(GF_NEUE, "Neueste Fragen")]
-    for t in GF_TAGS[:5]:
-        quellen.append((f"https://www.gutefrage.net/tag/{t}", f"Tag: {t}"))
-    for k in GF_KEYWORDS[:3]:
-        quellen.append((f"https://www.gutefrage.net/suche?q={quote(k)}", f"Suche: {k}"))
+    gefunden, blockiert, tot = [], [], []
+
+    # Taegliche Rotation: Startpunkt haengt am Tag des Jahres
+    versatz = datetime.now().timetuple().tm_yday % max(1, len(GF_TAGS))
+    tags = (GF_TAGS + GF_TAGS)[versatz:versatz + GF_TAG_ANZAHL]
+
+    quellen = [(f"https://www.gutefrage.net/tag/{t}/1", f"Tag: {t}") for t in tags]
+    quellen += [(f"{GF_NEUE}/{s}", f"Neueste Fragen S.{s}")
+                for s in range(1, GF_SEITEN + 1)]
+    if GF_ALT_QUELLEN:
+        for k in GF_KEYWORDS[:3]:
+            quellen.append((f"https://www.gutefrage.net/suche?q={quote(k)}", f"Suche: {k}"))
 
     for url, label in quellen[:max_quellen]:
         snap, err = fetch_page(url)
         if err:
             print(f"  [gf] {label}: {err}", flush=True)
-            if "BLOCKIERT" in err:
+            if "SEITE-404" in err:
+                tot.append(label)
+            elif "BLOCKIERT" in err:
                 blockiert.append(label)
             continue
         gefunden += _extract_fragen(snap, f"gutefrage / {label}")
         time.sleep(1)
+
+    if tot:
+        print(f"  [gf] {len(tot)} Quellen existieren nicht mehr (404): "
+              f"{', '.join(tot[:4])} — GF_TAGS pruefen!", flush=True)
     if blockiert:
         print(f"  [gf] {len(blockiert)} Quellen blockiert: {', '.join(blockiert[:4])}", flush=True)
+    print(f"  [gf] {len(quellen[:max_quellen])} Quellen abgefragt, "
+          f"{len(gefunden)} relevante Fragen", flush=True)
     return gefunden
 
 
@@ -528,8 +615,8 @@ def recherche(plattform="beide", mit_entwuerfen=True, max_entwuerfe=3, telegram=
     if not neu:
         msg = ("Heute keine neuen passenden Fragen."
                if fragen else
-               "Keine Fragen abrufbar — alle Quellen blockiert (Login/Bot-Schutz). "
-               "Im Server-Log steht, welche.")
+               "Keine passenden Fragen gefunden. Moegliche Gruende: nichts Frisches "
+               "zum Thema, oder Quellen nicht erreichbar — im Server-Log steht, welche.")
         if telegram:
             send_telegram("🔍 Q&A-Recherche: " + msg)
         return msg
@@ -917,6 +1004,7 @@ def daily_thread():
 
     letzter = _letzter_lauf()
     print(f"  [auto] Tageslauf {DAILY_TIME} aktiv (zuletzt: {letzter or 'noch nie'})", flush=True)
+    versuche = {"tag": "", "n": 0}
     time.sleep(30)   # erst hochfahren lassen
 
     while True:
@@ -926,12 +1014,29 @@ def daily_thread():
             faellig_ab = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
             # Nachholen: Zeitpunkt vorbei UND heute noch nicht gelaufen
             if now >= faellig_ab and _letzter_lauf() != heute:
+                if versuche.get("tag") != heute:
+                    versuche.clear()
+                    versuche["tag"] = heute
+                    versuche["n"] = 0
+                if versuche["n"] >= 3:
+                    time.sleep(300)
+                    continue
+                versuche["n"] += 1
                 grund = "planmaessig" if now.hour == hh else f"nachgeholt, geplant war {DAILY_TIME}"
                 try:
                     tagesrecherche(grund)
                 except Exception as e:
-                    print(f"  [auto] Lauf fehlgeschlagen: {type(e).__name__}: {e}", flush=True)
-                    _lauf_vermerken(heute)   # nicht in Dauerschleife wiederholen
+                    # Frueher wurde der Tag hier als erledigt vermerkt — dadurch
+                    # verschwand ein gescheiterter Lauf lautlos. Jetzt: melden
+                    # und bis zu 3x am Tag erneut versuchen.
+                    print(f"  [auto] Lauf fehlgeschlagen ({versuche['n']}/3): "
+                          f"{type(e).__name__}: {e}", flush=True)
+                    if versuche["n"] >= 3:
+                        _lauf_vermerken(heute)
+                        send_telegram(f"SEO-Bot: Tagesrecherche heute 3x fehlgeschlagen "
+                                      f"({type(e).__name__}: {str(e)[:200]})")
+                    else:
+                        time.sleep(300)   # kurz warten, dann neuer Versuch
         except Exception as e:
             print(f"  [auto] {type(e).__name__}: {e}", flush=True)
         time.sleep(60)

@@ -93,6 +93,13 @@ REPLY_KEY   = "jarvis:reply:{id}"
 DAYLOG_KEY  = "jarvis:daylog:{date}"      # Tages-Mitschnitt
 NIGHTLY_MARK = "jarvis:nightly:last"      # Datum des letzten Laufs
 NIGHTLY_HOUR = 3                          # 03:00 Europe/Berlin (TZ aus .env)
+
+# ── MORGEN-LAUF ──────────────────────────────────────────────
+# Geht einmal taeglich Mails und Kalender durch und legt daraus Aufgaben an.
+# Kein Briefing, keine Zusammenfassung — nur Eintraege in der Aufgabenliste.
+MORGEN_ZEIT = os.getenv("JARVIS_MORGEN_ZEIT", "07:00").strip().split()[0] \
+    if os.getenv("JARVIS_MORGEN_ZEIT", "07:00").strip() else ""
+MORGEN_MARK = os.path.join(VAULT_DIR, ".morgenlauf")   # ueberlebt Neustarts
 DEDUP_DIST  = 0.15                        # Vektor-Distanz: darunter = Duplikat
 
 if not CLAUDE_KEY:
@@ -172,6 +179,40 @@ SYSTEM += """
 """
 
 SYSTEM += """
+- DOKUMENTATION: Du pflegst CHANGELOG.md (Commits granular), STATUS.md (Uebergabe fuer
+  eine neue Claude-Session, verdichtet) und CHEATSHEET.md (Kurzreferenz fuer Rui).
+  Das laeuft taeglich nach dem Morgen-Durchgang automatisch. Rui kann es mit "changelog"
+  ausloesen, du selbst mit dem Tool "doku". Du schreibst dabei ausschliesslich diese drei
+  Dateien — andere Pfade sind technisch gesperrt.
+- DU BIST DER ORCHESTRATOR — DU MUSST BESCHEID WISSEN. Fragt Rui, was gerade laeuft,
+  was die anderen Bots machen, was ansteht, wie die Kosten stehen oder was es Neues
+  gibt, rufst du ZUERST das Tool "lage" auf. Es liefert dir in einem Aufruf: deine
+  geplanten Laeufe, die letzten Arbeiten von CEO, Marketing, SEO und Immo, Kosten je
+  Bot, offene Aufgaben, wartende SEO-Entwuerfe, ungepruefte Immo-Treffer und laufende
+  Auftraege. Antworte NIE aus dem Bauch heraus und sage nie, du wuesstest es nicht,
+  ohne "lage" gefragt zu haben. Auch bei beilaeufigen Fragen ("alles ruhig?",
+  "gibts was Neues?") lohnt der Aufruf — er kostet einen Bruchteil einer Fehlauskunft.
+- DEIN MORGEN-DURCHGANG: Du hast einen automatischen Lauf, der taeglich zur
+  eingestellten Uhrzeit startet (siehe unten). Er geht die ungelesenen Mails ALLER
+  Konten (ionos und gmail) sowie den Kalender der naechsten 7 Tage durch und legt
+  daraus Aufgaben an — Handlungsbedarf als normale Aufgabe, wichtige Infos ohne
+  Handlungsbedarf mit "Info: " im Titel. Er schreibt KEIN Briefing.
+  Fragt Rui, ob oder wann du seine Mails pruefst, sagst du das ehrlich: ja, taeglich
+  automatisch, und nennst die Uhrzeit. Behaupte NICHT, du haettest keine Routine.
+  Wann der Lauf zuletzt lief, sagt dir das Tool "lage" mit Datum, UHRZEIT und Anlass.
+  Unterscheide dabei ehrlich: "planmaessig" heisst zur eingestellten Zeit,
+  "manuell" heisst, Rui hat ihn selbst ausgeloest, "nachgeholt" heisst spaeter.
+  Erfinde keine Uhrzeit. Rui kann ihn jederzeit von Hand ausloesen, indem er dir
+  "morgenlauf" schreibt.
+- TERMIN ODER AUFGABE? Das Dashboard zeigt zwei getrennte Quellen unter DIESE WOCHE:
+  TERMINE kommen aus dem Google-Kalender (check_calendar, read-only),
+  AUFGABEN aus der Datenbank (aufgaben_liste, aenderbar).
+  Sagt Rui "X habe ich erledigt", pruefst du BEIDE, bevor du behauptest, es gaebe X nicht:
+  erst aufgabe_erledigt mit titel="X" — findet das nichts, rufst du check_calendar auf.
+  Steht X im Kalender, sagst du das ehrlich: es ist ein Termin, kein Aufgaben-Eintrag,
+  und du kannst ihn nicht abhaken (Kalender ist read-only). Biete an, stattdessen eine
+  Aufgabe anzulegen oder es dir zu merken. Sage NIE "gibt es nicht", ohne beides geprueft
+  zu haben — Rui sieht den Eintrag im Dashboard vor sich.
 - AUFGABEN AUS MAILS: Wenn du Mails liest und darin etwas steckt, das Rui erledigen muss
   (Frist, Rueckfrage, offene Rechnung, Terminbestaetigung, Behoerdenpost), legst du es mit
   aufgabe_anlegen an — kurzer handlungsorientierter Titel, Details mit Absender und Kontext,
@@ -299,9 +340,29 @@ TOOLS = [
         "input_schema": {"type": "object", "properties": {}},
     },
     {
+        "name": "doku",
+        "description": ("Frischt CHANGELOG.md, STATUS.md und CHEATSHEET.md auf. Holt die "
+                        "neuen Commits von GitHub und verdichtet sie. Laeuft taeglich nach "
+                        "dem Morgen-Durchgang automatisch; hiermit auf Zuruf."),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "lage",
+        "description": ("Gesamtueberblick ueber das System: deine eigenen geplanten Laeufe, "
+                        "was die anderen Bots (CEO, Marketing, SEO, Immo) zuletzt gemacht haben, "
+                        "Kosten je Bot heute, offene Aufgaben, wartende SEO-Entwuerfe und "
+                        "Immo-Treffer, laufende Auftraege. Nutze das IMMER, bevor du etwas "
+                        "ueber den Systemzustand, andere Bots oder Anstehendes sagst."),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
         "name": "aufgabe_erledigt",
-        "description": "Hakt eine Aufgabe ab (id aus aufgaben_liste).",
-        "input_schema": {"type": "object", "properties": {"id": {"type": "integer"}}, "required": ["id"]},
+        "description": ("Hakt eine Aufgabe ab. Entweder id (aus aufgaben_liste) oder titel "
+                        "(Stichwort, sucht die passende offene Aufgabe). Findet nichts, wenn es "
+                        "sich um einen Kalendertermin handelt — den kannst du nicht abhaken."),
+        "input_schema": {"type": "object", "properties": {
+            "id": {"type": "integer"},
+            "titel": {"type": "string", "description": "Stichwort statt id, z.B. 'Zahnarzt'"}}},
     },
     {
         "name": "vault_liste",
@@ -786,15 +847,34 @@ def tool_aufgaben_liste(inp):
 
 def tool_aufgabe_erledigt(inp):
     aid = inp.get("id")
-    if not aid:
-        return "Fehler: id noetig."
+    titel = (inp.get("titel") or "").strip()
+    if not aid and not titel:
+        return "Fehler: id oder titel noetig."
     try:
         conn = pg_conn()
         with conn, conn.cursor() as cur:
-            cur.execute("UPDATE aufgaben SET erledigt = TRUE WHERE id = %s", (int(aid),))
-            n = cur.rowcount
+            if aid:
+                cur.execute("UPDATE aufgaben SET erledigt = TRUE WHERE id = %s", (int(aid),))
+                n = cur.rowcount
+                conn.close()
+                return "Als erledigt markiert." if n else "Aufgabe nicht gefunden."
+            # Titel-Suche: nur offene Aufgaben, Teiltreffer
+            cur.execute("SELECT id, titel FROM aufgaben "
+                        "WHERE erledigt = FALSE AND titel ILIKE %s "
+                        "ORDER BY id DESC LIMIT 5", (f"%{titel}%",))
+            treffer = cur.fetchall()
+            if not treffer:
+                conn.close()
+                return (f"Keine offene Aufgabe zu '{titel}' gefunden. "
+                        "Falls es ein Kalendertermin ist: den kann ich nicht abhaken, "
+                        "der muss im Kalender selbst geaendert werden.")
+            if len(treffer) > 1:
+                liste = "; ".join(f"[{t[0]}] {t[1][:50]}" for t in treffer)
+                conn.close()
+                return f"Mehrere Treffer — bitte id angeben: {liste}"
+            cur.execute("UPDATE aufgaben SET erledigt = TRUE WHERE id = %s", (treffer[0][0],))
         conn.close()
-        return "Als erledigt markiert." if n else "Aufgabe nicht gefunden."
+        return f"Als erledigt markiert: {treffer[0][1][:60]}"
     except Exception as e:
         return f"Fehler: {e}"
 
@@ -1633,7 +1713,464 @@ def tool_ask_ceo(inp: dict) -> str:
 
 TOOLS = TOOLS + PROTOKOLL_TOOLS
 
+# ── LAGEBILD: WAS LAEUFT IM GESAMTEN SYSTEM ──────────────────
+def tool_lage(inp):
+    """Kompakter Gesamtueberblick: eigene Laeufe, andere Bots, offene Posten.
+
+    Damit muss JARVIS nicht raten, was die anderen Bots tun oder was ansteht —
+    er fragt eine Quelle ab statt sich etwas zusammenzureimen.
+    """
+    teile = []
+
+    # 1) Eigene geplante Laeufe
+    teile.append("== DEINE LAEUFE ==")
+    teile.append(f"Morgen-Durchgang: geplant {MORGEN_ZEIT or 'aus'}, "
+                 f"zuletzt gelaufen: {_morgen_letzter_voll() or 'noch nie'} — "
+                 "Mails beider Konten + Kalender, legt Aufgaben an")
+    teile.append(f"Gedaechtnis-Konsolidierung: taeglich {NIGHTLY_HOUR:02d}:00")
+
+    try:
+        conn = pg_conn()
+        with conn, conn.cursor() as cur:
+            # 2) Was die anderen Bots zuletzt gemacht haben
+            try:
+                cur.execute("SELECT bot, aktion, COALESCE(ergebnis,''), "
+                            "to_char(created_at,'DD.MM. HH24:MI') FROM arbeit_log "
+                            "WHERE created_at > now() - interval '3 days' "
+                            "ORDER BY id DESC LIMIT 12")
+                zeilen = cur.fetchall()
+                teile.append("\n== ANDERE BOTS (3 Tage) ==")
+                if zeilen:
+                    for z in zeilen:
+                        teile.append(f"[{z[0]}] {z[3]} {z[1]}: {z[2][:90]}")
+                else:
+                    teile.append("Keine Eintraege.")
+            except Exception:
+                conn.rollback()
+                teile.append("\n== ANDERE BOTS == (arbeit_log nicht lesbar)")
+
+            # 3) Kosten je Bot heute
+            try:
+                cur.execute("SELECT bot, ROUND(SUM(cost_usd)::numeric, 4), COUNT(*) "
+                            "FROM cost_ledger WHERE created_at::date = CURRENT_DATE "
+                            "GROUP BY bot ORDER BY 2 DESC")
+                zeilen = cur.fetchall()
+                if zeilen:
+                    teile.append("\n== KOSTEN HEUTE ==")
+                    for z in zeilen:
+                        teile.append(f"{z[0]}: ${z[1]} ({z[2]} Aufrufe)")
+            except Exception:
+                conn.rollback()
+
+            # 4) Offene Aufgaben
+            try:
+                cur.execute("SELECT titel, COALESCE(quelle,''), faellig FROM aufgaben "
+                            "WHERE NOT erledigt ORDER BY faellig NULLS LAST, id DESC LIMIT 12")
+                zeilen = cur.fetchall()
+                teile.append("\n== OFFENE AUFGABEN ==")
+                if zeilen:
+                    for z in zeilen:
+                        frist = f" (bis {z[2].strftime('%d.%m.')})" if z[2] else ""
+                        teile.append(f"[{z[1] or 'mail'}] {z[0][:80]}{frist}")
+                else:
+                    teile.append("Keine.")
+            except Exception:
+                conn.rollback()
+
+            # 5) Wartende Entwuerfe und Immo-Treffer
+            try:
+                cur.execute("SELECT count(*) FROM qa_seen "
+                            "WHERE entwurf_datei <> '' AND NOT erledigt")
+                n_qa = cur.fetchone()[0]
+                teile.append(f"\nSEO-Entwuerfe wartend: {n_qa}")
+            except Exception:
+                conn.rollback()
+            try:
+                cur.execute("SELECT count(*) FROM immo_seen WHERE qualifiziert "
+                            "AND NOT COALESCE(erledigt, FALSE) "
+                            "AND created_at > now() - interval '7 days'")
+                teile.append(f"Immo-Treffer ungeprueft (7 Tage): {cur.fetchone()[0]}")
+            except Exception:
+                conn.rollback()
+
+            # 6) Laufende Auftraege
+            try:
+                cur.execute("SELECT titel, schritt, gesamt FROM jobs "
+                            "WHERE status IN ('offen','laeuft') ORDER BY id DESC LIMIT 5")
+                zeilen = cur.fetchall()
+                if zeilen:
+                    teile.append("\n== LAEUFT GERADE ==")
+                    for z in zeilen:
+                        teile.append(f"{z[0][:70]} (Schritt {min((z[1] or 0)+1, z[2] or 1)}/{z[2] or 1})")
+            except Exception:
+                conn.rollback()
+        conn.close()
+    except Exception as e:
+        teile.append(f"\n(Datenbank nicht erreichbar: {e})")
+
+    return "\n".join(teile)
+
+
+# ── DOKU-SYSTEM: CHANGELOG / STATUS / CHEATSHEET ─────────────
+# Liest die Commit-Historie ueber die GitHub-API und pflegt daraus drei Dateien.
+# Schreibzugriff ist bewusst auf genau diese drei Dateinamen begrenzt.
+GITHUB_REPO = os.getenv("GITHUB_REPO", "jarvis-brain")
+DOKU_DIR    = os.getenv("JARVIS_DOKU_DIR", "/app/repo")     # Repo-Wurzel im Container
+DOKU_MARK   = os.path.join(VAULT_DIR, ".changelog_stand")   # zuletzt verarbeiteter Commit
+DOKU_ERLAUBT = ("CHANGELOG.md", "STATUS.md", "CHEATSHEET.md")
+
+
+def _doku_ziel():
+    """Schreibziel bestimmen. Faellt auf den Vault zurueck, wenn das Repo
+    nicht eingebunden ist — dann geht nichts verloren, es landet nur woanders."""
+    if os.path.isdir(DOKU_DIR) and os.access(DOKU_DIR, os.W_OK):
+        return DOKU_DIR
+    ersatz = os.path.join(VAULT_DIR, "doku")
+    os.makedirs(ersatz, exist_ok=True)
+    return ersatz
+
+
+def _doku_schreiben(dateiname, inhalt):
+    """Schreibt NUR die drei erlaubten Dateien. Kein freier Pfad moeglich."""
+    if dateiname not in DOKU_ERLAUBT:
+        return f"Nicht erlaubt: {dateiname}"
+    ziel = os.path.join(_doku_ziel(), dateiname)
+    try:
+        with open(ziel, "w", encoding="utf-8") as f:
+            f.write(inhalt)
+        return f"geschrieben: {ziel}"
+    except Exception as e:
+        return f"Fehler bei {dateiname}: {e}"
+
+
+def _doku_stand():
+    try:
+        with open(DOKU_MARK, encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def _doku_stand_merken(sha):
+    try:
+        os.makedirs(os.path.dirname(DOKU_MARK), exist_ok=True)
+        with open(DOKU_MARK, "w", encoding="utf-8") as f:
+            f.write(sha)
+    except Exception as e:
+        print(f"  [doku] Marker nicht schreibbar: {e}", flush=True)
+
+
+def _doku_commits(seit_sha=""):
+    """Holt Commits von GitHub, neueste zuerst. Bricht beim bekannten Stand ab."""
+    daten, err = _gh(f"/repos/{GITHUB_USER}/{GITHUB_REPO}/commits", {"per_page": 100})
+    if err:
+        return [], err
+    neu = []
+    for c in daten or []:
+        sha = c.get("sha", "")
+        if seit_sha and sha.startswith(seit_sha[:7]):
+            break
+        msg = ((c.get("commit") or {}).get("message") or "").strip()
+        datum = ((c.get("commit") or {}).get("author") or {}).get("date", "")[:10]
+        neu.append({"sha": sha[:7], "msg": msg.split("\n")[0][:150], "datum": datum})
+    return neu, None
+
+
+def _doku_dateistand():
+    """Zeilenzahlen der wichtigsten Dateien — nur wenn das Repo eingebunden ist."""
+    pfade = ["orchestrator/core.py", "dashboard/dashboard.py", "bots/ceo/bot.py",
+             "bots/marketing/bot.py", "bots/seo/bot.py", "bots/immo/bot.py",
+             "bots/telegram/bridge.py"]
+    zeilen = []
+    for p in pfade:
+        voll = os.path.join(DOKU_DIR, p)
+        try:
+            with open(voll, encoding="utf-8", errors="ignore") as f:
+                zeilen.append(f"| {p} | {sum(1 for _ in f)} |")
+        except Exception:
+            zeilen.append(f"| {p} | (nicht lesbar) |")
+    return zeilen
+
+
+def _doku_systemlage():
+    """Harte Zahlen aus der Datenbank fuer STATUS.md."""
+    z = []
+    try:
+        conn = pg_conn()
+        with conn, conn.cursor() as cur:
+            for beschr, sql in (
+                ("Offene Aufgaben", "SELECT count(*) FROM aufgaben WHERE NOT erledigt"),
+                ("SEO-Entwuerfe wartend",
+                 "SELECT count(*) FROM qa_seen WHERE entwurf_datei <> '' AND NOT erledigt"),
+                ("Immo-Treffer ungeprueft",
+                 "SELECT count(*) FROM immo_seen WHERE qualifiziert "
+                 "AND NOT COALESCE(erledigt, FALSE)"),
+            ):
+                try:
+                    cur.execute(sql)
+                    z.append(f"- {beschr}: {cur.fetchone()[0]}")
+                except Exception:
+                    conn.rollback()
+            try:
+                cur.execute("SELECT bot, ROUND(SUM(cost_usd)::numeric,2) FROM cost_ledger "
+                            "WHERE created_at > now() - interval '30 days' "
+                            "GROUP BY bot ORDER BY 2 DESC")
+                teile = [f"{r[0]} ${r[1]}" for r in cur.fetchall()]
+                if teile:
+                    z.append("- Kosten 30 Tage: " + ", ".join(teile))
+            except Exception:
+                conn.rollback()
+        conn.close()
+    except Exception as e:
+        z.append(f"- (Datenbank nicht erreichbar: {e})")
+    return z
+
+
+def _doku_changelog(neue):
+    """CHANGELOG.md — granular, ohne Modell, nur formatiert."""
+    alt = ""
+    try:
+        with open(os.path.join(_doku_ziel(), "CHANGELOG.md"), encoding="utf-8") as f:
+            alt = f.read()
+            if alt.startswith("# Changelog"):
+                alt = alt.split("\n", 2)[-1].lstrip("\n")
+    except Exception:
+        pass
+    nach_tag = {}
+    for c in neue:
+        nach_tag.setdefault(c["datum"] or "ohne Datum", []).append(c)
+    neu_text = []
+    for tag in sorted(nach_tag, reverse=True):
+        neu_text.append(f"## {tag}")
+        for c in nach_tag[tag]:
+            neu_text.append(f"- `{c['sha']}` {c['msg']}")
+        neu_text.append("")
+    kopf = ("# Changelog\n\nAutomatisch gepflegt von JARVIS aus den Commit-Messages. "
+            "Nicht von Hand bearbeiten.\n\n")
+    return kopf + "\n".join(neu_text) + ("\n" + alt if alt.strip() else "")
+
+
+def _doku_cheatsheet():
+    """CHEATSHEET.md — reine Kurzreferenz, ohne Modell."""
+    heute = datetime.now().strftime("%d.%m.%Y %H:%M")
+    tabelle = "\n".join(_doku_dateistand())
+    return f"""# Cheatsheet
+
+Stand: {heute} — automatisch erzeugt.
+
+## Verbindung
+```
+ssh -i %USERPROFILE%\\.ssh\\jarvis_key jarvis@195.201.7.109
+ssh -i %USERPROFILE%\\.ssh\\jarvis_key -L 8090:127.0.0.1:8090 jarvis@195.201.7.109
+```
+Dashboard danach: http://127.0.0.1:8090
+
+## Datei einspielen
+```
+scp -i %USERPROFILE%\\.ssh\\jarvis_key "C:\\Users\\rlope\\Downloads\\DATEI" jarvis@195.201.7.109:/opt/jarvis-brain/PFAD
+cd /opt/jarvis-brain && wc -l PFAD && docker compose up -d --build SERVICE
+```
+
+## Dateien und Dienste
+| Datei | Dienst |
+|---|---|
+| orchestrator/core.py | jarvis-core |
+| dashboard/dashboard.py | dashboard |
+| bots/ceo/bot.py | jarvis-ceo |
+| bots/marketing/bot.py | jarvis-marketing |
+| bots/seo/bot.py | jarvis-seo |
+| bots/immo/bot.py | jarvis-immo |
+| bots/telegram/bridge.py | jarvis-telegram |
+
+## Aktuelle Zeilenzahlen
+| Datei | Zeilen |
+|---|---|
+{tabelle}
+
+## Haeufige Befehle
+```
+docker compose ps
+docker compose logs -f DIENST
+docker compose logs --tail=100 DIENST | grep -iE "muster"
+docker compose exec postgres psql -U jarvis -d jarvis_brain -c "\\d TABELLE"
+```
+
+## Handbefehle an JARVIS
+- `morgenlauf` — Mails beider Konten + Kalender durchgehen, Aufgaben anlegen
+- `changelog` — Doku neu erzeugen
+- `konsolidiere` — Gedaechtnis verdichten
+- `reset` — Kurzzeitgedaechtnis leeren
+
+## Geplante Laeufe
+- Morgen-Durchgang: {MORGEN_ZEIT or 'aus'} (danach automatisch die Doku)
+- Gedaechtnis-Konsolidierung: {NIGHTLY_HOUR:02d}:00
+- SEO-Tagesrecherche: siehe SEO_DAILY_TIME in der .env
+"""
+
+
+def _doku_fakten():
+    """Harte Fakten fuer STATUS.md.
+
+    Ohne diesen Block hat das Modell nur Commit-Messages und ergaenzt den Rest
+    plausibel — beim ersten Lauf entstanden dadurch falsche Pfade, erfundene
+    Container und die Behauptung, der SEO-Bot wuerde posten (er postet nie).
+    """
+    z = ["Diese Angaben sind verbindlich. Uebernimm sie WOERTLICH und leite",
+         "nichts Abweichendes aus den Commit-Messages ab.", "",
+         "- Repo-Wurzel auf dem Server: /opt/jarvis-brain/ (NICHT /opt/jarvis/)",
+         "- Server: Hetzner CX23, 195.201.7.109, Ubuntu, Docker Compose",
+         "- Datenbank: PostgreSQL 16 mit pgvector, Datenbankname jarvis_brain, Benutzer jarvis",
+         "- Kalender: Google iCal, read-only. JARVIS kann Termine LESEN, nicht aendern.",
+         "- Mail: IMAP auf IONOS und Gmail, nur lesend.",
+         "- Zeitzone in allen Bot-Dockerfiles: Europe/Berlin"]
+
+    # Dienste aus der docker-compose.yml lesen statt raten
+    try:
+        with open(os.path.join(DOKU_DIR, "docker-compose.yml"), encoding="utf-8") as f:
+            dienste = []
+            in_services = False
+            for zeile in f:
+                if zeile.startswith("services:"):
+                    in_services = True
+                    continue
+                if in_services and re.match(r"^  [a-zA-Z0-9_-]+:\s*$", zeile):
+                    dienste.append(zeile.strip().rstrip(":"))
+        if dienste:
+            z.append("- Laufende Dienste: " + ", ".join(dienste))
+    except Exception:
+        pass
+
+    z += ["",
+          "Rollen der Bots (verbindlich):",
+          "- JARVIS (orchestrator/core.py): Orchestrator. Gedaechtnis (pgvector), Mail lesen,",
+          "  Kalender lesen, Web-Recherche, GitHub lesen, Auftrags-System, Aufgabenverwaltung,",
+          "  Morgen-Durchgang, Lagebild-Tool, Doku-System. Delegiert an die anderen Bots.",
+          "- CEO (bots/ceo/bot.py): Strategie und Entscheidungen fuer Bueroflow,",
+          "  prueft Marketing-Entwuerfe (CEO-Review).",
+          "- MARKETING (bots/marketing/bot.py): Creatives und Post-Texte. 48 Marketing-Skills",
+          "  plus die grosse Skill-Bibliothek (345 Anleitungen). Bildgenerierung ueber MuAPI.",
+          "  Postet NICHTS selbst — legt Dateien im Vault ab.",
+          "- SEO (bots/seo/bot.py): Recherchiert Fragen auf gutefrage.net und schreibt",
+          "  Antwort-ENTWUERFE in den Vault. Er postet NIEMALS etwas, das macht Rui von Hand.",
+          "  Quora ist derzeit ABGESCHALTET (Cloudflare-Schutz).",
+          "- IMMO (bots/immo/bot.py): Rendite-Analysen von Immobilien-Inseraten,",
+          "  Plausibilitaetspruefung, Telegram-Hinweise.",
+          "- TELEGRAM (bots/telegram/bridge.py): Durchreiche-Schicht, kein eigenes Gedaechtnis.",
+          "",
+          "Geplante Laeufe:",
+          f"- Morgen-Durchgang {MORGEN_ZEIT or 'aus'}: Mails beider Konten + Kalender,",
+          "  legt Aufgaben an. Danach automatisch dieser Doku-Lauf.",
+          f"- Gedaechtnis-Konsolidierung: taeglich {NIGHTLY_HOUR:02d}:00",
+          "- SEO-Tagesrecherche: Uhrzeit aus SEO_DAILY_TIME"]
+    return "\n".join(z)
+
+
+STATUS_AUFTRAG = """Schreibe die Datei STATUS.md — ein Uebergabedokument fuer eine NEUE
+Claude-Session, die dieses Projekt weiterbauen soll, ohne dass Rui alles neu erklaeren muss.
+
+Schreibe NUR den fertigen Markdown-Inhalt, kein Vorwort, keine Rueckfrage.
+Deutsch, sachlich, dicht. Erfinde NICHTS: was unten unter VERBINDLICHE FAKTEN steht,\ngilt woertlich. Was du nicht sicher weisst, laesst du weg statt es zu vermuten.\nVerdichte die Commits zu Themen statt sie aufzulisten —
+zwanzig kleine Commits an einer Datei sind EIN Punkt, nicht zwanzig.
+
+Gliederung:
+# STATUS
+## Was das System ist
+(2-3 Saetze: Multi-Bot-System auf Hetzner, JARVIS als Orchestrator, welche Bots es gibt)
+## Infrastruktur
+(Server, Pfade, Container, Deploy-Muster — kurz)
+## Aktueller Stand je Komponente
+(pro Datei: was sie macht, was zuletzt daran geaendert wurde)
+## Zuletzt gebaut
+(die Themen aus den Commits unten, verdichtet)
+## Offene Punkte
+## Arbeitsweise mit Rui
+(komplette Ersetzungsdateien statt Patches, CMD statt PowerShell, deutsche Antworten,
+kurz und direkt, Schritt fuer Schritt mit wc -l nach jedem Deploy)
+## Kritische Regeln
+(.env wird NIE angefasst; bei docker-compose.yml fertige Bloecke zum manuellen Einfuegen
+statt Skripte; ausgeliefertes JavaScript vor Auslieferung pruefen)
+
+── VERBINDLICHE FAKTEN ──
+{FAKTEN}
+
+── ZEILENZAHLEN ──
+{DATEIEN}
+
+── SYSTEMLAGE ──
+{LAGE}
+
+── COMMITS (neueste zuerst) ──
+{COMMITS}
+"""
+
+
+def _doku_status(neue):
+    """STATUS.md — vom Modell verdichtet, ein einzelner Aufruf ohne Tool-Schleife."""
+    commits = "\n".join(f"{c['datum']} {c['sha']} {c['msg']}" for c in neue[:120]) or "(keine neuen)"
+    auftrag = (STATUS_AUFTRAG
+               .replace("{FAKTEN}", _doku_fakten())
+               .replace("{DATEIEN}", "\n".join(_doku_dateistand()))
+               .replace("{LAGE}", "\n".join(_doku_systemlage()))
+               .replace("{COMMITS}", commits))
+    try:
+        resp = client.messages.create(
+            model=MODEL, max_tokens=3000,
+            messages=[{"role": "user", "content": auftrag}])
+        try:
+            track_cost(MODEL, resp.usage.input_tokens, resp.usage.output_tokens,
+                       getattr(resp.usage, "cache_read_input_tokens", 0) or 0,
+                       getattr(resp.usage, "cache_creation_input_tokens", 0) or 0)
+        except Exception:
+            pass
+        text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+        stempel = datetime.now().strftime("%d.%m.%Y %H:%M")
+        return f"<!-- automatisch erzeugt am {stempel} — nicht von Hand bearbeiten -->\n\n" + text
+    except Exception as e:
+        return f"# STATUS\n\n(Konnte nicht erzeugt werden: {type(e).__name__}: {e})\n"
+
+
+def doku_lauf(grund="planmaessig"):
+    """Prueft den Commit-Stand und pflegt die drei Doku-Dateien."""
+    print(f"  [doku] Lauf startet ({grund})", flush=True)
+    stand = _doku_stand()
+    neue, err = _doku_commits(stand)
+    if err:
+        print(f"  [doku] {err}", flush=True)
+        return f"Doku uebersprungen: {err}"
+    if not neue and stand:
+        print("  [doku] keine neuen Commits", flush=True)
+        # Cheatsheet trotzdem auffrischen (Zeilenzahlen aendern sich)
+        _doku_schreiben("CHEATSHEET.md", _doku_cheatsheet())
+        return "Keine neuen Commits — nur das Cheatsheet aufgefrischt."
+
+    meldungen = [_doku_schreiben("CHANGELOG.md", _doku_changelog(neue)),
+                 _doku_schreiben("STATUS.md", _doku_status(neue)),
+                 _doku_schreiben("CHEATSHEET.md", _doku_cheatsheet())]
+    _doku_stand_merken(neue[0]["sha"])
+    ergebnis = f"{len(neue)} neue Commits verarbeitet. " + " | ".join(meldungen)
+    print(f"  [doku] fertig: {ergebnis[:200]}", flush=True)
+    return ergebnis
+
+
+def tool_doku(inp):
+    """Tool-Einstieg fuer JARVIS."""
+    return doku_lauf("auf Zuruf")
+
+
+# Waehrend des Morgen-Durchgangs duerfen keine anderen Bots beauftragt werden.
+# Das kostet nur Geld und gehoert nicht zum Zweck (Mails/Kalender -> Aufgaben).
+MORGEN_LAEUFT = {"ja": False}
+MORGEN_GESPERRT = ("ask_ceo", "ask_immo", "ask_seo", "ask_marketing")
+
+
 def run_tool(name: str, inp: dict) -> str:
+    if MORGEN_LAEUFT["ja"] and name in MORGEN_GESPERRT:
+        print(f"  [morgen] {name} blockiert (keine Delegation im Durchgang)", flush=True)
+        return ("Im Morgen-Durchgang nicht erlaubt. Beauftrage keine anderen Bots — "
+                "lies die Mails selbst und lege Aufgaben an.")
+    _prot = protokoll_tool_ausfuehren(name, inp)
+    if _prot is not None:
+        return _prot
     if name == "remember":
         return tool_remember(inp)
     if name == "recall":
@@ -1656,6 +2193,10 @@ def run_tool(name: str, inp: dict) -> str:
         return tool_aufgabe_anlegen(inp)
     if name == "aufgaben_liste":
         return tool_aufgaben_liste(inp)
+    if name == "doku":
+        return tool_doku(inp)
+    if name == "lage":
+        return tool_lage(inp)
     if name == "aufgabe_erledigt":
         return tool_aufgabe_erledigt(inp)
     if name == "vault_liste":
@@ -1901,6 +2442,150 @@ def nightly_thread(r):
         time.sleep(60)
 
 
+# ── MORGEN-LAUF: MAILS + KALENDER DURCHGEHEN ─────────────────
+MORGEN_AUFTRAG = """Morgendlicher Durchgang. Arbeite still ab, ohne Zusammenfassung.
+
+Unten stehen die ungelesenen Mails ALLER eingerichteten Konten, bereits abgerufen.
+
+1. Lies mit read_mail alles, was nach Vorgang aussieht — und zwar aus JEDEM Konto,
+   das unten auftaucht. Gib beim Aufruf immer account UND uid an.
+   Newsletter, Werbung, Portal-Benachrichtigungen und automatische Bestaetigungen
+   NICHT oeffnen.
+2. Rufe check_calendar fuer die naechsten 7 Tage ab.
+   Beauftrage KEINE anderen Bots (kein ask_ceo, ask_immo, ask_seo). Das ist gesperrt.
+3. Lege mit aufgabe_anlegen an, was neu dazugekommen ist:
+   - Dinge, die Rui erledigen muss: Fristen, Rueckfragen, offene Rechnungen,
+     Termine die vereinbart werden muessen, Unterlagen die jemand braucht.
+     quelle: "mail" bzw. "kalender", faellig setzen wenn ein Datum genannt ist.
+   - Wichtige Informationen OHNE Handlungsbedarf trotzdem anlegen, damit sie
+     nicht untergehen (Bescheide, Zusagen, Absagen, Terminverschiebungen,
+     Statusaenderungen). Bei diesen quelle auf "info" setzen und den Titel mit
+     "Info: " beginnen.
+4. Doppelte Eintraege vermeidet aufgabe_anlegen selbst — ruf es einfach auf.
+
+Wenn nichts Neues da ist, leg nichts an. Antworte am Ende nur mit einer Zeile:
+wie viele Aufgaben und wie viele Infos du angelegt hast, je Konto.
+
+── POSTEINGAENGE ──
+{POSTEINGAENGE}"""
+
+
+def _morgen_posteingaenge():
+    """Fragt jedes eingerichtete Konto selbst ab.
+
+    Frueher stand nur im Auftragstext, dass beide Konten geprueft werden sollen —
+    darauf ist kein Verlass. Jetzt holt der Code die Uebersicht selbst, damit
+    kein Konto uebersprungen werden kann.
+    """
+    teile, geprueft = [], []
+    for konto, cfg in MAIL_ACCOUNTS.items():
+        if not (cfg.get("user") and cfg.get("pass")):
+            print(f"  [morgen] Konto '{konto}' nicht eingerichtet — uebersprungen", flush=True)
+            continue
+        try:
+            res = tool_check_mail({"account": konto, "limit": 15, "unread_only": True})
+        except Exception as e:
+            res = f"Fehler beim Abruf: {type(e).__name__}: {e}"
+        geprueft.append(konto)
+        teile.append(f"[KONTO: {konto}]\n{res}")
+        print(f"  [morgen] {konto}: {str(res).splitlines()[0][:80]}", flush=True)
+    if not teile:
+        return "", []
+    return "\n\n".join(teile), geprueft
+
+
+def _morgen_letzter():
+    """Nur das Datum — dient dem Tageslauf-Vergleich."""
+    return _morgen_letzter_voll().split(" ", 1)[0]
+
+
+def _morgen_letzter_voll():
+    """Ganze Zeile: 'YYYY-MM-DD HH:MM (Anlass)'.
+
+    Frueher stand hier nur das Datum. Dann behauptete JARVIS auf Nachfrage,
+    der Lauf sei planmaessig um 07:00 gewesen, obwohl er von Hand ausgeloest
+    wurde — die Uhrzeit war schlicht nicht gespeichert und wurde ergaenzt.
+    """
+    try:
+        with open(MORGEN_MARK, encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return ""
+
+
+def _morgen_vermerken(tag, grund="unbekannt"):
+    try:
+        os.makedirs(os.path.dirname(MORGEN_MARK), exist_ok=True)
+        with open(MORGEN_MARK, "w", encoding="utf-8") as f:
+            f.write(f"{tag} {datetime.now().strftime('%H:%M')} ({grund})")
+    except Exception as e:
+        print(f"  [morgen] Marker nicht schreibbar: {e}", flush=True)
+
+
+def morgenlauf(grund="planmaessig"):
+    """Geht Mails und Kalender durch und legt Aufgaben an. Kein Briefing."""
+    print(f"  [morgen] Durchgang startet ({grund})", flush=True)
+    posteingaenge, geprueft = _morgen_posteingaenge()
+    if not geprueft:
+        hinweis = "Kein Mailkonto eingerichtet — Durchgang uebersprungen."
+        print(f"  [morgen] {hinweis}", flush=True)
+        _morgen_vermerken(datetime.now().strftime("%Y-%m-%d"), grund)
+        return hinweis
+    auftrag = MORGEN_AUFTRAG.replace("{POSTEINGAENGE}", posteingaenge)
+    MORGEN_LAEUFT["ja"] = True
+    try:
+        ergebnis = think([], auftrag)        # eigene Historie, faellt danach weg
+    finally:
+        MORGEN_LAEUFT["ja"] = False
+    print(f"  [morgen] fertig ({', '.join(geprueft)}): {str(ergebnis)[:160]}", flush=True)
+    _morgen_vermerken(datetime.now().strftime("%Y-%m-%d"), grund)
+    try:
+        doku_lauf("nach Morgen-Durchgang")   # Doku direkt im Anschluss auffrischen
+    except Exception as e:
+        print(f"  [doku] uebersprungen: {type(e).__name__}: {e}", flush=True)
+    return ergebnis
+
+
+def morgen_thread():
+    """Stoesst den Durchgang taeglich an. Holt nach, wenn der Container spaeter hochkommt."""
+    if not MORGEN_ZEIT:
+        print("  [morgen] deaktiviert (JARVIS_MORGEN_ZEIT leer)", flush=True)
+        return
+    try:
+        hh, mm = [int(x) for x in MORGEN_ZEIT.split(":")[:2]]
+    except Exception:
+        print(f"  [morgen] Zeitangabe ungueltig: {MORGEN_ZEIT}", flush=True)
+        return
+    print(f"  [morgen] Durchgang {MORGEN_ZEIT} aktiv "
+          f"(zuletzt: {_morgen_letzter_voll() or 'noch nie'})", flush=True)
+    versuche = {"tag": "", "n": 0}
+    time.sleep(45)          # erst alles hochfahren lassen
+    while True:
+        try:
+            now = datetime.now()
+            heute = now.strftime("%Y-%m-%d")
+            faellig_ab = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if now >= faellig_ab and _morgen_letzter() != heute:
+                if versuche.get("tag") != heute:
+                    versuche.update({"tag": heute, "n": 0})
+                if versuche["n"] < 3:
+                    versuche["n"] += 1
+                    grund = ("planmaessig" if now.hour == hh
+                             else f"nachgeholt, geplant war {MORGEN_ZEIT}")
+                    try:
+                        morgenlauf(grund)
+                    except Exception as e:
+                        print(f"  [morgen] fehlgeschlagen ({versuche['n']}/3): "
+                              f"{type(e).__name__}: {e}", flush=True)
+                        if versuche["n"] >= 3:
+                            _morgen_vermerken(heute, "3x fehlgeschlagen")
+                        else:
+                            time.sleep(300)
+        except Exception as e:
+            print(f"  [morgen] {e}", flush=True)
+        time.sleep(60)
+
+
 # ── GEDAECHTNIS-VERWALTUNG (Redis Kurzzeitgedaechtnis) ───────
 def load_history(r):
     try:
@@ -1922,6 +2607,9 @@ client = Anthropic(api_key=CLAUDE_KEY)
 
 # Prompt-Caching: System-Prompt + Tools werden serverseitig gecacht (90% billiger ab 2. Aufruf)
 import copy as _copy
+SYSTEM += (f"\n- Dein Morgen-Durchgang ist eingestellt auf {MORGEN_ZEIT} Uhr.\n"
+           if MORGEN_ZEIT else "\n- Dein Morgen-Durchgang ist derzeit abgeschaltet.\n")
+
 SYS_CACHED = [{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}]
 TOOLS_CACHED = _copy.deepcopy(TOOLS)
 if TOOLS_CACHED:
@@ -2139,6 +2827,8 @@ def main():
     print(f"  Extraktion: {EXTRACT_MODEL}", flush=True)
     print(f"  Embeddings: {EMBED_MODEL if oai else 'DEAKTIVIERT (kein Key)'}", flush=True)
     print(f"  Nightly   : taeglich {NIGHTLY_HOUR:02d}:00", flush=True)
+    print(f"  Morgen    : {MORGEN_ZEIT or 'aus'} (Mails + Kalender -> Aufgaben)", flush=True)
+    print(f"  Doku      : {_doku_ziel()} (nach dem Morgen-Durchgang)", flush=True)
     _kal = f"Google ({len(GOOGLE_ICS)} Kalender)" if GOOGLE_ICS else ("iCloud" if (ICLOUD_USER and ICLOUD_PASS) else "nicht konfiguriert")
     print(f"  Kalender  : {_kal}", flush=True)
     print(f"  GitHub    : {'aktiv (' + GITHUB_USER + ')' if GITHUB_TOKEN else 'nicht konfiguriert'}", flush=True)
@@ -2172,6 +2862,7 @@ def main():
         sys.exit(1)
 
     threading.Thread(target=nightly_thread, args=(r,), daemon=True).start()
+    threading.Thread(target=morgen_thread, daemon=True).start()
     print("  JARVIS laeuft. Warte auf Anfragen ueber den Bus.\n", flush=True)
 
     while True:
@@ -2197,6 +2888,14 @@ def main():
             if low in ("reset", "vergiss alles", "speicher leeren"):
                 r.delete(HISTORY_KEY)
                 _antwort_senden(r, reply_q, "Kurzzeitgedaechtnis geleert. (Langzeitgedaechtnis bleibt.)")
+                continue
+
+            if low in ("changelog", "doku", "status"):
+                _antwort_senden(r, reply_q, doku_lauf("manuell"))
+                continue
+
+            if low in ("morgenlauf", "morgen", "mails durchgehen"):
+                _antwort_senden(r, reply_q, morgenlauf("manuell"))
                 continue
 
             if low in ("konsolidiere", "konsolidieren", "nightly"):

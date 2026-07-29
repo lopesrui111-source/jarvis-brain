@@ -81,6 +81,23 @@ def pg():
                             password=PG_PASS, dbname=PG_DB, connect_timeout=5)
 
 
+def _spalten_ergaenzen():
+    """Legt fehlende Spalten additiv an. Aendert nichts Bestehendes.
+
+    immo_seen hatte keine Spalte "erledigt" — ohne die laesst sich ein
+    Immo-Treffer im Wochen-Panel nicht abhaken.
+    """
+    try:
+        conn = pg()
+        with conn, conn.cursor() as cur:
+            cur.execute("ALTER TABLE immo_seen "
+                        "ADD COLUMN IF NOT EXISTS erledigt boolean DEFAULT FALSE")
+        conn.close()
+        print("  [db] Spalten geprueft", flush=True)
+    except Exception as e:
+        print(f"  [db] Spalten-Pruefung fehlgeschlagen: {e}", flush=True)
+
+
 def rds(socket_timeout=15):
     return redis.Redis(host=REDIS_HOST, port=REDIS_PORT, decode_responses=True,
                        socket_connect_timeout=5, socket_timeout=socket_timeout,
@@ -405,6 +422,28 @@ def umami(tage: int = 7):
     return JSONResponse(out)
 
 
+@app.post("/api/erledigt")
+def api_erledigt(daten: dict = Body(...)):
+    """Hakt eine Aufgabe oder einen SEO-Entwurf ab (Klick im Wochen-Panel)."""
+    typ = str((daten or {}).get("typ") or "").strip()
+    try:
+        eid = int((daten or {}).get("id") or 0)
+    except Exception:
+        eid = 0
+    tabellen = {"aufgabe": "aufgaben", "qa": "qa_seen", "immo": "immo_seen"}
+    if typ not in tabellen or not eid:
+        return JSONResponse({"ok": False, "fehler": "unbekannter Typ oder id"}, status_code=400)
+    try:
+        conn = pg()
+        with conn, conn.cursor() as cur:
+            cur.execute(f"UPDATE {tabellen[typ]} SET erledigt = TRUE WHERE id = %s", (eid,))
+            n = cur.rowcount
+        conn.close()
+        return JSONResponse({"ok": bool(n)})
+    except Exception as e:
+        return JSONResponse({"ok": False, "fehler": str(e)[:120]}, status_code=500)
+
+
 @app.get("/api/woche")
 def woche():
     """Diese Woche: Termine, Aufgaben aus Mails, laufende Arbeiten — nach Art gruppiert."""
@@ -510,16 +549,19 @@ def woche():
                     return []
 
             aufgaben = []
-            for r in sicher("SELECT titel, details, quelle, faellig FROM aufgaben "
+            for r in sicher("SELECT titel, details, quelle, faellig, id FROM aufgaben "
                             "WHERE NOT erledigt ORDER BY faellig NULLS LAST, id DESC LIMIT 8"):
                 d = []
                 if r[3]:
                     d.append("bis " + r[3].strftime("%d.%m."))
                 if r[2]:
                     d.append(r[2])
+                q = (r[2] or "").strip().lower()
                 aufgaben.append({"text": (r[0] or "")[:70],
                                  "detail": " · ".join(d) or (r[1] or "")[:50],
-                                 "heute": bool(r[3] and r[3] <= datetime.now().date())})
+                                 "heute": bool(r[3] and r[3] <= datetime.now().date()),
+                                 "id": r[4], "typ": "aufgabe",
+                                 "quelle": "INFO" if q == "info" else (q.upper() or "MAIL")})
             gruppe("AUFGABEN", "aufgabe", aufgaben)
 
             laufend = []
@@ -531,15 +573,19 @@ def woche():
             gruppe("LÄUFT GERADE", "job", laufend)
 
             offen = []
-            for r in sicher("SELECT titel, to_char(created_at,'DD.MM.') FROM qa_seen "
+            for r in sicher("SELECT titel, to_char(created_at,'DD.MM.'), id FROM qa_seen "
                             "WHERE entwurf_datei <> '' AND NOT erledigt ORDER BY id DESC LIMIT 4"):
                 offen.append({"text": (r[0] or "Entwurf")[:70],
-                              "detail": f"Entwurf vom {r[1]} — zu posten", "heute": False})
-            for r in sicher("SELECT DISTINCT ON (titel) titel, rendite FROM immo_seen "
-                            "WHERE qualifiziert AND created_at > now() - interval '3 days' "
+                              "detail": f"Entwurf vom {r[1]} — zu posten", "heute": False,
+                              "id": r[2], "typ": "qa", "quelle": "SEO"})
+            # immo_seen hatte urspruenglich keine Spalte "erledigt" — siehe _spalten_ergaenzen()
+            for r in sicher("SELECT DISTINCT ON (titel) titel, rendite, id FROM immo_seen "
+                            "WHERE qualifiziert AND NOT COALESCE(erledigt, FALSE) "
+                            "AND created_at > now() - interval '3 days' "
                             "ORDER BY titel, created_at DESC LIMIT 3"):
                 offen.append({"text": (r[0] or "Objekt")[:70],
-                              "detail": f"{float(r[1] or 0):.1f} % Rendite — prüfen", "heute": False})
+                              "detail": f"{float(r[1] or 0):.1f} % Rendite — prüfen",
+                              "heute": False, "id": r[2], "typ": "immo", "quelle": "IMMO"})
             gruppe("ZU ERLEDIGEN", "offen", offen)
         conn.close()
     except Exception as e:
@@ -957,8 +1003,9 @@ HTML = """<!DOCTYPE html>
   .wgruppe:last-child { margin-bottom: 0; }
   .wtitel { font-size: 8.5px; letter-spacing: .22em; color: var(--cyan); opacity: .85;
             margin-bottom: 5px; display: flex; align-items: center; gap: 6px;
-            position: sticky; top: 0; background: rgba(12, 26, 38, .96);
-            padding: 3px 0; z-index: 1; }
+            position: sticky; top: 0; background: #0c1a26;
+            padding: 4px 0 5px; z-index: 3;
+            box-shadow: 0 4px 6px -4px rgba(0, 0, 0, .8); }
   .wtitel b { color: var(--dim); font-weight: 400; margin-left: auto; letter-spacing: 0; }
   .wsym { opacity: .9; }
   .hitem { display: flex; gap: 8px; align-items: flex-start; padding: 5px 0 5px 4px;
@@ -967,6 +1014,19 @@ HTML = """<!DOCTYPE html>
   .hitem { border-left: 2px solid rgba(89, 215, 255, .12); }
   .hitem.dringend { border-left-color: var(--green); }
   .hitem .txt { flex: 1; min-width: 0; }
+  .hquelle { display: inline-block; font-size: 8.5px; letter-spacing: .12em;
+             font-weight: 600; padding: 1px 5px; border-radius: 3px; margin-right: 6px;
+             border: 1px solid rgba(89, 215, 255, .3); color: var(--cyan);
+             opacity: .85; vertical-align: 1px; }
+  .hquelle.seo   { border-color: rgba(93, 202, 165, .45); color: var(--green); }
+  .hquelle.immo  { border-color: rgba(255, 176, 89, .45); color: #ffb059; }
+  .hquelle.info  { border-color: rgba(150, 170, 190, .4);  color: #96aabe; }
+  .whak { flex: 0 0 auto; cursor: pointer; user-select: none; font-size: 12px;
+          line-height: 16px; width: 16px; height: 16px; text-align: center;
+          border: 1px solid rgba(89, 215, 255, .35); border-radius: 3px;
+          color: rgba(89, 215, 255, .45); margin-top: 1px; transition: all .15s; }
+  .whak:hover { color: var(--green); border-color: var(--green);
+                box-shadow: 0 0 6px rgba(93, 202, 165, .5); }
   .hitem .txt b { display: block; color: var(--txt); font-weight: 400; overflow: hidden;
                   text-overflow: ellipsis; white-space: nowrap; }
   .hitem .txt span { color: var(--dim); font-size: 9px; }
@@ -1187,6 +1247,159 @@ HTML = """<!DOCTYPE html>
     box-shadow: 0 0 10px rgba(89, 215, 255, .45); }
   ::-webkit-scrollbar-thumb:active { background: rgba(89, 215, 255, .95); }
   ::-webkit-scrollbar-corner { background: transparent; }
+  /* ══════════ MOBIL (nur schmale Bildschirme — Desktop bleibt unveraendert) ══════════ */
+  @media (max-width: 820px) {
+    header { flex-wrap: wrap; padding: 10px 14px 6px; gap: 6px; }
+    .brand { font-size: 15px; letter-spacing: .22em; }
+    .clock { font-size: 17px; }
+    .clock small { font-size: 8px; letter-spacing: .25em; }
+    .viewtabs { position: static; transform: none; order: 3; width: 100%;
+                justify-content: center; margin-top: 4px; padding: 3px; }
+    .vt { padding: 8px 11px; font-size: 8.5px; letter-spacing: .14em; }
+
+    /* CORE: alles untereinander, scrollbar — Header nimmt Platz ein statt zu ueberlappen */
+    body.view-0 .hud { pointer-events: auto; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+    body.view-0 header { position: relative; }
+    /* Freiraum, in dem der Plasma-Kern sichtbar bleibt */
+    body.view-0 .col-left { position: relative; top: 0; left: 0; width: auto;
+                            max-height: none; margin: 172px 12px 12px; }
+    body.view-0 .chat { position: relative; top: 0; right: 0; bottom: 0; width: auto;
+                        height: 62vh; margin: 0 12px 14px; }
+    #heuteListe { max-height: 46vh; }
+    ::-webkit-scrollbar { width: 9px; height: 9px; }
+    body.view-0 footer { position: relative; padding: 4px 16px 28px; font-size: 9px; }
+    body.view-0 .vtab { position: fixed; left: auto; right: 10px; bottom: 12px; top: auto;
+                        transform: none; writing-mode: horizontal-tb; border: 1px solid var(--glass-line);
+                        border-radius: 20px; padding: 8px 14px; font-size: 9.5px; letter-spacing: .18em;
+                        background: rgba(9, 22, 33, .82); backdrop-filter: blur(8px);
+                        box-shadow: 0 4px 16px rgba(0,0,0,.45); z-index: 7; opacity: .9; }
+
+    /* Panel-Titel linksbuendig, Pfeil rechts */
+    .panel h3 { justify-content: flex-start; gap: 9px; }
+    .panel h3 .chev, .panel h3 > span:last-child { margin-left: auto; }
+
+    /* Eingabefelder gross genug, damit iOS nicht hineinzoomt */
+    .chatbar input, .chatbar select, .vsearch { font-size: 16px; padding: 12px 10px; }
+    .chatbar select { width: 108px; }
+    .msg { font-size: 13px; max-width: 96%; }
+
+    /* Vault als Vollbild */
+    .vmodal { width: 96vw; height: 90vh; padding: 12px; }
+    .vmhead { flex-wrap: wrap; gap: 8px; }
+    .vmhead .vsearch { width: 100%; order: 3; }
+    .vbody { flex-direction: column; }
+    .vbody .vlistwrap { width: auto; max-height: 45%; }
+    .vgrid { grid-template-columns: repeat(2, 1fr); }
+    .vview { min-height: 180px; }
+
+    /* Agenten + Bueroflow */
+    .agentsView { padding: 74px 8px 24px; overflow-y: auto; overflow-x: hidden;
+                  scrollbar-width: thin; }
+    .agZoom { right: 10px; bottom: 62px; gap: 6px; }
+    .agZbtn { width: 34px; height: 34px; font-size: 15px; }
+    .agName { font-size: 12px; }
+    .bfView { padding: 74px 12px 28px; }
+    .bfHero { padding: 16px; gap: 12px; }
+    .bfHero .big { font-size: 27px; }
+    .bfGrid { grid-template-columns: repeat(2, 1fr); gap: 9px; }
+    .bfCard { padding: 11px 12px; }
+    .bfCard .v { font-size: 19px; }
+    .bfWide { grid-template-columns: 1fr; }
+    .bfBar .n { width: 84px; font-size: 10px; }
+
+    /* Gehirn-Detailpanel unten statt rechts */
+    .braindetail { right: 10px; left: 10px; width: auto; top: auto; bottom: 12px; max-height: 42vh; }
+    .brainlegend { left: 10px; bottom: 8px; font-size: 9px; gap: 7px; max-width: 92vw; }
+  }
+
+  @media (max-width: 400px) {
+    .brand { font-size: 13px; letter-spacing: .15em; }
+    .clock { font-size: 15px; }
+    .bfGrid { grid-template-columns: 1fr; }
+    .vgrid { grid-template-columns: repeat(2, 1fr); }
+  }
+
+  /* Bildlaufleisten im HUD-Stil */
+  * { scrollbar-width: thin; scrollbar-color: rgba(89, 215, 255, .28) transparent; }
+  ::-webkit-scrollbar { width: 7px; height: 7px; }
+  ::-webkit-scrollbar-track { background: rgba(89, 215, 255, .04); border-radius: 8px;
+                              margin: 3px 0; }
+  ::-webkit-scrollbar-thumb {
+    background: linear-gradient(180deg, rgba(89, 215, 255, .45), rgba(93, 202, 165, .32));
+    border-radius: 8px; border: 1px solid rgba(89, 215, 255, .16);
+    background-clip: padding-box; transition: background .25s; }
+  ::-webkit-scrollbar-thumb:hover {
+    background: linear-gradient(180deg, rgba(89, 215, 255, .8), rgba(93, 202, 165, .6));
+    box-shadow: 0 0 10px rgba(89, 215, 255, .45); }
+  ::-webkit-scrollbar-thumb:active { background: rgba(89, 215, 255, .95); }
+  ::-webkit-scrollbar-corner { background: transparent; }
+  /* ═══════════════════════════════════════════════════════════
+     TYPOGRAFIE — Lesbarkeit statt Sci-Fi-Optik
+     Vorher lief alles in Cascadia Code (Monospace) mit sehr weiter
+     Laufweite. Das war schwer lesbar und wirkte generisch.
+     Jetzt: IBM Plex Sans fuer Text (klare Umlaute, humanistisch),
+     IBM Plex Mono nur noch dort, wo Ziffern buendig stehen muessen.
+     Dieser Block steht bewusst am Ende und ueberschreibt das Obige —
+     zum Zurueckdrehen einfach loeschen.
+     ═══════════════════════════════════════════════════════════ */
+  :root {
+    /* Nur Systemschriften — keine externe Ladung, die den Parser blockiert */
+    --f-sans: 'Segoe UI Variable Text', 'Segoe UI', -apple-system, 'Helvetica Neue',
+              system-ui, sans-serif;
+    --f-mono: 'Cascadia Mono', 'Consolas', 'SF Mono', ui-monospace, monospace;
+  }
+  body, .panel, .bmBody, .msg, input, textarea, button, select {
+    font-family: var(--f-sans);
+    letter-spacing: normal;
+    -webkit-font-smoothing: antialiased;
+  }
+  body { font-size: 13px; line-height: 1.55; }
+
+  /* Ziffern buendig: nur Zahlen, Uhrzeiten, Kosten */
+  .clock, .kv .v, .bfCard .v, .bfHero .big, .bfBar .val, .bfRing .pct,
+  .agRow .cost, .bmZahl b, .jobbar + .jobstep, .aktzeit, .bfDays {
+    font-family: var(--f-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* Grosse Laufweite nur noch als dezenter Akzent auf Labels */
+  .brand { letter-spacing: .28em; font-weight: 600; font-family: var(--f-mono); }
+  .vt { letter-spacing: .08em; font-size: 11px; font-weight: 500; }
+  .clock small { letter-spacing: .16em; font-size: 10.5px; font-family: var(--f-sans); }
+  .panel h3, .bfSection, .bmTitel, .wtitel, .agLayer, .bfCard .k,
+  .bfHero .lbl, .bfPanel .t, .bfRing .cap, .bmZahl .k, .verlaufmark,
+  .msg.bot b, .typing {
+    letter-spacing: .1em;
+    font-weight: 600;
+    text-transform: uppercase;
+  }
+
+  /* Winzige Labels waren mit 8-9,5px kaum lesbar */
+  .panel h3 { font-size: 11px; }
+  .wtitel { font-size: 10px; }
+  .bmTitel { font-size: 10px; }
+  .agLayer { font-size: 9.5px; }
+  .bfCard .k { font-size: 10px; }
+  .bfHero .lbl { font-size: 10.5px; }
+  .bfSection { font-size: 10.5px; }
+  .bfPanel .t { font-size: 11px; }
+  .bfRing .cap { font-size: 10px; }
+  .bmZahl .k { font-size: 9.5px; }
+  .verlaufmark { font-size: 9.5px; }
+  .kv { font-size: 12.5px; }
+  .bmBody { font-size: 12.5px; line-height: 1.7; }
+  .bfBar { font-size: 11.5px; }
+  .bfHero .sub, .bfCard .s { font-size: 10.5px; }
+  .bfFunnel .head { font-size: 11.5px; }
+  .bfFunnel .head span { font-size: 10.5px; }
+  .agName { letter-spacing: .02em; font-size: 14px; }
+  .bmName { letter-spacing: .04em; font-size: 15px; }
+  .agRow .l { letter-spacing: normal; }
+
+  /* Fliesstext im Chat und in Listen laufruhig halten */
+  .msg, .hitem, .bmZeile { letter-spacing: normal; }
+  .msg { font-size: 12.5px; line-height: 1.65; }
+  .msg.bot b { font-size: 9.5px; }
 </style>
 </head>
 <body class="view-0">
@@ -2470,12 +2683,42 @@ async function loadHeute() {
         '<span class="wsym">' + (GRUPPEN_SYM[gr.art] || '\u00b7') + '</span>' +
         esc(gr.name) + ' <b>' + gr.posten.length + '</b></div>' +
         gr.posten.map(function(p) {
-          return '<div class="hitem' + (p.heute ? ' dringend' : '') + '">' +
+          var hak = p.id ? '<span class="whak" title="erledigt" data-typ="' +
+                           p.typ + '" data-id="' + p.id + '">✓</span>' : '';
+          var qk = p.quelle ? '<span class="hquelle ' +
+                              String(p.quelle).toLowerCase() + '">' + esc(p.quelle) +
+                              '</span>' : '';
+          return '<div class="hitem' + (p.heute ? ' dringend' : '') + '">' + hak +
             '<span class="txt"><b>' + esc(p.text) + '</b>' +
-            (p.detail ? '<span>' + esc(p.detail) + '</span>' : '') + '</span></div>';
+            '<span>' + qk + esc(p.detail || '') + '</span></span></div>';
         }).join('') + '</div>';
     }).join('');
   } catch (e) {}
+}
+
+/* Klick auf das Haekchen — Werte kommen aus data-Attributen,
+   damit keine Anfuehrungszeichen ineinander verschachtelt werden. */
+document.addEventListener('click', function(ev) {
+  var el = ev.target;
+  if (!el || !el.classList || !el.classList.contains('whak')) return;
+  erledigt(el, el.getAttribute('data-typ'), parseInt(el.getAttribute('data-id'), 10));
+});
+
+async function erledigt(el, typ, id) {
+  el.textContent = '·';
+  try {
+    var r = await fetch('/api/erledigt', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({typ: typ, id: id})
+    });
+    var d = await r.json();
+    if (d.ok) {
+      var zeile = el.parentNode;
+      zeile.style.transition = 'opacity .35s';
+      zeile.style.opacity = '0';
+      setTimeout(loadHeute, 400);
+    } else { el.textContent = '✗'; }
+  } catch (e) { el.textContent = '✗'; }
 }
 
 setInterval(loadHeute, 30000); loadHeute();
@@ -2875,4 +3118,5 @@ document.addEventListener('click', async function(ev) {
 
 
 if __name__ == "__main__":
+    _spalten_ergaenzen()
     uvicorn.run(app, host="0.0.0.0", port=8090, log_level="warning")

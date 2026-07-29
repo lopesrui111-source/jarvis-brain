@@ -52,7 +52,21 @@ VAULT_DIR  = "/app/vault"
 SKILLS_DIR = "/app/skills"
 
 MUAPI_BASE = "https://api.muapi.ai/api/v1"
-DEFAULT_IMAGE_MODEL = os.getenv("MUAPI_IMAGE_MODEL", "flux-dev-image")
+DEFAULT_IMAGE_MODEL = os.getenv("MUAPI_IMAGE_MODEL", "gpt-image-2-text-to-image")
+
+# Modellwahl nach Zweck — Qualitaet dort, wo sie sichtbar wird
+BILD_MODELLE = {
+    "motiv":       ("gpt-image-2-text-to-image", 0.090,
+                    "Hauptmotiv eines Creatives — beste Prompt-Treue, klare Komposition"),
+    "premium":     ("nano-banana-pro", 0.120,
+                    "wenn es richtig gut werden muss (Kampagnen-Visual, Titelbild)"),
+    "hintergrund": ("flux-2-pro", 0.032,
+                    "Hintergruende und Verlaeufe hinter Text — hohe Qualitaet, guenstiger"),
+    "textur":      ("flux-2-klein-9b", 0.013,
+                    "dezente Texturen, die ohnehin gedaempft werden"),
+    "entwurf":     ("flux-2-klein-9b-turbo", 0.006,
+                    "schnelle Vorschau, um eine Bildidee zu pruefen"),
+}
 
 INBOX_KEY   = "bot:marketing:inbox"
 HISTORY_KEY = "bot:marketing:history"
@@ -111,7 +125,17 @@ def tool_generate_image(inp):
     prompt = (inp.get("prompt") or "").strip()
     if not prompt:
         return "Fehler: leerer Prompt."
-    model = (inp.get("model") or DEFAULT_IMAGE_MODEL).strip()
+    zweck = (inp.get("zweck") or "").strip().lower()
+    # Reihenfolge: ausdrueckliches model > zweck > Standard "motiv".
+    # Frueher fiel der Bot ohne zweck auf DEFAULT_IMAGE_MODEL zurueck und
+    # erzeugte Hauptmotive versehentlich mit dem Hintergrund-Modell.
+    if inp.get("model"):
+        model = str(inp["model"]).strip()
+    elif zweck in BILD_MODELLE:
+        model = BILD_MODELLE[zweck][0]
+    else:
+        model = BILD_MODELLE["motiv"][0]
+    print(f"  [bild] zweck={zweck or '(keiner -> motiv)'} modell={model}", flush=True)
     payload = {"prompt": prompt}
     for k in ("num_images", "aspect_ratio", "image_url"):
         if inp.get(k):
@@ -125,26 +149,66 @@ def tool_generate_image(inp):
         req_id = data.get("request_id") or data.get("id")
         if not req_id:
             return f"Keine request_id erhalten: {str(data)[:300]}"
-        # Pollen bis fertig (max 3 Minuten)
+        # Pollen bis fertig (max 3 Minuten).
+        # Kurz nach dem Start liefert der Endpunkt teils 404 — das ist normal, weiter warten.
+        poll_url = f"{MUAPI_BASE}/predictions/{req_id}/result"
         deadline = time.time() + 180
         result = None
+        letzter_fehler = ""
         while time.time() < deadline:
-            rr = requests.get(f"{MUAPI_BASE}/predictions/{req_id}/result", headers=headers, timeout=30)
+            time.sleep(3)
+            try:
+                rr = requests.get(poll_url, headers=headers, timeout=30)
+            except Exception as e:
+                letzter_fehler = f"Netzwerk: {type(e).__name__}"
+                continue
+            if rr.status_code in (404, 202, 425):
+                letzter_fehler = f"{rr.status_code} (Job noch nicht bereit)"
+                continue          # Ergebnis-Endpunkt existiert noch nicht -> weiter warten
             if rr.status_code >= 400:
-                return f"MuAPI-Poll-Fehler ({rr.status_code}): {rr.text[:300]}"
-            result = rr.json()
+                # MuAPI liefert waehrend der Generierung teils 400 mit dem
+                # Status im JSON ("processing"/"queued"). Das ist KEIN Abbruch.
+                warte = False
+                try:
+                    d = rr.json()
+                    det = d.get("detail") if isinstance(d.get("detail"), dict) else d
+                    st = str((det or {}).get("status", "")).lower()
+                    if st in ("processing", "starting", "queued", "pending",
+                              "in_progress", "running", "not_ready"):
+                        warte = True
+                        letzter_fehler = f"{rr.status_code} ({st})"
+                except Exception:
+                    pass
+                if warte:
+                    continue
+                return f"MuAPI-Poll-Fehler ({rr.status_code}): {rr.text[:600]}"
+            try:
+                result = rr.json()
+            except Exception:
+                continue
             status = result.get("status", "")
             if status == "completed":
                 break
             if status == "failed":
-                return f"Generierung fehlgeschlagen: {result.get('error', 'unbekannt')}"
-            time.sleep(4)
+                return f"Generierung fehlgeschlagen: {result.get('error') or result.get('detail') or 'unbekannt'}"
+            # sonst 'processing' -> weiter
         else:
-            return "Timeout: Generierung nicht fertig nach 3 Minuten."
+            return f"Timeout nach 3 Minuten (zuletzt: {letzter_fehler or 'processing'})."
 
-        outputs = result.get("outputs") or []
+        roh = (result.get("outputs") or result.get("output")
+               or result.get("images") or result.get("urls") or [])
+        if isinstance(roh, str):
+            roh = [roh]
+        outputs = []
+        for o in roh:
+            if isinstance(o, str):
+                outputs.append(o)
+            elif isinstance(o, dict):
+                u = o.get("url") or o.get("image_url") or o.get("uri")
+                if u:
+                    outputs.append(u)
         if not outputs:
-            return f"Fertig, aber keine Outputs: {str(result)[:300]}"
+            return f"Fertig, aber keine Bild-URL gefunden: {str(result)[:250]}"
 
         # In den Vault herunterladen
         saved = []
@@ -387,6 +451,13 @@ def tool_render_creative(inp):
         _ablehnung()
         return (f"ABGELEHNT: '{layout}' war schon das letzte Creative. Nimm ein anderes Layout, "
                 f"z.B. {', '.join(andere[:4])}. Creatives duerfen sich nicht wiederholen.")
+    if BILD_VERLANGT["ja"] and "{{ASSET:" not in html and not _notbremse():
+        _ablehnung()
+        return ("ABGELEHNT: Rui hat ausdruecklich ein GENERIERTES Motiv verlangt — eine "
+                "CSS-Textur ersetzt das nicht. Ablauf: 1) generate_image mit zweck='motiv' "
+                "und einem textfreien Prompt in der Bueroflow-Farbwelt  2) die gemeldete "
+                "Datei per {{ASSET:dateiname.png}} einbetten  3) render_creative mit einem "
+                "foto_*-Layout. Der Dateiname steht in der Antwort von generate_image.")
     if layout in BILD_LAYOUTS and not _hat_bildmaterial(html) and not _notbremse():
         _ablehnung()
         return (f"ABGELEHNT: Layout '{layout}' braucht visuelles Material. Zwei Wege:\n"
@@ -580,8 +651,9 @@ TOOLS = [
     {"name": "generate_image",
      "description": "Generiert KI-Bilder ueber MuAPI — NUR fuer fotografische/illustrative Motive OHNE Text (Hintergruende, Stimmungsbilder). NIEMALS fuer Creatives mit Text/Logo/Zahlen — dafuer render_creative nutzen (KI-Modelle verhunzen deutschen Text). Prompt auf Englisch.",
      "input_schema": {"type": "object", "properties": {
+         "zweck": {"type": "string", "enum": ["motiv","premium","hintergrund","textur","entwurf"], "description": "waehlt automatisch das passende Modell: motiv (Hauptmotiv), premium (Kampagne), hintergrund (hinter Text), textur (gedaempft), entwurf (schnelle Vorschau)"},
          "prompt": {"type": "string", "description": "Bildbeschreibung auf Englisch"},
-         "model": {"type": "string", "description": f"Optional, Standard: {DEFAULT_IMAGE_MODEL}"},
+         "model": {"type": "string", "description": f"nur wenn du ein bestimmtes Modell brauchst; sonst zweck nutzen. Standard: {DEFAULT_IMAGE_MODEL}"},
          "num_images": {"type": "integer", "description": "Optional, 1-4"},
          "aspect_ratio": {"type": "string", "description": "Optional, z.B. 1:1, 16:9, 9:16"}},
          "required": ["prompt"]}},
@@ -603,7 +675,9 @@ TOOLS = [
          "entwurf": {"type": "string", "description": "der komplette Entwurf zur Bewertung"}},
          "required": ["entwurf"]}},
     {"name": "vault_note",
-     "description": "Legt Content-Plaene/Entwuerfe als Markdown im Vault ab.",
+     "description": ("Legt eigenstaendige Dokumente als Markdown im Vault ab: Kampagnenplaene, "
+                     "Strategien, Analysen, Themensammlungen. NICHT fuer Post-Texte zu einem "
+                     "Creative — die werden automatisch nach vault/posts/ gesichert."),
      "input_schema": {"type": "object", "properties": {
          "folder": {"type": "string"}, "title": {"type": "string"}, "content": {"type": "string"}},
          "required": ["title", "content"]}},
@@ -616,6 +690,9 @@ REVIEW_AKTIV = os.getenv("MARKETING_REVIEW", "1") == "1"
 REVIEW_TIMEOUT = int(os.getenv("MARKETING_REVIEW_TIMEOUT", "180"))
 # Merker: kam der Auftrag vom CEO? Dann kein Rueckfrage-Review (Deadlock!)
 VOM_CEO = {"ja": False}
+BILD_VERLANGT = {"ja": False}
+_BILD_MUSTER = re.compile(r"(generiert|generier|ki.?bild|echtes?\s+(bild|motiv|foto)"
+                          r"|bild.?layout|mit\s+(bild|motiv|foto)|muapi|nano.?banana|gpt.?image)", re.I)
 REVIEW_STAND = {"geholt": False}
 
 
@@ -699,6 +776,56 @@ def _post_ablegen(text, creative="", layout=""):
         return ""
 
 
+# ── TATSACHEN-PROTOKOLL ──────────────────────────────────────
+# Der Bot hat frueher am Ende einer Anfrage geraten, was er getan hat:
+# mal erfundene Pfade, mal eine falsche "ich habe gar nichts gemacht"-Beichte.
+# Hier wird pro Anfrage mitgeschrieben, was WIRKLICH lief.
+TOOL_LOG = []          # [(toolname, ergebnis-kurz), ...]
+ECHTE_DATEIEN = []     # nachweislich geschriebene Vault-Pfade
+
+_PFAD_RE = re.compile(r"vault/[A-Za-z0-9_\-./]+\.(?:png|jpg|jpeg|md|txt|html|svg)")
+_LEUGNUNG_RE = re.compile(
+    r"(kann das nicht liefern|habe (?:in dieser session |)(?:so getan|nicht tats)|"
+    r"erfunden(?:e|en)? (?:pfade|dateinamen)|es gibt (?:keinen echten|keine echten)|"
+    r"nichts gespeichert|war(?:en|) (?:alles |)erfunden)", re.I)
+
+
+def _protokoll_merken(name, ergebnis):
+    txt = str(ergebnis)
+    TOOL_LOG.append((name, txt[:120]))
+    for p in _PFAD_RE.findall(txt):
+        if p not in ECHTE_DATEIEN:
+            ECHTE_DATEIEN.append(p)
+
+
+def _tatsachen_block():
+    """Faktenblock aus dem Protokoll — vom Code erzeugt, nicht vom Modell."""
+    if not ECHTE_DATEIEN:
+        return ""
+    zeilen = ["", "— Tatsaechlich erzeugt:"]
+    for p in ECHTE_DATEIEN:
+        zeilen.append(f"  {p}")
+    return "\n".join(zeilen)
+
+
+def _antwort_bereinigen(text):
+    """Entfernt erfundene Pfade und korrigiert falsche Selbst-Beichten."""
+    if not text:
+        return text
+    # 1) Pfade, die in keinem Tool-Ergebnis vorkamen -> markieren
+    erfunden = [p for p in set(_PFAD_RE.findall(text)) if p not in ECHTE_DATEIEN]
+    for p in erfunden:
+        text = text.replace(p, "(Pfad nicht belegt)")
+        print(f"  [pruefung] erfundener Pfad entfernt: {p}", flush=True)
+    # 2) Falsche Leugnung, obwohl Dateien entstanden sind
+    if ECHTE_DATEIEN and _LEUGNUNG_RE.search(text):
+        print("  [pruefung] falsche Selbst-Beichte erkannt — korrigiert", flush=True)
+        namen = ", ".join(n for n, _ in TOOL_LOG) or "-"
+        text = ("(Hinweis vom System: die folgende Selbsteinschaetzung war falsch — "
+                f"es liefen tatsaechlich diese Tools: {namen})\n\n" + text)
+    return text
+
+
 def run_tool(name, inp):
     if name in ("skill_laden", "load_skill"):
         SKILL_GELADEN["ja"] = True
@@ -759,25 +886,33 @@ ARBEITSWEISE:
    Dazu recall fuer Schreibstil, Brand und frueher Erstelltes (nichts wiederholen!).
 2. Entwurf/Plan erstellen nach Skill-Anleitung, angepasst auf Bueroflow und deutschen Markt.
 3. BRAND IST PFLICHT, NICHT OPTIONAL:
-   - Jedes Creative enthaelt {{LOGO_SVG}} — das ECHTE Logo als Inline-SVG. Ein getippter
+   - Jedes Creative enthaelt {{{{LOGO_SVG}}}} — das ECHTE Logo als Inline-SVG. Ein getippter
      Schriftzug oder "buroflow.de" als Text ist KEIN Logo und wird abgelehnt.
      Platzierung: dezent, oben links oder unten, 8-12 % der Bildbreite. Nicht dominant.
    - Dazu die Brandfarben.
      Verfuegbar als CSS-Variablen: var(--gruen) #5DCAA5, var(--anthrazit) #1A1D24,
      var(--weiss), var(--grau). Das Grundgeruest wird automatisch eingefuegt.
    - Creatives ohne Brand-Element werden technisch abgelehnt — dann baust du neu.
-   - Bildmaterial aus dem Brand-Ordner per {{ASSET:dateiname}}.
+   - Bildmaterial aus dem Brand-Ordner per {{{{ASSET:dateiname}}}}.
 
 4. BILDMATERIAL — so entstehen die staerksten Creatives:
    - generate_image erzeugt textfreie Motive (MuAPI). NIE Text ins Bild, den setzt render_creative.
+   - Modellwahl ueber den Parameter zweck — nicht ueber model:
+     zweck="motiv" fuers Hauptmotiv (0,09 $, beste Qualitaet)
+     zweck="hintergrund" fuer Flaechen hinter Text (0,03 $)
+     zweck="textur" fuer gedaempfte Muster (0,013 $)
+     zweck="premium" nur fuer wirklich wichtige Visuals (0,12 $)
+     Nimm nicht immer das teuerste — hinter Text reicht 'hintergrund' vollkommen.
    - Gute Prompts: abstrakt, ruhig, zur Marke passend. Z.B. "abstract dark teal gradient mesh,
      soft depth of field, minimal, editorial", "flowing paper texture in charcoal and mint,
      macro, soft light", "geometric shapes floating, dark background, subtle green accent".
    - Vermeide: Menschen mit Gesichtern, Buerostockfotos, Text, Logos, ueberladene Szenen.
    - Ablage: Rohbilder in vault/bilder/, fertige Creatives in vault/assets/,
      die Post-Texte werden automatisch in vault/posts/ gesichert (musst du nicht selbst tun).
-     Einbetten mit {{ASSET:dateiname.png}} — der Ordner wird automatisch gefunden. Layouts dafuer:
+     Einbetten mit {{{{ASSET:dateiname.png}}}} — der Ordner wird automatisch gefunden. Layouts dafuer:
      foto_vollflaeche, foto_split, foto_freisteller, textur.
+   - Sagt Rui "generiertes Motiv", "KI-Bild" oder "Bild-Layout": IMMER generate_image
+     aufrufen und per {{{{ASSET:datei}}}} einbetten — CSS-Effekte gelten dann NICHT.
    - PFLICHT-RHYTHMUS: Nach zwei reinen Typo-Creatives ist das naechste MIT BILD.
      Das wird technisch geprueft — du bekommst sonst eine Ablehnung. Plane es also ein:
      erst generate_image, dann render_creative mit einem foto_*- oder textur-Layout.
@@ -805,9 +940,13 @@ AKTUELLES JAHR: {AKTUELLES_JAHR} — nutze nie eine aeltere Jahreszahl in Creati
    im Feed wird es klein dargestellt und faellt durch. Frag im Zweifel nicht, nimm 1200x1200.
 
 8. CREATIVES (Social-Grafiken, Ads, Banner): IMMER render_creative (HTML/CSS) — Text pixelgenau, Umlaute korrekt, Brand exakt. NIEMALS generate_image fuer Text-Creatives (KI-Modelle verhunzen deutschen Text, falsche Logos). generate_image nur fuer textfreie Illustrationen/Hintergruende.
-   ECHTES BRAND-KIT: Nutze IMMER {{LOGO_SVG}} fuer das Logo (nimmt automatisch die weisse Variante — richtig fuer dunkle Creatives; nie selbst nachbauen!). Andere Varianten gezielt per {{ASSET:dateiname}} (z.B. <img src="{{ASSET:logo_dark_transparent.png}}"> auf hellem Grund). Verfuegbare Brand-Dateien: {brand_files}
+   ECHTES BRAND-KIT: Nutze IMMER {{{{LOGO_SVG}}}} fuer das Logo (nimmt automatisch die weisse Variante — richtig fuer dunkle Creatives; nie selbst nachbauen!). Andere Varianten gezielt per {{{{ASSET:dateiname}}}} (z.B. <img src="{{{{ASSET:logo_dark_transparent.png}}}}"> auf hellem Grund). Verfuegbare Brand-Dateien: {brand_files}
    Brand-Bauplan fuer Creatives: body margin:0 exakt auf Format; Hintergrund radial-gradient(circle at 50% 30%, #24303a 0%, #1A1D24 60%); Schrift 'Segoe UI',system-ui; Headline GROSS fett weiss (90-130px), Subline #5DCAA5 mit letter-spacing; Fliesstext #c9cdd6; Logo-Wordmark "Büroflow" oben links (B in #5DCAA5); optional CTA-Pill (Rand #5DCAA5, transparent); dezente Glow-Punkte via box-shadow. Radikal minimalistisch, viel Negativraum, KEINE Stockfoto-Optik.
-4. Laengere Ergebnisse zusaetzlich als vault_note ablegen (folder: projects).
+4. POST-TEXTE NICHT SELBST ABLEGEN: Der Begleittext zu einem Creative wird automatisch
+   nach vault/posts/ gesichert — gleicher Dateiname wie das Creative, ohne dein Zutun.
+   Rufe dafuer KEIN vault_note auf, sonst liegt derselbe Text doppelt im Vault.
+   vault_note (folder: projects) nutzt du nur fuer eigenstaendige Sachen:
+   Kampagnenplaene, Strategien, Analysen, Themensammlungen.
 5. Wichtige Learnings/Entscheidungen via remember speichern (project: buroflow).
 
 EISERNE REGELN:
@@ -879,10 +1018,13 @@ def _ist_leere_ankuendigung(text):
 def think(history, user_text):
     SKILL_GELADEN["ja"] = False
     VOM_CEO["ja"] = "[REVIEW]" in user_text or "[von-ceo]" in user_text.lower()
+    BILD_VERLANGT["ja"] = bool(_BILD_MUSTER.search(user_text))
     REVIEW_STAND["geholt"] = False
     CREATIVE_INFO["datei"] = ""
     CREATIVE_INFO["layout"] = ""
     ABLEHNUNGEN["n"] = 0
+    TOOL_LOG.clear()
+    ECHTE_DATEIEN.clear()
     history.append({"role": "user", "content": user_text})
     messages = list(history)
     final_text = ""
@@ -916,6 +1058,7 @@ def think(history, user_text):
                 a_content.append({"type": "tool_use", "id": block.id,
                                   "name": block.name, "input": block.input})
                 result = run_tool(block.name, block.input or {})
+                _protokoll_merken(block.name, result)
                 print(f"  [tool] {block.name} -> {str(result)[:90]}", flush=True)
                 t_results.append({"type": "tool_result", "tool_use_id": block.id,
                                   "content": result})
@@ -945,6 +1088,9 @@ def think(history, user_text):
     if not final_text:
         final_text = ("Ich konnte den Auftrag nicht abschliessen — bitte in kleineren Schritten "
                       "anfragen (z.B. erst Ordnerstruktur, dann einzelne Dateien).")
+    # Selbstauskunft gegen das Tatsachen-Protokoll pruefen
+    final_text = _antwort_bereinigen(final_text)
+    final_text += _tatsachen_block()
     # Begleittext automatisch sichern (kostet nichts, passiert immer)
     if CREATIVE_INFO["datei"] or len(final_text) > 400:
         ablage = _post_ablegen(final_text, CREATIVE_INFO["datei"], CREATIVE_INFO["layout"])
