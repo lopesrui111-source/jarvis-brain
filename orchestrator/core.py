@@ -17,7 +17,7 @@ import json
 import time
 import uuid
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import redis
 import requests
@@ -179,6 +179,36 @@ SYSTEM += """
 """
 
 SYSTEM += """
+- BILDER: Rui kann dir Screenshots schicken (Dashboard oder Telegram). Du siehst
+  sie direkt und kannst sie auswerten — Fehlermeldungen vorlesen, Zahlen aus einer
+  Tabelle ziehen, ein Exposé einordnen. Beschreibe nur, was tatsaechlich zu sehen
+  ist; rate nichts hinzu. Kannst du etwas nicht entziffern, sag das.
+- MAILORDNER: Du kommst an ALLE Ordner beider Konten, nicht nur den Posteingang.
+  Ordnernamen zuerst mit mail_ordner abfragen, dann check_mail oder read_mail mit
+  dem Parameter "ordner" aufrufen. Rate keine Namen — bei Gmail heissen sie z.B.
+  "[Gmail]/Alle Nachrichten", bei IONOS "Gesendete Objekte". Lesen ist immer
+  read-only, du markierst nie etwas als gelesen.
+- MAILVERSAND: Du kannst Mails schreiben, aber nicht eigenmaechtig abschicken.
+  Ablauf: mail_entwurf anlegen, Rui den ENTWURF IM WORTLAUT zeigen, auf seine
+  Freigabe warten, erst dann mail_senden.
+  * NUR anlegen, wenn Rui in SEINER AKTUELLEN Nachricht darum bittet, jemandem
+    zu schreiben. Eine Frage ist kein Auftrag. Fragt er "welche Mailordner gibt
+    es?", beantwortest du genau das — du legst keinen Entwurf an, auch wenn ihr
+    vorher ueber eine Mail gesprochen habt. Ein vorheriges Thema ist kein
+    laufender Auftrag.
+  * Kennst du die Empfaengeradresse nicht, FRAGST du danach. Setze niemals eine
+    Platzhalter-Adresse ein und schon gar nicht Ruis eigene.
+  * Nach mail_entwurf gibst du den kompletten Rueckgabetext an Rui weiter:
+    Empfaenger, Betreff und den GANZEN Mailtext. Schreibe NIEMALS nur
+    "Entwurf liegt bereit" — Rui kann sonst nicht beurteilen, was er freigibt.
+  * Fragt Rui nach einem Entwurf ("wo ist der Entwurf", "zeig mir das nochmal"),
+    rufst du mail_zeigen auf. Du legst dann KEINEN neuen Entwurf an.
+  * Ruf mail_senden NIEMALS von dir aus auf — auch nicht, wenn der Entwurf
+    offensichtlich richtig ist. Eine verschickte Mail ist unwiderruflich.
+  * Formuliere in Ruis Stil: knapp, direkt, ohne Floskeln, kein "ich hoffe, es
+    geht dir gut". Sein Schreibstil steht im Gedaechtnis — hol ihn dir mit recall,
+    wenn du unsicher bist.
+  * Geschaeftliches ueber das Konto ionos, Privates ueber gmail.
 - DOKUMENTATION: Du pflegst CHANGELOG.md (Commits granular), STATUS.md (Uebergabe fuer
   eine neue Claude-Session, verdichtet) und CHEATSHEET.md (Kurzreferenz fuer Rui).
   Das laeuft taeglich nach dem Morgen-Durchgang automatisch. Rui kann es mit "changelog"
@@ -274,6 +304,8 @@ TOOLS = [
                 "account": {"type": "string", "description": "ionos oder gmail"},
                 "limit": {"type": "integer", "description": "Wieviele Mails (Standard 10, max 25)"},
                 "unread_only": {"type": "boolean", "description": "Nur ungelesene (Standard: true)"},
+                "tage": {"type": "integer", "description": "Nur Mails der letzten N Tage statt ungelesener. Bei gmail IMMER nutzen — dort liegen zehntausende ungelesene Altmails, der Ungelesen-Filter ist dort wertlos."},
+                "ordner": {"type": "string", "description": "IMAP-Ordner, Standard INBOX. Namen vorher mit mail_ordner abfragen, sie unterscheiden sich je Anbieter."},
             },
             "required": ["account"],
         },
@@ -286,6 +318,7 @@ TOOLS = [
             "properties": {
                 "account": {"type": "string", "description": "ionos oder gmail"},
                 "uid": {"type": "string", "description": "Mail-UID aus check_mail"},
+                "ordner": {"type": "string", "description": "IMAP-Ordner, Standard INBOX"},
             },
             "required": ["account", "uid"],
         },
@@ -338,6 +371,52 @@ TOOLS = [
         "name": "aufgaben_liste",
         "description": "Zeigt die offenen Aufgaben.",
         "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "mail_ordner",
+        "description": ("Listet alle IMAP-Ordner. Ohne account beide Konten. Nutze das, "
+                        "bevor du mit check_mail oder read_mail einen anderen Ordner als "
+                        "INBOX oeffnest — die Ordnernamen unterscheiden sich je Anbieter."),
+        "input_schema": {"type": "object", "properties": {
+            "account": {"type": "string", "description": "ionos oder gmail, leer = beide"}}},
+    },
+    {
+        "name": "mail_entwurf",
+        "description": ("Legt eine Mail als Entwurf an. Verschickt NICHTS — Rui muss "
+                        "erst freigeben. Nutze das, wenn Rui dich bittet, jemandem zu "
+                        "schreiben."),
+        "input_schema": {"type": "object", "properties": {
+            "account": {"type": "string", "description": "ionos (Bueroflow) oder gmail (privat)"},
+            "an": {"type": "string"}, "betreff": {"type": "string"},
+            "text": {"type": "string"},
+            "an_mich_bestaetigt": {"type": "boolean", "description": "Nur setzen, wenn Rui die Mail ausdruecklich an sich selbst geschickt haben will."}},
+            "required": ["an", "betreff", "text"]},
+    },
+    {
+        "name": "mail_senden",
+        "description": ("Verschickt einen Entwurf. NUR aufrufen, wenn Rui ausdruecklich "
+                        "freigegeben hat ('mail senden 3', 'ja, schick ab'). Niemals von "
+                        "dir aus."),
+        "input_schema": {"type": "object", "properties": {"id": {"type": "integer"}},
+                         "required": ["id"]},
+    },
+    {
+        "name": "mail_zeigen",
+        "description": ("Zeigt einen bereits angelegten Entwurf im Wortlaut. Ohne id den "
+                        "neuesten offenen. IMMER hiermit nachsehen, wenn Rui nach einem "
+                        "Entwurf fragt — niemals einen neuen anlegen."),
+        "input_schema": {"type": "object", "properties": {"id": {"type": "integer"}}},
+    },
+    {
+        "name": "mail_entwuerfe",
+        "description": "Listet offene Mailentwuerfe.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "mail_verwerfen",
+        "description": "Verwirft einen Entwurf.",
+        "input_schema": {"type": "object", "properties": {"id": {"type": "integer"}},
+                         "required": ["id"]},
     },
     {
         "name": "doku",
@@ -569,15 +648,63 @@ def _extract_body(msg) -> str:
     return (body or "").strip()
 
 
+
+
+def tool_mail_ordner(inp):
+    """Listet alle IMAP-Ordner eines Kontos.
+
+    Ohne diese Liste muesste JARVIS Ordnernamen raten — und die heissen je nach
+    Anbieter voellig anders ("[Gmail]/Alle Nachrichten" gegen "Gesendete Objekte").
+    """
+    konto = (inp.get("account") or "").strip().lower()
+    konten = [konto] if konto in MAIL_ACCOUNTS else list(MAIL_ACCOUNTS)
+    ausgabe = []
+    for k in konten:
+        acc = MAIL_ACCOUNTS[k]
+        if not (acc.get("user") and acc.get("pass")):
+            continue
+        try:
+            M = imaplib.IMAP4_SSL(acc["host"], 993)
+            M.login(acc["user"], acc["pass"])
+            ok, boxes = M.list()
+            namen = []
+            if ok == "OK":
+                for raw in boxes or []:
+                    zeile = raw.decode(errors="replace") if isinstance(raw, bytes) else str(raw)
+                    # Format: (\HasNoChildren) "/" "Ordnername"
+                    if '"' in zeile:
+                        name = zeile.rsplit('"', 2)[-2]
+                    else:
+                        name = zeile.split()[-1]
+                    if name and name not in namen:
+                        namen.append(name)
+            try:
+                M.logout()
+            except Exception:
+                pass
+            ausgabe.append(f"{acc['label']} ({k}): " + ", ".join(namen[:40]))
+        except Exception as e:
+            ausgabe.append(f"{acc['label']} ({k}): Fehler — {e}")
+    return "\n\n".join(ausgabe) or "Keine Konten eingerichtet."
+
+
 def tool_check_mail(inp: dict) -> str:
     account = (inp.get("account") or "").strip().lower()
     limit = min(int(inp.get("limit") or 10), 25)
     unread_only = inp.get("unread_only", True)
-    M, err = _imap_connect(account)
+    tage = inp.get("tage")          # optional: nur Mails der letzten N Tage
+    ordner = (inp.get("ordner") or "INBOX").strip() or "INBOX"
+    M, err = _imap_connect(account, mailbox=ordner)
     if err:
         return err
     try:
-        crit = "UNSEEN" if unread_only else "ALL"
+        # Bei Postfaechern mit riesigem Archiv (Gmail: ~38.000 ungelesen) ist
+        # "ungelesen" als Filter wertlos — dann lieber nach Datum suchen.
+        if tage:
+            seit = (datetime.now() - timedelta(days=int(tage))).strftime("%d-%b-%Y")
+            crit = f'(SINCE "{seit}")'
+        else:
+            crit = "UNSEEN" if unread_only else "ALL"
         ok, data = M.uid("search", None, crit)
         if ok != "OK":
             return "Suche fehlgeschlagen."
@@ -585,8 +712,11 @@ def tool_check_mail(inp: dict) -> str:
         total = len(uids)
         uids = uids[-limit:][::-1]  # neueste zuerst
         if not uids:
-            return f"Keine {'ungelesenen ' if unread_only else ''}Mails im Posteingang ({MAIL_ACCOUNTS[account]['label']})."
-        lines = [f"{MAIL_ACCOUNTS[account]['label']} — {total} {'ungelesen' if unread_only else 'gesamt'}, zeige {len(uids)}:"]
+            wie = f"aus {tage} Tagen" if tage else ("ungelesene " if unread_only else "")
+            return f"Keine {wie}Mails im Posteingang ({MAIL_ACCOUNTS[account]['label']})."
+        art = f"aus {tage} Tagen" if tage else ("ungelesen" if unread_only else "gesamt")
+        wo = "" if ordner.upper() == "INBOX" else f" [{ordner}]"
+        lines = [f"{MAIL_ACCOUNTS[account]['label']}{wo} — {total} {art}, zeige {len(uids)}:"]
         for uid in uids:
             ok, msg_data = M.uid("fetch", uid, "(BODY.PEEK[HEADER.FIELDS (FROM SUBJECT DATE)])")
             if ok != "OK" or not msg_data or msg_data[0] is None:
@@ -611,7 +741,8 @@ def tool_read_mail(inp: dict) -> str:
     uid = (inp.get("uid") or "").strip()
     if not uid:
         return "Fehler: uid fehlt."
-    M, err = _imap_connect(account)
+    ordner = (inp.get("ordner") or "INBOX").strip() or "INBOX"
+    M, err = _imap_connect(account, mailbox=ordner)
     if err:
         return err
     try:
@@ -1713,6 +1844,201 @@ def tool_ask_ceo(inp: dict) -> str:
 
 TOOLS = TOOLS + PROTOKOLL_TOOLS
 
+# ── MAILVERSAND (mit Freigabe durch Rui) ─────────────────────
+# Bewusst zweistufig: JARVIS legt den Entwurf ab, Rui gibt frei, dann geht er raus.
+# Grund: Eine Mail ist unwiderruflich. Ein Modell, das sich gelegentlich Dinge
+# zusammenreimt, darf nicht ungeprueft in Ruis Namen an Dritte schreiben.
+SMTP_HOSTS = {
+    "ionos": os.getenv("SMTP_IONOS_HOST", "smtp.ionos.de"),
+    "gmail": os.getenv("SMTP_GMAIL_HOST", "smtp.gmail.com"),
+}
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+# Anzeigename im Absender — ohne den steht beim Empfaenger nur die Adresse.
+# Je Konto ueberschreibbar, sonst greift MAIL_ABSENDER_NAME.
+ABSENDER_NAME = os.getenv("MAIL_ABSENDER_NAME", "Rui Lopes")
+ABSENDER_NAMEN = {
+    "ionos": os.getenv("MAIL_IONOS_NAME", "") or ABSENDER_NAME,
+    "gmail": os.getenv("MAIL_GMAIL_NAME", "") or ABSENDER_NAME,
+}
+MAIL_FREIGABE = os.getenv("MAIL_FREIGABE", "1") != "0"   # 0 = ohne Rueckfrage senden
+
+
+def _entwurf_tabelle():
+    conn = pg_conn()
+    with conn, conn.cursor() as cur:
+        cur.execute("""CREATE TABLE IF NOT EXISTS mail_entwuerfe (
+            id serial PRIMARY KEY, konto text, empfaenger text, betreff text,
+            text text, status text DEFAULT 'offen', created_at timestamptz DEFAULT now())""")
+    conn.close()
+
+
+def tool_mail_entwurf(inp):
+    """Legt einen Mailentwurf an. Verschickt noch nichts."""
+    konto = (inp.get("account") or "ionos").strip().lower()
+    an = (inp.get("an") or "").strip()
+    betreff = (inp.get("betreff") or "").strip()
+    text = (inp.get("text") or "").strip()
+    if konto not in MAIL_ACCOUNTS:
+        return f"Unbekanntes Konto '{konto}'. Moeglich: {', '.join(MAIL_ACCOUNTS)}."
+    if not an or "@" not in an:
+        return "Fehler: gueltige Empfaengeradresse noetig."
+    # Eigene Adresse als Empfaenger deutet fast immer auf einen Platzhalter hin.
+    eigene = {str(c.get("user", "")).lower() for c in MAIL_ACCOUNTS.values() if c.get("user")}
+    if an.lower() in eigene and not inp.get("an_mich_bestaetigt"):
+        return ("ABGELEHNT: Du wolltest an Ruis eigene Adresse schreiben — das ist "
+                "fast immer ein Platzhalter, weil dir die echte Adresse fehlt. "
+                "Frag Rui nach der Empfaengeradresse, statt einen Entwurf anzulegen. "
+                "Soll die Mail wirklich an ihn selbst gehen, setze an_mich_bestaetigt=true.")
+    if not betreff or not text:
+        return "Fehler: Betreff und Text noetig."
+    try:
+        _entwurf_tabelle()
+        conn = pg_conn()
+        with conn, conn.cursor() as cur:
+            cur.execute("INSERT INTO mail_entwuerfe (konto, empfaenger, betreff, text) "
+                        "VALUES (%s,%s,%s,%s) RETURNING id", (konto, an, betreff, text))
+            eid = cur.fetchone()[0]
+        conn.close()
+    except Exception as e:
+        return f"Fehler beim Speichern: {e}"
+
+    if not MAIL_FREIGABE:
+        return tool_mail_senden({"id": eid})
+    return _entwurf_darstellen(eid, konto, an, betreff, text, neu=True)
+
+
+def _entwurf_darstellen(eid, konto, an, betreff, text, neu=False):
+    """Vollstaendige Darstellung. Wird woertlich an Rui durchgereicht —
+    er soll sehen, was er freigibt, nicht nur dass es etwas gibt."""
+    kopf = f"Entwurf #{eid} angelegt — NOCH NICHT VERSCHICKT." if neu else f"Entwurf #{eid}:"
+    return ("!!! GIB DIESEN ENTWURF WOERTLICH UND VOLLSTAENDIG AN RUI WEITER. "
+            "Fasse ihn NICHT zusammen. Er muss den ganzen Text lesen koennen, "
+            "bevor er freigibt. !!!\n\n"
+            f"{kopf}\n"
+            f"Von: {ABSENDER_NAMEN.get(konto, ABSENDER_NAME)} "
+            f"<{MAIL_ACCOUNTS.get(konto, {}).get('user', '?')}>\n"
+            f"An: {an}\nBetreff: {betreff}\n"
+            f"{'-' * 40}\n{text}\n{'-' * 40}\n\n"
+            f"Freigabe: \"mail senden {eid}\" · Verwerfen: \"mail verwerfen {eid}\"")
+
+
+def tool_mail_zeigen(inp):
+    """Zeigt einen vorhandenen Entwurf. Legt KEINEN neuen an."""
+    try:
+        eid = int(inp.get("id") or 0)
+    except Exception:
+        eid = 0
+    try:
+        _entwurf_tabelle()
+        conn = pg_conn()
+        with conn, conn.cursor() as cur:
+            if eid:
+                cur.execute("SELECT id, konto, empfaenger, betreff, text, status "
+                            "FROM mail_entwuerfe WHERE id = %s", (eid,))
+            else:
+                cur.execute("SELECT id, konto, empfaenger, betreff, text, status "
+                            "FROM mail_entwuerfe WHERE status = 'offen' "
+                            "ORDER BY id DESC LIMIT 1")
+            row = cur.fetchone()
+        conn.close()
+    except Exception as e:
+        return f"Fehler: {e}"
+    if not row:
+        return "Kein Entwurf gefunden." if eid else "Es gibt keinen offenen Entwurf."
+    if row[5] != "offen":
+        return f"Entwurf #{row[0]} ist bereits {row[5]}."
+    return _entwurf_darstellen(row[0], row[1], row[2], row[3], row[4])
+
+
+def tool_mail_senden(inp):
+    """Verschickt einen freigegebenen Entwurf. Nur nach ausdruecklicher Freigabe."""
+    try:
+        eid = int(inp.get("id") or 0)
+    except Exception:
+        eid = 0
+    if not eid:
+        return "Fehler: Entwurfs-Nummer noetig."
+    try:
+        _entwurf_tabelle()
+        conn = pg_conn()
+        with conn, conn.cursor() as cur:
+            cur.execute("SELECT konto, empfaenger, betreff, text, status "
+                        "FROM mail_entwuerfe WHERE id = %s", (eid,))
+            row = cur.fetchone()
+        conn.close()
+    except Exception as e:
+        return f"Fehler beim Lesen: {e}"
+    if not row:
+        return f"Entwurf #{eid} nicht gefunden."
+    konto, an, betreff, text, status = row
+    if status == "gesendet":
+        return f"Entwurf #{eid} wurde bereits verschickt — nicht erneut gesendet."
+    if status == "verworfen":
+        return f"Entwurf #{eid} wurde verworfen."
+
+    cfg = MAIL_ACCOUNTS.get(konto, {})
+    if not (cfg.get("user") and cfg.get("pass")):
+        return f"Konto '{konto}' ist nicht eingerichtet."
+    try:
+        import smtplib
+        from email.message import EmailMessage
+        from email.utils import formataddr
+        msg = EmailMessage()
+        # formataddr sorgt fuer korrekte Kodierung bei Umlauten im Namen
+        msg["From"] = formataddr((ABSENDER_NAMEN.get(konto, ABSENDER_NAME), cfg["user"]))
+        msg["To"] = an
+        msg["Reply-To"] = cfg["user"]
+        msg["Subject"] = betreff
+        msg.set_content(text)
+        with smtplib.SMTP(SMTP_HOSTS.get(konto, ""), SMTP_PORT, timeout=30) as srv:
+            srv.starttls()
+            srv.login(cfg["user"], cfg["pass"])
+            srv.send_message(msg)
+    except Exception as e:
+        return f"Versand fehlgeschlagen: {type(e).__name__}: {e}"
+
+    try:
+        conn = pg_conn()
+        with conn, conn.cursor() as cur:
+            cur.execute("UPDATE mail_entwuerfe SET status = 'gesendet' WHERE id = %s", (eid,))
+        conn.close()
+    except Exception:
+        pass
+    print(f"  [mail] #{eid} an {an} verschickt", flush=True)
+    return f"Mail #{eid} an {an} verschickt."
+
+
+def tool_mail_entwuerfe(inp):
+    """Listet offene Entwuerfe."""
+    try:
+        _entwurf_tabelle()
+        conn = pg_conn()
+        with conn, conn.cursor() as cur:
+            cur.execute("SELECT id, konto, empfaenger, betreff, to_char(created_at,'DD.MM. HH24:MI') "
+                        "FROM mail_entwuerfe WHERE status = 'offen' ORDER BY id DESC LIMIT 10")
+            rows = cur.fetchall()
+        conn.close()
+    except Exception as e:
+        return f"Fehler: {e}"
+    if not rows:
+        return "Keine offenen Entwuerfe."
+    return "\n".join(f"#{r[0]} [{r[1]}] {r[4]} an {r[2]}: {r[3][:60]}" for r in rows)
+
+
+def tool_mail_verwerfen(inp):
+    try:
+        eid = int(inp.get("id") or 0)
+        conn = pg_conn()
+        with conn, conn.cursor() as cur:
+            cur.execute("UPDATE mail_entwuerfe SET status = 'verworfen' "
+                        "WHERE id = %s AND status = 'offen'", (eid,))
+            n = cur.rowcount
+        conn.close()
+        return f"Entwurf #{eid} verworfen." if n else f"Entwurf #{eid} nicht offen."
+    except Exception as e:
+        return f"Fehler: {e}"
+
+
 # ── LAGEBILD: WAS LAEUFT IM GESAMTEN SYSTEM ──────────────────
 def tool_lage(inp):
     """Kompakter Gesamtueberblick: eigene Laeufe, andere Bots, offene Posten.
@@ -2033,6 +2359,10 @@ def _doku_fakten():
                 if zeile.startswith("services:"):
                     in_services = True
                     continue
+                # Bei jedem weiteren Schluessel ganz links endet der Dienste-Block.
+                # Ohne das landeten auch Netzwerke (jarvis-net) in der Liste.
+                if in_services and re.match(r"^[a-zA-Z]", zeile):
+                    break
                 if in_services and re.match(r"^  [a-zA-Z0-9_-]+:\s*$", zeile):
                     dienste.append(zeile.strip().rstrip(":"))
         if dienste:
@@ -2160,7 +2490,8 @@ def tool_doku(inp):
 # Waehrend des Morgen-Durchgangs duerfen keine anderen Bots beauftragt werden.
 # Das kostet nur Geld und gehoert nicht zum Zweck (Mails/Kalender -> Aufgaben).
 MORGEN_LAEUFT = {"ja": False}
-MORGEN_GESPERRT = ("ask_ceo", "ask_immo", "ask_seo", "ask_marketing")
+MORGEN_GESPERRT = ("ask_ceo", "ask_immo", "ask_seo", "ask_marketing",
+                   "mail_senden", "mail_entwurf")
 
 
 def run_tool(name: str, inp: dict) -> str:
@@ -2193,6 +2524,18 @@ def run_tool(name: str, inp: dict) -> str:
         return tool_aufgabe_anlegen(inp)
     if name == "aufgaben_liste":
         return tool_aufgaben_liste(inp)
+    if name == "mail_ordner":
+        return tool_mail_ordner(inp)
+    if name == "mail_entwurf":
+        return tool_mail_entwurf(inp)
+    if name == "mail_senden":
+        return tool_mail_senden(inp)
+    if name == "mail_zeigen":
+        return tool_mail_zeigen(inp)
+    if name == "mail_entwuerfe":
+        return tool_mail_entwuerfe(inp)
+    if name == "mail_verwerfen":
+        return tool_mail_verwerfen(inp)
     if name == "doku":
         return tool_doku(inp)
     if name == "lage":
@@ -2483,7 +2826,13 @@ def _morgen_posteingaenge():
             print(f"  [morgen] Konto '{konto}' nicht eingerichtet — uebersprungen", flush=True)
             continue
         try:
-            res = tool_check_mail({"account": konto, "limit": 15, "unread_only": True})
+            # Gmail hat ein riesiges Archiv ungelesener Altmails — dort nach Datum
+            # filtern, sonst greift der Bot 15 zufaellige Mails aus 38.000.
+            if konto == "gmail":
+                anfrage = {"account": konto, "limit": 20, "tage": 2}
+            else:
+                anfrage = {"account": konto, "limit": 15, "unread_only": True}
+            res = tool_check_mail(anfrage)
         except Exception as e:
             res = f"Fehler beim Abruf: {type(e).__name__}: {e}"
         geprueft.append(konto)
@@ -2658,8 +3007,14 @@ def _ist_leere_ankuendigung(text):
     return False
 
 
-def think(history, user_text):
-    """Agent-Loop wie im lokalen v5: Claude darf Tools nutzen, bis end_turn."""
+def think(history, user_text, bilder=None):
+    """Agent-Loop wie im lokalen v5: Claude darf Tools nutzen, bis end_turn.
+
+    bilder: Liste von {"media_type": "image/png", "data": "<base64>"} — z.B.
+    Screenshots aus dem Dashboard-Chat oder von Telegram. Sie werden nur der
+    aktuellen Anfrage beigelegt, nicht dauerhaft in der Historie gespeichert
+    (sonst waechst der Verlauf mit jedem Bild um mehrere hundert Kilobyte).
+    """
     # AUTO-RECALL: relevantes Langzeitwissen als Kontext mitgeben
     context = ""
     if oai is not None:
@@ -2667,10 +3022,21 @@ def think(history, user_text):
         if hits and not hits.startswith("Keine Treffer") and not hits.startswith("Fehler"):
             context = f"\n\n[AUTO-RECALL — relevantes Langzeitgedaechtnis:\n{hits}]"
 
-    history.append({"role": "user", "content": user_text})
+    merk_text = user_text + (f"\n[{len(bilder)} Bild(er) mitgeschickt]" if bilder else "")
+    history.append({"role": "user", "content": merk_text})
     messages = list(history)
-    if context:
-        messages[-1] = {"role": "user", "content": user_text + context}
+    letzter = user_text + context
+    if bilder:
+        inhalt = []
+        for b in bilder[:5]:
+            inhalt.append({"type": "image", "source": {
+                "type": "base64",
+                "media_type": b.get("media_type", "image/png"),
+                "data": b.get("data", "")}})
+        inhalt.append({"type": "text", "text": letzter})
+        messages[-1] = {"role": "user", "content": inhalt}
+    elif context:
+        messages[-1] = {"role": "user", "content": letzter}
 
     final_text = ""
     tool_benutzt = False
@@ -2829,6 +3195,8 @@ def main():
     print(f"  Nightly   : taeglich {NIGHTLY_HOUR:02d}:00", flush=True)
     print(f"  Morgen    : {MORGEN_ZEIT or 'aus'} (Mails + Kalender -> Aufgaben)", flush=True)
     print(f"  Doku      : {_doku_ziel()} (nach dem Morgen-Durchgang)", flush=True)
+    print(f"  Mailversand: {'mit Freigabe' if MAIL_FREIGABE else 'OHNE Rueckfrage'} "
+          f"| Absender: {ABSENDER_NAME}", flush=True)
     _kal = f"Google ({len(GOOGLE_ICS)} Kalender)" if GOOGLE_ICS else ("iCloud" if (ICLOUD_USER and ICLOUD_PASS) else "nicht konfiguriert")
     print(f"  Kalender  : {_kal}", flush=True)
     print(f"  GitHub    : {'aktiv (' + GITHUB_USER + ')' if GITHUB_TOKEN else 'nicht konfiguriert'}", flush=True)
@@ -2878,11 +3246,16 @@ def main():
 
             req_id = msg.get("id", str(uuid.uuid4()))
             text   = (msg.get("text") or "").strip()
+            bilder = msg.get("bilder") or msg.get("images") or []
             reply_q = REPLY_KEY.format(id=req_id)
 
-            if not text:
+            if not text and not bilder:
                 _antwort_senden(r, reply_q, "Leere Anfrage.")
                 continue
+            if bilder and not text:
+                text = "Schau dir das Bild an und sag mir, was du siehst."
+            if bilder:
+                print(f"  [bild] {len(bilder)} Bild(er) empfangen", flush=True)
 
             low = text.lower()
             if low in ("reset", "vergiss alles", "speicher leeren"):
@@ -2911,7 +3284,7 @@ def main():
             print(f"  Du: {text}", flush=True)
             history = load_history(r)
             try:
-                answer = think(history, text)
+                answer = think(history, text, bilder=bilder)
             except Exception as e:
                 answer = f"Fehler beim Denken: {type(e).__name__}: {e}"
                 print(f"  [think] {answer}", flush=True)

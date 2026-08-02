@@ -14,6 +14,7 @@ import json
 import time
 import uuid
 import html
+import base64
 
 import redis
 import requests
@@ -49,6 +50,9 @@ Gezielt an einen Bot (einmalig):
 
 Dauerhaft umstellen:
 /ziel ceo      (zurueck mit /ziel jarvis)
+
+Screenshots: Bild schicken, Text als Bildunterschrift dazu.
+Ohne Text beschreibt JARVIS einfach, was er sieht.
 
 Weitere Befehle:
 /status    Systemstatus und Kosten
@@ -103,6 +107,54 @@ def tippt(chat=None):
     tg("sendChatAction", chat_id=chat or CHAT_ID, action="typing")
 
 
+MAX_BILD_BYTES = 3_500_000     # Telegram liefert bis 20 MB — so viel braucht kein Screenshot
+
+
+def bild_holen(datei_id):
+    """Laedt ein Bild von Telegram und gibt es als Base64 zurueck."""
+    info = tg("getFile", file_id=datei_id) or {}
+    pfad = info.get("file_path")
+    if not pfad:
+        return None
+    try:
+        r = requests.get(f"https://api.telegram.org/file/bot{TOKEN}/{pfad}", timeout=60)
+        if r.status_code >= 400 or len(r.content) > MAX_BILD_BYTES:
+            print(f"  [bild] uebersprungen ({r.status_code}, {len(r.content)} Bytes)", flush=True)
+            return None
+        typ = "image/jpeg"
+        if pfad.lower().endswith(".png"):
+            typ = "image/png"
+        elif pfad.lower().endswith(".webp"):
+            typ = "image/webp"
+        return {"media_type": typ, "data": base64.b64encode(r.content).decode()}
+    except Exception as e:
+        print(f"  [bild] {type(e).__name__}: {e}", flush=True)
+        return None
+
+
+def bilder_aus_nachricht(msg):
+    """Holt Fotos und als Datei geschickte Bilder aus einer Telegram-Nachricht.
+
+    Telegram legt jedes Foto in mehreren Groessen ab. Wir nehmen die groesste
+    mit hoechstens 1600 Pixel Breite — darueber steigen nur die Kosten,
+    die Lesbarkeit nicht.
+    """
+    gefunden = []
+    fotos = msg.get("photo") or []
+    if fotos:
+        passend = [f for f in fotos if (f.get("width") or 0) <= 1600] or fotos
+        groesste = max(passend, key=lambda f: (f.get("width") or 0))
+        b = bild_holen(groesste.get("file_id"))
+        if b:
+            gefunden.append(b)
+    dok = msg.get("document") or {}
+    if str(dok.get("mime_type", "")).startswith("image/"):
+        b = bild_holen(dok.get("file_id"))
+        if b:
+            gefunden.append(b)
+    return gefunden
+
+
 def ziel_holen(r):
     try:
         z = r.get(ZIEL_KEY)
@@ -118,12 +170,15 @@ def ziel_setzen(r, ziel):
         pass
 
 
-def frage_bot(r, ziel, text):
+def frage_bot(r, ziel, text, bilder=None):
     """Auftrag auf den Bus legen und auf die Antwort warten (mit Tipp-Anzeige)."""
     meta = ZIELE[ziel]
     req_id = str(uuid.uuid4())
+    auftrag = {"id": req_id, "text": text}
+    if bilder:
+        auftrag["bilder"] = bilder[:5]
     try:
-        r.rpush(meta["inbox"], json.dumps({"id": req_id, "text": text}, ensure_ascii=False))
+        r.rpush(meta["inbox"], json.dumps(auftrag, ensure_ascii=False))
     except Exception as e:
         return f"Konnte den Auftrag nicht absetzen: {type(e).__name__}"
 
@@ -176,10 +231,12 @@ def status_text(r):
     return "\n".join(zeilen)
 
 
-def verarbeite(r, text, chat):
+def verarbeite(r, text, chat, bilder=None):
     text = (text or "").strip()
-    if not text:
+    if not text and not bilder:
         return
+    if bilder and not text:
+        text = "Schau dir das Bild an und sag mir, was du siehst."
 
     # ── Befehle ──
     if text.startswith("/"):
@@ -214,7 +271,7 @@ def verarbeite(r, text, chat):
                 senden(f"Ziel umgestellt auf {ZIELE[befehl]['label']}. Schreib einfach los.", chat)
                 return
             tippt(chat)
-            antwort = frage_bot(r, befehl, rest)
+            antwort = frage_bot(r, befehl, rest, bilder)
             senden(f"[{ZIELE[befehl]['label']}]\n{antwort}", chat)
             return
         senden(f"Unbekannter Befehl. {HILFE}", chat)
@@ -223,7 +280,7 @@ def verarbeite(r, text, chat):
     # ── normale Nachricht ans aktuelle Ziel ──
     ziel = ziel_holen(r)
     tippt(chat)
-    antwort = frage_bot(r, ziel, text)
+    antwort = frage_bot(r, ziel, text, bilder)
     kopf = "" if ziel == "jarvis" else f"[{ZIELE[ziel]['label']}]\n"
     senden(kopf + antwort, chat)
 
@@ -266,15 +323,19 @@ def main():
                 offset = u.get("update_id", 0) + 1
                 msg = u.get("message") or {}
                 chat = str((msg.get("chat") or {}).get("id", ""))
-                text = msg.get("text") or ""
-                if not text:
-                    continue
+                # Bei einem Foto steht der Text in caption, nicht in text
+                text = msg.get("text") or msg.get("caption") or ""
                 if chat != CHAT_ID:
                     print(f"  [tg] Fremde Chat-ID {chat} ignoriert", flush=True)
                     continue
-                print(f"  Du: {text[:80]}", flush=True)
+                bilder = bilder_aus_nachricht(msg)
+                if not text and not bilder:
+                    continue
+                if bilder:
+                    print(f"  [bild] {len(bilder)} empfangen", flush=True)
+                print(f"  Du: {text[:80] or '(nur Bild)'}", flush=True)
                 try:
-                    verarbeite(r, text, chat)
+                    verarbeite(r, text, chat, bilder)
                 except Exception as e:
                     print(f"  [fehler] {type(e).__name__}: {e}", flush=True)
                     senden(f"Fehler: {type(e).__name__}: {str(e)[:200]}", chat)

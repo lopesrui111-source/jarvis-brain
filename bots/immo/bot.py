@@ -61,7 +61,15 @@ TELEGRAM_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT  = os.getenv("TELEGRAM_CHAT_ID", "")
 
 SEARCH_URLS = [u.strip() for u in os.getenv("IMMO_SEARCH_URLS", "").split(",") if u.strip()]
-AUTO_INTERVAL_MIN = int(os.getenv("IMMO_INTERVAL_MIN", "0"))   # 0 = kein Auto-Scan
+AUTO_INTERVAL_MIN = int(os.getenv("IMMO_INTERVAL_MIN", "0"))   # 0 = kein Intervall-Scan (alt)
+
+# Planmaessiger Lauf: alle N Tage zur festen Uhrzeit.
+# Gerechnet wird ab dem letzten Lauf, nicht nach festen Kalendertagen —
+# sonst verschiebt sich der Takt bei jedem verpassten Termin.
+LAUF_ZEIT  = os.getenv("IMMO_LAUF_ZEIT", "18:00").strip().split()[0] \
+    if os.getenv("IMMO_LAUF_ZEIT", "18:00").strip() else ""
+LAUF_TAKT  = int(os.getenv("IMMO_LAUF_TAKT_TAGE", "2"))    # alle 2 Tage
+LAUF_STUNDEN = int(os.getenv("IMMO_MAIL_STUNDEN", "48"))   # Mail-Fenster passend zum Takt
 
 MAIL_HOST = os.getenv("MAIL_GMAIL_HOST", "imap.gmail.com")
 MAIL_USER = os.getenv("MAIL_GMAIL_USER", "")
@@ -102,6 +110,35 @@ def init_db():
         print("  [db] immo_seen bereit", flush=True)
     except Exception as e:
         print(f"  [db] {e}", flush=True)
+
+
+def _marker_lesen(key):
+    """Merker in der Datenbank — ueberlebt Neustarts und Rebuilds."""
+    try:
+        conn = pg_conn()
+        with conn, conn.cursor() as cur:
+            cur.execute("CREATE TABLE IF NOT EXISTS bot_marker "
+                        "(key text PRIMARY KEY, wert text)")
+            cur.execute("SELECT wert FROM bot_marker WHERE key = %s", (key,))
+            row = cur.fetchone()
+        conn.close()
+        return row[0] if row else ""
+    except Exception as e:
+        print(f"  [marker] nicht lesbar: {e}", flush=True)
+        return ""
+
+
+def _marker_schreiben(key, wert):
+    try:
+        conn = pg_conn()
+        with conn, conn.cursor() as cur:
+            cur.execute("CREATE TABLE IF NOT EXISTS bot_marker "
+                        "(key text PRIMARY KEY, wert text)")
+            cur.execute("INSERT INTO bot_marker (key, wert) VALUES (%s, %s) "
+                        "ON CONFLICT (key) DO UPDATE SET wert = EXCLUDED.wert", (key, wert))
+        conn.close()
+    except Exception as e:
+        print(f"  [marker] nicht schreibbar: {e}", flush=True)
 
 
 def already_seen(url):
@@ -223,7 +260,16 @@ def tool_recall(inp, k=5):
 
 
 # ── CAMOFOX (Seiten lesen) ───────────────────────────────────
-def fetch_page(url):
+def fetch_page(url, max_zeichen=9000):
+    """Seite ueber camofox holen.
+
+    max_zeichen ist einstellbar, weil Suchergebnisseiten deutlich laenger sind:
+    Bei Kleinanzeigen stehen Popup, Kopfzeile und Filterspalte vor den Treffern —
+    bei 9000 Zeichen war die Anzeigenliste komplett abgeschnitten und der Bot
+    meldete faelschlich "keine neuen Angebote".
+    Der Tab wird immer geschlossen, sonst laeuft camofox nach einigen Abrufen voll.
+    """
+    tab = None
     try:
         r = requests.post(f"{CAMOFOX_URL}/tabs",
                           json={"userId": "immo", "sessionKey": "main", "url": url}, timeout=60)
@@ -233,9 +279,16 @@ def fetch_page(url):
         s = requests.get(f"{CAMOFOX_URL}/tabs/{tab}/snapshot", params={"userId": "immo"}, timeout=60)
         if s.status_code >= 400:
             return None, f"Snapshot-Fehler ({s.status_code})"
-        return s.json().get("snapshot", "")[:9000], None
+        return s.json().get("snapshot", "")[:max_zeichen], None
     except Exception as e:
         return None, f"Browser nicht erreichbar ({type(e).__name__})"
+    finally:
+        if tab:
+            try:
+                requests.delete(f"{CAMOFOX_URL}/tabs/{tab}",
+                                params={"userId": "immo"}, timeout=20)
+            except Exception:
+                pass
 
 
 # ── ANALYSE (deterministische Rechnung, Haiku nur fuer Extraktion) ──
@@ -303,38 +356,57 @@ def format_angebot(d, calc, url, plattform):
     warnungen = pruefe_plausibilitaet(d, calc)
     lines = []
     if warnungen:
-        lines.append("⚠️ ZAHLEN PRUEFEN:")
-        lines += [f"   • {w}" for w in warnungen]
+        lines.append("⚠️ <b>ZAHLEN PRUEFEN:</b>")
+        lines += [f"   • {_esc(w)}" for w in warnungen]
         lines.append("")
+    # Mietquelle kann sehr lang werden (mehrere Portale mit Einzelwerten) — kuerzen
+    quelle = str(d.get("miete_quelle", ""))
+    if len(quelle) > 55:
+        quelle = quelle[:52].rstrip(" ,(-") + "…"
+
+    def _n(x):
+        return f"{x:,.0f}".replace(",", ".")
+
     lines += [
-        f"{'✅' if q else '❌'} 📍 {d.get('titel', '(ohne Titel)')} — 🏷️ {plattform}",
-        f"💶 {d.get('kaufpreis', 0):,.0f} € | {d.get('qm', '?')} m² | {d.get('zimmer', '?')} Zi | {d.get('ort', '?')}".replace(",", "."),
-        f"📊 Bruttorendite: {calc['rendite']:.1f} % (Miete ca. {d.get('miete_qm', 0):.2f} €/m² — {d.get('miete_quelle', '')})",
-        f"🔗 {url}",
-        f"💬 {d.get('anmerkung', '')}",
+        f"{'✅' if q else '❌'} <b>{_esc(d.get('titel', '(ohne Titel)'))}</b>",
+        f"💶 {_n(d.get('kaufpreis', 0))} € · {d.get('qm', '?')} m² · "
+        f"{d.get('zimmer', '?')} Zi · {_esc(d.get('ort', '?'))}",
+        f"📊 {calc['rendite']:.1f} % brutto (Miete {d.get('miete_qm', 0):.2f} €/m² — {_esc(quelle)})",
         "",
-        "💰 Szenario A — NK aus Eigenkapital:",
-        f"├ Eigenkapital: {calc['a']['ek']:,.0f} €".replace(",", "."),
-        f"├ Finanzierung: {calc['a']['summe']:,.0f} €".replace(",", "."),
-        f"├ Rate ({ZINS} %): {calc['a']['rate']:,.0f} €/Mo".replace(",", "."),
-        f"└ Cashflow: {calc['a']['cashflow']:+,.0f} €/Mo".replace(",", "."),
+        f"💰 A (NK aus EK): {_n(calc['a']['ek'])} € EK · Rate {_n(calc['a']['rate'])} € · "
+        f"Cashflow {calc['a']['cashflow']:+,.0f} €".replace(",", "."),
+        f"💰 B (voll): {_n(calc['b']['summe'])} € Kredit · Rate {_n(calc['b']['rate'])} € · "
+        f"Cashflow {calc['b']['cashflow']:+,.0f} €".replace(",", "."),
         "",
-        "💰 Szenario B — Vollfinanzierung:",
-        f"├ Eigenkapital: 0 €",
-        f"├ Finanzierung: {calc['b']['summe']:,.0f} €".replace(",", "."),
-        f"├ Rate ({ZINS} %): {calc['b']['rate']:,.0f} €/Mo".replace(",", "."),
-        f"└ Cashflow: {calc['b']['cashflow']:+,.0f} €/Mo".replace(",", "."),
+        f'🔗 <a href="{_esc(url)}">Exposé bei {_esc(plattform)}</a>',
     ]
+    if d.get("anmerkung"):
+        lines.append(f"💬 {_esc(d['anmerkung'])}")
     return "\n".join(lines)
 
 
-def send_telegram(text):
+def _esc(t):
+    """HTML-Sonderzeichen entschaerfen, damit Telegram nicht stolpert."""
+    return (str(t).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;"))
+
+
+def send_telegram(text, html=True):
+    """Verschickt die Nachricht. Mit HTML lassen sich Links hinter Text verstecken —
+    die ImmoScout-Push-URLs sind sonst laenger als die eigentliche Nachricht."""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT:
         return False
+    daten = {"chat_id": TELEGRAM_CHAT, "text": text,
+             "disable_web_page_preview": True}
+    if html:
+        daten["parse_mode"] = "HTML"
     try:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-                      json={"chat_id": TELEGRAM_CHAT, "text": text}, timeout=20)
-        return True
+        r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+                          json=daten, timeout=20)
+        if r.status_code >= 400 and html:
+            # Faellt HTML durch, lieber ohne Formatierung als gar nicht
+            print(f"  [telegram] HTML abgelehnt ({r.text[:120]}) — sende roh", flush=True)
+            return send_telegram(text, html=False)
+        return r.status_code < 400
     except Exception as e:
         print(f"  [telegram] {e}", flush=True)
         return False
@@ -541,19 +613,27 @@ def scan_kleinanzeigen(background=True):
     results = []
     total_new = 0
     for surl in SEARCH_URLS[:4]:
-        snap, err = fetch_page(surl)
+        # Suchseiten brauchen mehr Platz — Popup, Kopf und Filterspalte stehen davor
+        snap, err = fetch_page(surl, max_zeichen=60000)
         if err:
             results.append(f"{surl}: {err}")
+            print(f"  [ka] {err}", flush=True)
             continue
-        links = re.findall(r"https://www\.kleinanzeigen\.de/s-anzeige/[^\s\"'<>\)]+", snap or "")
+        # Kleinanzeigen liefert RELATIVE Pfade (/s-anzeige/...), frueher wurde nur
+        # nach vollstaendigen URLs gesucht — deshalb fand der Bot nie etwas.
+        roh = re.findall(r"(?:https://www\.kleinanzeigen\.de)?/s-anzeige/[^\s\"'<>\)]+",
+                         snap or "")
         seen_links = []
-        for u in links:
+        for u in roh:
             u = u.rstrip('.,;')
+            if u.startswith("/"):
+                u = "https://www.kleinanzeigen.de" + u
             if u not in seen_links:
                 seen_links.append(u)
-        new = [u for u in seen_links[:10] if not already_seen(u)]
-        total_new += len(new)
-        for u in new[:4]:
+        neu = [u for u in seen_links[:10] if not already_seen(u)]
+        print(f"  [ka] {len(seen_links)} Anzeigen auf der Seite, {len(neu)} davon neu", flush=True)
+        total_new += len(neu)
+        for u in neu[:4]:
             results.append(analyze_listing(u))
             time.sleep(2)
     if not results:
@@ -802,17 +882,103 @@ def think(history, user_text):
     return final_text
 
 
-def auto_scan_thread():
-    if AUTO_INTERVAL_MIN <= 0:
-        return
-    while True:
-        time.sleep(AUTO_INTERVAL_MIN * 60)
+MARKER_LAUF = "immo:letzter_lauf"
+
+
+def _letzter_lauf():
+    """Datum des letzten planmaessigen Laufs (YYYY-MM-DD)."""
+    return (_marker_lesen(MARKER_LAUF) or "").split(" ", 1)[0]
+
+
+def _lauf_faellig(now):
+    """Faellig, wenn seit dem letzten Lauf mindestens LAUF_TAKT Tage vergangen sind."""
+    letzter = _letzter_lauf()
+    if not letzter:
+        return True
+    try:
+        d = datetime.strptime(letzter, "%Y-%m-%d").date()
+    except Exception:
+        return True
+    return (now.date() - d).days >= LAUF_TAKT
+
+
+def planlauf(grund="planmaessig"):
+    """Beide Quellen durchgehen und das Ergebnis per Telegram melden."""
+    print(f"  [auto] Lauf startet ({grund})", flush=True)
+    teile = []
+    try:
+        teile.append(scan_immoscout_mails(hours=LAUF_STUNDEN, background=False))
+    except Exception as e:
+        teile.append(f"Mail-Scan fehlgeschlagen: {type(e).__name__}: {e}")
+    if not SEARCH_URLS:
+        print("  [auto] Kleinanzeigen uebersprungen — IMMO_SEARCH_URLS ist leer", flush=True)
+        teile.append("Kleinanzeigen: keine Such-URLs hinterlegt (IMMO_SEARCH_URLS).")
+    else:
         try:
-            print("  [auto] Scan startet", flush=True)
-            scan_immoscout_mails(background=False)
-            scan_kleinanzeigen(background=False)
+            res = scan_kleinanzeigen(background=False)
+            print(f"  [auto] Kleinanzeigen ({len(SEARCH_URLS)} Suchen): {str(res)[:90]}", flush=True)
+            teile.append(res)
+        except Exception as e:
+            teile.append(f"Kleinanzeigen-Scan fehlgeschlagen: {type(e).__name__}: {e}")
+
+    text = "\n\n".join(t for t in teile if t)
+    treffer = text.count("\u2705")
+    kopf = (f"\U0001F3E0 Immo-Lauf {datetime.now().strftime('%d.%m. %H:%M')} — "
+            f"{treffer} qualifizierte Angebote" if treffer
+            else f"\U0001F3E0 Immo-Lauf {datetime.now().strftime('%d.%m. %H:%M')} — nichts Passendes")
+    try:
+        send_telegram(kopf + ("\n\n" + text[:2500] if treffer else ""))
+    except Exception as e:
+        print(f"  [auto] Telegram fehlgeschlagen: {e}", flush=True)
+
+    _marker_schreiben(MARKER_LAUF,
+                      f"{datetime.now().strftime('%Y-%m-%d %H:%M')} ({grund})")
+    print(f"  [auto] fertig: {kopf}", flush=True)
+    return kopf
+
+
+def auto_scan_thread():
+    """Planmaessiger Lauf alle LAUF_TAKT Tage zur eingestellten Uhrzeit.
+
+    Holt nach, wenn der Container zum Termin nicht lief — der Takt bleibt
+    dadurch erhalten, statt bei jedem Neustart einen Termin zu verlieren.
+    """
+    if not LAUF_ZEIT:
+        print("  [auto] Planlauf abgeschaltet (IMMO_LAUF_ZEIT leer)", flush=True)
+        return
+    try:
+        hh, mm = [int(x) for x in LAUF_ZEIT.split(":")[:2]]
+    except Exception:
+        print(f"  [auto] Zeitangabe ungueltig: {LAUF_ZEIT}", flush=True)
+        return
+    print(f"  [auto] Planlauf alle {LAUF_TAKT} Tage um {LAUF_ZEIT} "
+          f"(zuletzt: {_marker_lesen(MARKER_LAUF) or 'noch nie'})", flush=True)
+    versuche = {"tag": "", "n": 0}
+    time.sleep(45)
+    while True:
+        try:
+            now = datetime.now()
+            heute = now.strftime("%Y-%m-%d")
+            faellig_ab = now.replace(hour=hh, minute=mm, second=0, microsecond=0)
+            if now >= faellig_ab and _lauf_faellig(now):
+                if versuche.get("tag") != heute:
+                    versuche.update({"tag": heute, "n": 0})
+                if versuche["n"] < 3:
+                    versuche["n"] += 1
+                    grund = ("planmaessig" if now.hour == hh
+                             else f"nachgeholt, geplant war {LAUF_ZEIT}")
+                    try:
+                        planlauf(grund)
+                    except Exception as e:
+                        print(f"  [auto] fehlgeschlagen ({versuche['n']}/3): "
+                              f"{type(e).__name__}: {e}", flush=True)
+                        if versuche["n"] >= 3:
+                            _marker_schreiben(MARKER_LAUF, f"{heute} 00:00 (3x fehlgeschlagen)")
+                        else:
+                            time.sleep(300)
         except Exception as e:
             print(f"  [auto] {e}", flush=True)
+        time.sleep(60)
 
 
 def _antwort_senden(r, queue, text):
@@ -841,7 +1007,9 @@ def main():
     print("  IMMO-BOT — Investment-Analyst unter JARVIS", flush=True)
     print(f"  Kriterien : >= {MIN_RENDITE}% Rendite | {ZINS}% Zins | NK {NK_PROZENT}%", flush=True)
     print(f"  Telegram  : {'aktiv' if (TELEGRAM_TOKEN and TELEGRAM_CHAT) else 'nicht konfiguriert'}", flush=True)
-    print(f"  Suchen    : {len(SEARCH_URLS)} URLs | Auto-Scan: {'alle ' + str(AUTO_INTERVAL_MIN) + ' Min' if AUTO_INTERVAL_MIN else 'aus'}", flush=True)
+    print(f"  Suchen    : {len(SEARCH_URLS)} URLs", flush=True)
+    print(f"  Planlauf  : {'alle ' + str(LAUF_TAKT) + ' Tage um ' + LAUF_ZEIT if LAUF_ZEIT else 'aus'}"
+          f" | Mail-Fenster {LAUF_STUNDEN}h", flush=True)
     print("=" * 58, flush=True)
     init_db()
 
@@ -880,6 +1048,14 @@ def main():
             if text.lower() in ("reset", "vergiss alles"):
                 r.delete(HISTORY_KEY)
                 _antwort_senden(r, reply_q, "Immo-Kurzzeitgedaechtnis geleert.")
+                continue
+            if text.lower() in ("immolauf", "planlauf", "scan jetzt"):
+                _antwort_senden(r, reply_q, planlauf("manuell"))
+                continue
+            if text.lower() in ("wann laeuft", "wann läuft", "lauf status"):
+                _antwort_senden(r, reply_q,
+                                f"Planlauf alle {LAUF_TAKT} Tage um {LAUF_ZEIT or 'aus'}. "
+                                f"Zuletzt: {_marker_lesen(MARKER_LAUF) or 'noch nie'}.")
                 continue
             print(f"  Auftrag: {text[:80]}", flush=True)
             history = load_history(r)

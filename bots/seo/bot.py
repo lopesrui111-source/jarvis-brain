@@ -81,6 +81,37 @@ GF_ALT_QUELLEN = os.getenv("SEO_ALT_QUELLEN", "0") == "1"
 
 # Quora wird von Cloudflare geblockt -> standardmaessig aus
 QUORA_AKTIV = os.getenv("SEO_QUORA", "0") == "1"
+
+# ── REDDIT ───────────────────────────────────────────────────
+# Offizielle API statt Scraping: kein Bot-Schutz, kein Sperr-Risiko.
+# Zugangsdaten holst du dir unter reddit.com/prefs/apps (Typ "script").
+REDDIT_ID     = os.getenv("REDDIT_CLIENT_ID", "")
+REDDIT_SECRET = os.getenv("REDDIT_CLIENT_SECRET", "")
+REDDIT_AGENT  = os.getenv("REDDIT_USER_AGENT", "jarvis-seo/1.0 (by u/unbekannt)")
+REDDIT_SUBS   = [x.strip() for x in os.getenv(
+    "REDDIT_SUBS", "Selbststaendig,Finanzen,de_EDV").split(",") if x.strip()]
+REDDIT_PRO_SUB = int(os.getenv("REDDIT_LIMIT", "25"))
+# Nur Beitraege, die thematisch passen — sonst kommt der ganze Strom durch.
+# ── AUTOMATISCHES POSTEN ─────────────────────────────────────
+# Harte Grenzen im Code, nicht als Bitte im Prompt. Ein gesperrtes Konto
+# bekommt man praktisch nicht zurueck.
+REDDIT_POSTEN     = os.getenv("REDDIT_POSTEN", "0") == "1"     # Hauptschalter
+REDDIT_USER       = os.getenv("REDDIT_USER", "")
+REDDIT_PASS       = os.getenv("REDDIT_PASS", "")
+REDDIT_MAX_TAG    = int(os.getenv("REDDIT_MAX_TAG", "2"))      # Antworten pro Tag
+REDDIT_ABSTAND    = int(os.getenv("REDDIT_ABSTAND_MIN", "90")) # Minuten zwischen Posts
+REDDIT_MAX_ALTER  = int(os.getenv("REDDIT_MAX_ALTER_H", "24")) # nur frische Beitraege
+REDDIT_MAX_KOMM   = int(os.getenv("REDDIT_MAX_KOMMENTARE", "15"))
+# Anlaufsperre: neue Konten werden von Subreddits automatisch gefiltert.
+REDDIT_MIN_TAGE   = int(os.getenv("REDDIT_MIN_KONTO_TAGE", "14"))
+REDDIT_MIN_KARMA  = int(os.getenv("REDDIT_MIN_KARMA", "50"))
+
+REDDIT_THEMEN = [x.strip().lower() for x in os.getenv(
+    "REDDIT_THEMEN",
+    "rechnung,e-rechnung,xrechnung,zugferd,kleinunternehmer,umsatzsteuer,"
+    "buchhaltung,steuer,finanzamt,angebot,mahnung,freiberuf,gewerbe,"
+    "selbststaendig,selbstaendig,gruendung,elster,datev,lexoffice,sevdesk"
+).split(",") if x.strip()]
 QUORA_KEYWORDS = ["Kleinunternehmer Rechnung", "E-Rechnung Pflicht",
                   "Rechnung schreiben Selbststaendige", "Mahnung schreiben"]
 
@@ -466,10 +497,12 @@ def scan_gutefrage(max_quellen=12):
         for k in GF_KEYWORDS[:3]:
             quellen.append((f"https://www.gutefrage.net/suche?q={quote(k)}", f"Suche: {k}"))
 
-    for url, label in quellen[:max_quellen]:
+    gesamt = len(quellen[:max_quellen])
+    for i, (url, label) in enumerate(quellen[:max_quellen], 1):
+        fortschritt(f"gutefrage {i}/{gesamt}: {label}")
         snap, err = fetch_page(url)
         if err:
-            print(f"  [gf] {label}: {err}", flush=True)
+            _quelle_meldet(f"[gf] {label}: {err}")
             if "SEITE-404" in err:
                 tot.append(label)
             elif "BLOCKIERT" in err:
@@ -499,7 +532,7 @@ def scan_quora(max_quellen=3):
         url = f"https://www.quora.com/search?q={quote(k)}&type=question&time=week"
         snap, err = fetch_page(url)
         if err:
-            print(f"  [quora] {k}: {err}", flush=True)
+            _quelle_meldet(f"[quora] {k}: {err}")
             continue
         gefunden += _extract_fragen(snap, f"quora / Suche: {k}")
         time.sleep(1)
@@ -532,6 +565,300 @@ Antworte NUR mit JSON:
 {"antwort":"...","tool_frage":true/false,"unsicher":"was ggf. geprueft werden sollte, sonst leer"}"""
 
 
+
+
+# ── FORTSCHRITT ──────────────────────────────────────────────
+# Der Bot meldet seinen Stand nach Redis, damit das Dashboard nicht nur
+# eine laufende Uhr zeigt. Ohne das wirkt jeder laengere Lauf wie ein Haenger.
+FORTSCHRITT = {"r": None, "id": ""}
+
+
+def fortschritt(text):
+    print(f"  … {text}", flush=True)
+    if not (FORTSCHRITT["r"] and FORTSCHRITT["id"]):
+        return
+    try:
+        FORTSCHRITT["r"].setex(f"bot:seo:fortschritt:{FORTSCHRITT['id']}", 900, text)
+    except Exception:
+        pass
+
+
+# Quellenprobleme werden hier gesammelt und landen SICHTBAR in der Antwort.
+# Frueher standen sie nur im Log — der Bot meldete dann "nichts Passendes
+# gefunden", obwohl er die Quelle nie erreicht hatte.
+QUELLEN_FEHLER = []
+
+
+def _quelle_meldet(text):
+    print(f"  {text}", flush=True)
+    if text not in QUELLEN_FEHLER:
+        QUELLEN_FEHLER.append(text)
+
+
+# ── REDDIT-RECHERCHE ─────────────────────────────────────────
+_RD_TOKEN = {"wert": "", "bis": 0}
+
+
+def _reddit_token():
+    """Holt ein Zugangs-Token (App-only, gilt eine Stunde)."""
+    if _RD_TOKEN["wert"] and time.time() < _RD_TOKEN["bis"]:
+        return _RD_TOKEN["wert"], None
+    if not (REDDIT_ID and REDDIT_SECRET):
+        return None, "Reddit nicht eingerichtet (REDDIT_CLIENT_ID/SECRET fehlen)."
+    try:
+        r = requests.post("https://www.reddit.com/api/v1/access_token",
+                          auth=(REDDIT_ID, REDDIT_SECRET),
+                          data={"grant_type": "client_credentials"},
+                          headers={"User-Agent": REDDIT_AGENT}, timeout=30)
+        if r.status_code >= 400:
+            return None, f"Reddit-Anmeldung fehlgeschlagen ({r.status_code}): {r.text[:120]}"
+        d = r.json()
+        _RD_TOKEN["wert"] = d.get("access_token", "")
+        _RD_TOKEN["bis"] = time.time() + int(d.get("expires_in", 3600)) - 120
+        return _RD_TOKEN["wert"], None
+    except Exception as e:
+        return None, f"Reddit nicht erreichbar ({type(e).__name__})"
+
+
+def _reddit_alter(erstellt_utc):
+    """Sekunden seit dem Beitrag in die gewohnte Textform bringen."""
+    diff = max(0, int(time.time() - (erstellt_utc or 0)))
+    if diff < 3600:
+        return f"vor {max(1, diff // 60)} Minuten"
+    if diff < 86400:
+        return f"vor {diff // 3600} Stunden"
+    tage = diff // 86400
+    return "vor 1 Tag" if tage == 1 else f"vor {tage} Tagen"
+
+
+def _reddit_passt(titel, text):
+    inhalt = f"{titel} {text}".lower()
+    return any(w in inhalt for w in REDDIT_THEMEN)
+
+
+def scan_reddit():
+    """Liest die neuesten Beitraege der eingestellten Subreddits.
+
+    Ueber die offizielle API — Reddit sperrt Scraper, und ein gesperrtes
+    Konto waere dieser Kanal fuer immer.
+    """
+    token, err = _reddit_token()
+    if err:
+        _quelle_meldet(f"[rd] {err}")
+        return []
+    kopf = {"Authorization": f"bearer {token}", "User-Agent": REDDIT_AGENT}
+    gefunden = []
+    for i, sub in enumerate(REDDIT_SUBS, 1):
+        fortschritt(f"reddit {i}/{len(REDDIT_SUBS)}: r/{sub}")
+        try:
+            r = requests.get(f"https://oauth.reddit.com/r/{sub}/new",
+                             params={"limit": REDDIT_PRO_SUB},
+                             headers=kopf, timeout=30)
+            if r.status_code >= 400:
+                _quelle_meldet(f"[rd] r/{sub}: HTTP {r.status_code}"
+                               + (" — Subreddit gibt es nicht" if r.status_code == 404 else ""))
+                continue
+            posten = (r.json().get("data") or {}).get("children") or []
+        except Exception as e:
+            _quelle_meldet(f"[rd] r/{sub}: {type(e).__name__}")
+            continue
+
+        treffer = 0
+        for p in posten:
+            d = p.get("data") or {}
+            if d.get("stickied") or d.get("over_18") or d.get("locked"):
+                continue
+            titel = (d.get("title") or "").strip()
+            text = (d.get("selftext") or "")[:400]
+            if not titel or not _reddit_passt(titel, text):
+                continue
+            gefunden.append({
+                "titel": titel[:160],
+                "url": "https://www.reddit.com" + (d.get("permalink") or ""),
+                "antworten": int(d.get("num_comments") or 0),
+                "alter": _reddit_alter(d.get("created_utc")),
+                "quelle": f"reddit / r/{sub}",
+                "text": text,
+            })
+            treffer += 1
+        print(f"  [rd] r/{sub}: {len(posten)} Beitraege, {treffer} thematisch passend",
+              flush=True)
+        time.sleep(1)
+    return gefunden
+
+
+
+
+# ── REDDIT: ANTWORTEN POSTEN ─────────────────────────────────
+_RD_USER_TOKEN = {"wert": "", "bis": 0}
+
+
+def _reddit_konto_token():
+    """Token MIT Kontorechten — noetig zum Posten. Anderer Weg als der Lesezugriff."""
+    if _RD_USER_TOKEN["wert"] and time.time() < _RD_USER_TOKEN["bis"]:
+        return _RD_USER_TOKEN["wert"], None
+    if not (REDDIT_ID and REDDIT_SECRET and REDDIT_USER and REDDIT_PASS):
+        return None, "Posten nicht eingerichtet (REDDIT_USER/REDDIT_PASS fehlen)."
+    try:
+        r = requests.post("https://www.reddit.com/api/v1/access_token",
+                          auth=(REDDIT_ID, REDDIT_SECRET),
+                          data={"grant_type": "password",
+                                "username": REDDIT_USER, "password": REDDIT_PASS},
+                          headers={"User-Agent": REDDIT_AGENT}, timeout=30)
+        if r.status_code >= 400:
+            return None, f"Anmeldung fehlgeschlagen ({r.status_code}): {r.text[:120]}"
+        d = r.json()
+        if not d.get("access_token"):
+            return None, f"Kein Token erhalten: {str(d)[:150]}"
+        _RD_USER_TOKEN["wert"] = d["access_token"]
+        _RD_USER_TOKEN["bis"] = time.time() + int(d.get("expires_in", 3600)) - 120
+        return _RD_USER_TOKEN["wert"], None
+    except Exception as e:
+        return None, f"Reddit nicht erreichbar ({type(e).__name__})"
+
+
+def _reddit_konto_pruefen():
+    """Anlaufsperre: Alter und Karma pruefen.
+
+    Ein frisches Konto, das sofort automatisiert antwortet, landet in der
+    Moderationswarteschlange oder im Shadowban — beides merkt man nicht,
+    weil die Antworten fuer einen selbst sichtbar bleiben.
+    """
+    token, err = _reddit_konto_token()
+    if err:
+        return False, err
+    try:
+        r = requests.get("https://oauth.reddit.com/api/v1/me",
+                         headers={"Authorization": f"bearer {token}",
+                                  "User-Agent": REDDIT_AGENT}, timeout=30)
+        d = r.json()
+    except Exception as e:
+        return False, f"Kontoabfrage fehlgeschlagen ({type(e).__name__})"
+    tage = int((time.time() - (d.get("created_utc") or time.time())) // 86400)
+    karma = int(d.get("total_karma") or 0)
+    if tage < REDDIT_MIN_TAGE:
+        return False, (f"Konto erst {tage} Tage alt (noetig: {REDDIT_MIN_TAGE}). "
+                       "Neue Konten werden automatisch gefiltert — erst normal nutzen.")
+    if karma < REDDIT_MIN_KARMA:
+        return False, (f"Nur {karma} Karma (noetig: {REDDIT_MIN_KARMA}). "
+                       "Viele Subreddits blocken Konten ohne Karma.")
+    return True, f"u/{d.get('name')} — {tage} Tage, {karma} Karma"
+
+
+def _rd_marker_lesen(key):
+    try:
+        conn = pg_conn()
+        with conn, conn.cursor() as cur:
+            cur.execute("CREATE TABLE IF NOT EXISTS bot_marker "
+                        "(key text PRIMARY KEY, wert text)")
+            cur.execute("SELECT wert FROM bot_marker WHERE key = %s", (key,))
+            row = cur.fetchone()
+        conn.close()
+        return row[0] if row else ""
+    except Exception:
+        return ""
+
+
+def _rd_marker_schreiben(key, wert):
+    try:
+        conn = pg_conn()
+        with conn, conn.cursor() as cur:
+            cur.execute("CREATE TABLE IF NOT EXISTS bot_marker "
+                        "(key text PRIMARY KEY, wert text)")
+            cur.execute("INSERT INTO bot_marker (key, wert) VALUES (%s,%s) "
+                        "ON CONFLICT (key) DO UPDATE SET wert = EXCLUDED.wert", (key, wert))
+        conn.close()
+    except Exception as e:
+        print(f"  [rd] Marker: {e}", flush=True)
+
+
+def _rd_heute():
+    """Liste der heutigen Posts: [{'zeit': ..., 'sub': ...}]"""
+    roh = _rd_marker_lesen("reddit:posts")
+    try:
+        d = json.loads(roh) if roh else {}
+    except Exception:
+        d = {}
+    if d.get("tag") != datetime.now().strftime("%Y-%m-%d"):
+        return []
+    return d.get("posts", [])
+
+
+def _rd_vermerken(sub):
+    posts = _rd_heute()
+    posts.append({"zeit": time.time(), "sub": sub})
+    _rd_marker_schreiben("reddit:posts", json.dumps(
+        {"tag": datetime.now().strftime("%Y-%m-%d"), "posts": posts}))
+
+
+def _rd_darf_posten(frage):
+    """Alle Grenzen an einer Stelle. Gibt (ja/nein, Begruendung) zurueck."""
+    if not REDDIT_POSTEN:
+        return False, "Posten ist abgeschaltet (REDDIT_POSTEN=0)."
+    sub = str(frage.get("quelle", "")).split("r/")[-1].strip()
+    posts = _rd_heute()
+    if len(posts) >= REDDIT_MAX_TAG:
+        return False, f"Tageslimit erreicht ({REDDIT_MAX_TAG})."
+    if posts and (time.time() - posts[-1]["zeit"]) < REDDIT_ABSTAND * 60:
+        rest = int(REDDIT_ABSTAND - (time.time() - posts[-1]["zeit"]) / 60)
+        return False, f"Mindestabstand — noch {rest} Minuten."
+    if any(p.get("sub") == sub for p in posts):
+        return False, f"Heute schon in r/{sub} geantwortet."
+    if int(frage.get("antworten", 0)) > REDDIT_MAX_KOMM:
+        return False, f"Schon {frage.get('antworten')} Kommentare — bringt nichts mehr."
+    alter = str(frage.get("alter", ""))
+    if "tag" in alter.lower() and not alter.lower().startswith("vor 1 tag"):
+        return False, f"Beitrag zu alt ({alter})."
+    return True, sub
+
+
+def reddit_antworten(frage, text):
+    """Postet eine Antwort. Prueft vorher jede Grenze."""
+    ok, grund = _rd_darf_posten(frage)
+    if not ok:
+        print(f"  [rd] nicht gepostet: {grund}", flush=True)
+        return False, grund
+
+    verboten = [w for w in ("buroflow", "büroflow", "mahnflow", "mailflow",
+                            "angebotsflow", "e-rechnungsflow", "buroflow.de")
+                if w in (text or "").lower()]
+    if verboten:
+        return False, f"Eigenwerbung im Text ({', '.join(verboten)}) — nicht gepostet."
+
+    konto_ok, info = _reddit_konto_pruefen()
+    if not konto_ok:
+        print(f"  [rd] Konto gesperrt fuers Posten: {info}", flush=True)
+        return False, info
+
+    token, err = _reddit_konto_token()
+    if err:
+        return False, err
+    # thing_id des Beitrags aus der URL holen
+    m = re.search(r"/comments/([a-z0-9]+)", frage.get("url", ""))
+    if not m:
+        return False, "Beitrags-ID nicht erkennbar."
+    try:
+        r = requests.post("https://oauth.reddit.com/api/comment",
+                          data={"thing_id": f"t3_{m.group(1)}", "text": text,
+                                "api_type": "json"},
+                          headers={"Authorization": f"bearer {token}",
+                                   "User-Agent": REDDIT_AGENT}, timeout=40)
+        d = r.json()
+        fehler = ((d.get("json") or {}).get("errors") or [])
+        if r.status_code >= 400 or fehler:
+            return False, f"Reddit lehnte ab: {str(fehler or r.text)[:200]}"
+    except Exception as e:
+        return False, f"Versand fehlgeschlagen ({type(e).__name__})"
+
+    _rd_vermerken(grund)
+    print(f"  [rd] gepostet in r/{grund}: {frage.get('titel', '')[:60]}", flush=True)
+    protokoll_melden("seo", "Auf Reddit geantwortet",
+                     frage.get("titel", "")[:150], frage.get("url", ""))
+    send_telegram(f"\U0001F4AC Auf Reddit geantwortet — r/{grund}\n"
+                  f"{frage.get('titel', '')[:120]}\n{frage.get('url', '')}\n\n{text[:900]}")
+    return True, f"r/{grund}"
+
+
 def _slug(text):
     s = re.sub(r"[^a-z0-9]+", "-", (text or "frage").lower())
     return s.strip("-")[:60] or "frage"
@@ -543,14 +870,35 @@ def _vault_pfad():
     return p
 
 
+REDDIT_REGELN = """
+
+ZUSATZ FUER REDDIT — dort gelten andere Regeln als auf gutefrage:
+- NIEMALS Bueroflow, buroflow.de oder eines der Tools erwaehnen. Auch nicht
+  beilaeufig, auch nicht als "ich nutze da was". Eigenwerbung fliegt auf Reddit
+  sofort auf und kostet das Konto dauerhaft.
+- Kein Link auf eigene Seiten. Gar keiner.
+- Schreib wie ein Selbststaendiger, der die Frage aus eigener Erfahrung kennt.
+  Konkret, hilfreich, ohne Verkaufsabsicht. Wenn ein Tool wirklich zur Antwort
+  gehoert, nenne die gaengigen (Lexoffice, sevDesk, Elster) neutral mit.
+- Kein "Hallo" und kein "Viele Gruesse" — auf Reddit schreibt man direkt los.
+- Kuerzer als auf gutefrage. Drei bis sechs Saetze reichen meist.
+"""
+
+
 def entwurf_schreiben(frage, stil_kontext=""):
     titel = frage.get("titel", "")
     url = frage.get("url", "")
-    snap, err = fetch_page(url)
-    kontext = (snap or "")[:4000]
+    ist_reddit = "reddit" in str(frage.get("quelle", "")).lower()
+    # Reddit-Beitraege bringen ihren Text schon mit — kein Browser noetig
+    if ist_reddit and frage.get("text"):
+        kontext = frage["text"][:4000]
+    else:
+        snap, err = fetch_page(url)
+        kontext = (snap or "")[:4000]
+    system = DRAFT_SYS + (REDDIT_REGELN if ist_reddit else "")
     try:
         resp = client.messages.create(
-            model=MODEL, max_tokens=1200, system=DRAFT_SYS,
+            model=MODEL, max_tokens=1200, system=system,
             messages=[{"role": "user", "content":
                        f"FRAGE: {titel}\nURL: {url}\n\nSEITENINHALT:\n{kontext}\n\n"
                        f"RUIS STILPROFIL (aus frueheren Texten):\n{stil_kontext[:1500]}"}])
@@ -563,6 +911,15 @@ def entwurf_schreiben(frage, stil_kontext=""):
     antwort = (d.get("antwort") or "").strip()
     if not antwort:
         return None, "Leerer Entwurf."
+    # Doppelter Boden: Der Prompt verbietet Eigenwerbung auf Reddit, aber
+    # verlassen wuerde ich mich darauf nicht — ein gesperrtes Konto ist weg.
+    if ist_reddit:
+        verboten = [w for w in ("buroflow", "büroflow", "mahnflow", "mailflow",
+                                "angebotsflow", "e-rechnungsflow")
+                    if w in antwort.lower()]
+        if verboten:
+            print(f"  [rd] Entwurf verworfen — Eigenwerbung: {', '.join(verboten)}", flush=True)
+            return None, f"Entwurf enthielt Eigenwerbung ({', '.join(verboten)}) — verworfen."
 
     datei = f"{datetime.now().strftime('%Y-%m-%d')}_{_slug(titel)}.md"
     pfad = os.path.join(_vault_pfad(), datei)
@@ -593,12 +950,16 @@ def _bericht_zeile(f):
 def recherche(plattform="beide", mit_entwuerfen=True, max_entwuerfe=3, telegram=False):
     """Sucht frische Fragen, priorisiert 0-Antworten, schreibt Entwuerfe in den Vault.
     telegram=False (Standard): nichts wird verschickt — alles landet nur im Vault."""
+    QUELLEN_FEHLER.clear()
     fragen = []
     if plattform in ("beide", "gutefrage"):
         fragen += scan_gutefrage()
     if plattform in ("beide", "quora"):
         fragen += scan_quora()
+    if plattform in ("beide", "reddit"):
+        fragen += scan_reddit()
 
+    fortschritt("werte Treffer aus")
     # dedup + nur frische + nur unbekannte
     neu, gesehen_urls = [], set()
     for f in fragen:
@@ -613,10 +974,17 @@ def recherche(plattform="beide", mit_entwuerfen=True, max_entwuerfe=3, telegram=
         neu.append(f)
 
     if not neu:
-        msg = ("Heute keine neuen passenden Fragen."
-               if fragen else
-               "Keine passenden Fragen gefunden. Moegliche Gruende: nichts Frisches "
-               "zum Thema, oder Quellen nicht erreichbar — im Server-Log steht, welche.")
+        if fragen:
+            msg = "Heute keine neuen passenden Fragen."
+        elif QUELLEN_FEHLER:
+            # Wichtig: NICHT "nichts gefunden" behaupten, wenn gar nicht
+            # gesucht werden konnte. Das sind zwei verschiedene Aussagen.
+            msg = ("ACHTUNG: Es wurde nichts durchsucht — die Quellen waren nicht "
+                   "erreichbar. Das heisst NICHT, dass es keine Fragen gibt.")
+        else:
+            msg = "Keine passenden Fragen gefunden — nichts Frisches zum Thema."
+        if QUELLEN_FEHLER:
+            msg += "\n\nQuellen-Probleme:\n" + "\n".join("- " + f for f in QUELLEN_FEHLER)
         if telegram:
             send_telegram("🔍 Q&A-Recherche: " + msg)
         return msg
@@ -631,13 +999,25 @@ def recherche(plattform="beide", mit_entwuerfen=True, max_entwuerfe=3, telegram=
     entwuerfe = []
     if mit_entwuerfen:
         stil = recall_text("Schreibstil Rui gutefrage locker Umgangssprache", 3)
-        for f in neu[:max_entwuerfe]:
+        for i, f in enumerate(neu[:max_entwuerfe], 1):
+            fortschritt(f"Entwurf {i}/{min(len(neu), max_entwuerfe)}: {f.get('titel','')[:40]}")
             res, err = entwurf_schreiben(f, stil)
             if err:
                 mark_seen(f["url"], f.get("quelle", ""), f.get("titel", ""), f.get("antworten", 0))
                 entwuerfe.append(f"❌ {f.get('titel', '?')}: {err}")
                 continue
             mark_seen(f["url"], f.get("quelle", ""), f.get("titel", ""), f.get("antworten", 0), res["datei"])
+            # Reddit-Antworten gehen direkt raus, sofern alle Grenzen passen.
+            # Alles andere bleibt Entwurf — Rui postet selbst.
+            if "reddit" in str(f.get("quelle", "")).lower() and REDDIT_POSTEN:
+                ok, hinweis = reddit_antworten(f, res["antwort"])
+                if ok:
+                    entwuerfe.append(f"📤 Gepostet ({hinweis}): {f.get('titel', '?')}")
+                else:
+                    entwuerfe.append(f"✅ Entwurf: {f.get('titel', '?')} → seo/{res['datei']} "
+                                     f"(nicht gepostet: {hinweis})")
+                time.sleep(1)
+                continue
             if telegram:
                 send_telegram(_entwurf_block(f.get("titel", "?"), f.get("url", ""), res))
             entwuerfe.append(f"✅ Entwurf: {f.get('titel', '?')} → seo/{res['datei']}")
@@ -650,6 +1030,9 @@ def recherche(plattform="beide", mit_entwuerfen=True, max_entwuerfe=3, telegram=
         send_telegram(bericht)
     if entwuerfe:
         bericht += "\n\n" + "\n".join(entwuerfe)
+    if QUELLEN_FEHLER:
+        bericht += ("\n\n⚠️ Nicht alle Quellen waren erreichbar:\n"
+                    + "\n".join("- " + f for f in QUELLEN_FEHLER))
     bericht += "\n\nEntwuerfe liegen im Vault unter seo/ — bitte pruefen und selbst posten."
     return bericht
 
@@ -744,12 +1127,15 @@ def als_erledigt(url):
 # ── TOOLS ────────────────────────────────────────────────────
 TOOLS = [
     {"name": "recherche",
-     "description": "Sucht auf gutefrage.net und/oder Quora frische, fachlich passende Fragen (Prioritaet: 0 Antworten). Schreibt zu den besten Treffern Antwort-Entwuerfe in Ruis Stil, legt sie im Vault unter seo/ ab und schickt sie per Telegram. Postet nichts.",
+     "description": "Sucht auf gutefrage.net, Reddit und/oder Quora frische, fachlich passende Fragen (Prioritaet: 0 Antworten). Schreibt zu den besten Treffern Antwort-Entwuerfe in Ruis Stil und legt sie im Vault unter seo/ ab. Postet nichts — Rui gibt frei und postet selbst.",
      "input_schema": {"type": "object", "properties": {
-         "plattform": {"type": "string", "enum": ["beide", "gutefrage", "quora"]},
+         "plattform": {"type": "string", "enum": ["beide", "gutefrage", "quora", "reddit"], "description": "beide = gutefrage + Reddit (+ Quora falls aktiv)"},
          "mit_entwuerfen": {"type": "boolean", "description": "false = nur Liste, keine Entwuerfe"},
          "max_entwuerfe": {"type": "integer", "description": "wie viele Entwuerfe (Standard 3)"},
          "telegram": {"type": "boolean", "description": "true = Ergebnis zusaetzlich per Telegram schicken (Standard false, nur Vault)"}}}},
+    {"name": "reddit_status",
+     "description": "Zeigt, ob das Reddit-Konto posten darf: Alter, Karma, heutige Posts, Grenzen.",
+     "input_schema": {"type": "object", "properties": {}}},
     {"name": "entwurf",
      "description": "Schreibt einen Antwort-Entwurf zu EINER konkreten Frage-URL (gutefrage oder Quora).",
      "input_schema": {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}},
@@ -787,6 +1173,17 @@ def run_tool(name, inp):
         return tagesrecherche("manuell angestossen")
     if name == "senden":
         return entwuerfe_senden(limit=min(int(inp.get("limit") or 5), 10))
+    if name == "reddit_status":
+        zeilen = [f"Posten: {'aktiv' if REDDIT_POSTEN else 'abgeschaltet'}"]
+        ok, info = _reddit_konto_pruefen()
+        zeilen.append(f"Konto: {info}")
+        posts = _rd_heute()
+        zeilen.append(f"Heute gepostet: {len(posts)}/{REDDIT_MAX_TAG}"
+                      + (" — " + ", ".join("r/" + p.get("sub", "?") for p in posts) if posts else ""))
+        zeilen.append(f"Grenzen: {REDDIT_ABSTAND} Min Abstand, Beitraege < {REDDIT_MAX_ALTER}h, "
+                      f"< {REDDIT_MAX_KOMM} Kommentare, nie 2x im selben Sub am Tag")
+        zeilen.append("Subreddits: " + ", ".join("r/" + x for x in REDDIT_SUBS))
+        return "\n".join(zeilen)
     if name == "entwurf":
         return entwurf_fuer_url((inp.get("url") or "").strip())
     if name == "offene_entwuerfe":
@@ -802,8 +1199,15 @@ def run_tool(name, inp):
 
 SYSTEM = """Du bist der SEO/Q&A-BOT von Bueroflow, Arbeiter unter dem Bueroflow-CEO.
 
-DEINE AUFGABE: Auf gutefrage.net und Quora frische Fragen finden, bei denen Rui mit einer
-guten Antwort sichtbar wird — und ihm fertige Entwuerfe liefern.
+DEINE AUFGABE: Auf gutefrage.net, Reddit und Quora frische Fragen finden, bei denen Rui
+mit einer guten Antwort sichtbar wird — und ihm fertige Entwuerfe liefern.
+
+WERKZEUG-ERGEBNISSE GIBST DU UNVERAENDERT WEITER:
+Steht in einem Ergebnis "Quellen-Probleme" oder "nicht erreichbar", MUSST du Rui das
+sagen — vollstaendig und woertlich, mit der Fehlermeldung. Formuliere es NIE zu
+"heute nichts Passendes gefunden" um. Das sind zwei voellig verschiedene Aussagen:
+"nichts gefunden" heisst gesucht und leer, "nicht erreichbar" heisst gar nicht gesucht.
+Erfinde niemals ein Ergebnis fuer eine Quelle, die ausgefallen ist.
 
 PRIORITAET (wichtigster Hebel zuerst):
 1. Fragen mit 0 Antworten aus den letzten ~24h (dort ist man Erster)
@@ -1042,12 +1446,36 @@ def daily_thread():
         time.sleep(60)
 
 
+def _antwort_senden(r, reply_q, text):
+    """Antwort auf den Bus legen.
+
+    Die Funktion wurde dreimal aufgerufen, aber nie definiert — jede Anfrage
+    endete deshalb mit einem NameError, nachdem die Antwort schon erzeugt war.
+    """
+    try:
+        r.rpush(reply_q, text or "(leer)")
+        r.expire(reply_q, 900)
+    except Exception as e:
+        print(f"  [reply] {type(e).__name__}: {e}", flush=True)
+
+
 def main():
     protokoll_init()
     print("=" * 58, flush=True)
     print("  SEO/Q&A-BOT — gutefrage + Quora (read-only)", flush=True)
     print(f"  Telegram  : {'aktiv' if (TELEGRAM_TOKEN and TELEGRAM_CHAT) else 'nicht konfiguriert'}", flush=True)
     print(f"  Vault     : {VAULT_DIR}/{VAULT_SUB}/", flush=True)
+    print(f"  Reddit    : "
+          f"{', '.join('r/' + x for x in REDDIT_SUBS) if REDDIT_ID else 'nicht eingerichtet'}",
+          flush=True)
+    if REDDIT_POSTEN:
+        ok, info = _reddit_konto_pruefen()
+        print(f"  Posten    : {'AKTIV — ' + info if ok else 'gesperrt — ' + info}", flush=True)
+        print(f"              max {REDDIT_MAX_TAG}/Tag, {REDDIT_ABSTAND} Min Abstand, "
+              f"nur Beitraege < {REDDIT_MAX_ALTER}h mit < {REDDIT_MAX_KOMM} Kommentaren",
+              flush=True)
+    else:
+        print("  Posten    : aus (REDDIT_POSTEN=1 zum Aktivieren)", flush=True)
     print(f"  Tageslauf : {DAILY_TIME or 'aus'} ({DAILY_ENTWUERFE} Entwuerfe, ohne Telegram)", flush=True)
     print("  Postet nichts — nur Entwuerfe fuer Rui.", flush=True)
     print("=" * 58, flush=True)
@@ -1094,6 +1522,8 @@ def main():
                 _antwort_senden(r, reply_q, "SEO-Kurzzeitgedaechtnis geleert.")
                 continue
             print(f"  Auftrag: {text[:80]}", flush=True)
+            FORTSCHRITT["r"], FORTSCHRITT["id"] = r, req_id
+            fortschritt("denkt nach")
             history = load_history(r)
             try:
                 answer = think(history, text)
@@ -1101,6 +1531,11 @@ def main():
                 answer = f"Fehler: {type(e).__name__}: {e}"
             save_history(r, history)
             print(f"  SEO: {answer[:100]}\n", flush=True)
+            try:
+                r.delete(f"bot:seo:fortschritt:{req_id}")
+            except Exception:
+                pass
+            FORTSCHRITT["id"] = ""
             _antwort_senden(r, reply_q, answer)
         except KeyboardInterrupt:
             break

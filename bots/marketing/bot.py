@@ -776,6 +776,34 @@ def _post_ablegen(text, creative="", layout=""):
         return ""
 
 
+# ── FORTSCHRITT ──────────────────────────────────────────────
+# Ein Creative durchlaeuft leicht acht Tool-Runden plus Bildgenerierung.
+# Ohne Zwischenstand wirkt das im Dashboard wie ein Haenger.
+FORTSCHRITT = {"r": None, "id": ""}
+
+_TOOL_KLARTEXT = {
+    "recall": "sucht im Gedaechtnis",
+    "remember": "merkt sich etwas",
+    "skill_suchen": "sucht passenden Skill",
+    "load_skill": "laedt Skill",
+    "skill_laden": "laedt Skill",
+    "generate_image": "generiert Bild (kann 1-3 Min dauern)",
+    "render_creative": "rendert Creative",
+    "ceo_review": "holt CEO-Freigabe",
+    "vault_note": "legt Notiz ab",
+    "web_search": "recherchiert im Web",
+}
+
+
+def fortschritt(text):
+    if not (FORTSCHRITT["r"] and FORTSCHRITT["id"]):
+        return
+    try:
+        FORTSCHRITT["r"].setex(f"bot:marketing:fortschritt:{FORTSCHRITT['id']}", 900, text)
+    except Exception:
+        pass
+
+
 # ── TATSACHEN-PROTOKOLL ──────────────────────────────────────
 # Der Bot hat frueher am Ende einer Anfrage geraten, was er getan hat:
 # mal erfundene Pfade, mal eine falsche "ich habe gar nichts gemacht"-Beichte.
@@ -1057,6 +1085,7 @@ def think(history, user_text):
             elif block.type == "tool_use":
                 a_content.append({"type": "tool_use", "id": block.id,
                                   "name": block.name, "input": block.input})
+                fortschritt(_TOOL_KLARTEXT.get(block.name, block.name))
                 result = run_tool(block.name, block.input or {})
                 _protokoll_merken(block.name, result)
                 print(f"  [tool] {block.name} -> {str(result)[:90]}", flush=True)
@@ -1174,6 +1203,8 @@ def main():
                 _antwort_senden(r, reply_q, "Skills:\n" + "\n".join(f"- {n}" for n in SKILL_INDEX))
                 continue
             print(f"  Auftrag: {text[:80]}", flush=True)
+            FORTSCHRITT["r"], FORTSCHRITT["id"] = r, req_id
+            fortschritt("denkt nach")
             history = load_history(r)
             try:
                 answer = think(history, text)
@@ -1182,6 +1213,11 @@ def main():
                 print(f"  [think] {answer}", flush=True)
             save_history(r, history)
             print(f"  Marketing: {answer[:100]}\n", flush=True)
+            try:
+                r.delete(f"bot:marketing:fortschritt:{req_id}")
+            except Exception:
+                pass
+            FORTSCHRITT["id"] = ""
             _antwort_senden(r, reply_q, answer)
         except KeyboardInterrupt:
             break

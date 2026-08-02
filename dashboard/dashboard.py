@@ -51,25 +51,30 @@ IMG_EXT  = (".png", ".jpg", ".jpeg", ".webp", ".gif")
 
 # Bot-Registry: Queue-Namen + Hierarchie fuers Frontend
 BOTS = {
-    "jarvis":       {"label": "JARVIS",        "inbox": "jarvis:inbox",        "reply": "jarvis:reply:{id}",        "parent": None,           "desc": "orchestrator",              "history": "jarvis:history",
-                     "rolle": "Zentrale Steuerung — nimmt Auftraege an, delegiert an die Fachbots, verwaltet Gedaechtnis und Auftraege.",
-                     "faehig": ["Gedaechtnis (Langzeit + naechtliche Konsolidierung)", "Mail lesen (IONOS + Gmail)", "Google-Kalender", "Web-Recherche", "GitHub lesen", "Bueroflow-Zahlen", "Vault", "Auftrags-System", "Aufgabenverwaltung"],
+    "jarvis":       {"label": "JARVIS",        "inbox": "jarvis:inbox",        "reply": "jarvis:reply:{id}",        "parent": None,           "desc": "Orchestrator",              "history": "jarvis:history",
+                     "rolle": "Zentrale Steuerung — nimmt Aufträge an, delegiert an die Fachbots, verwaltet Gedächtnis und Aufträge.",
+                     "lauf": "Morgen-Durchgang 07:00 · Gedächtnis-Konsolidierung 03:00 · Doku nach dem Morgen-Lauf",
+                     "faehig": ["Gedächtnis (Langzeit + nächtliche Konsolidierung)", "Mail lesen (IONOS + Gmail)", "Google-Kalender", "Web-Recherche", "GitHub lesen", "Büroflow-Zahlen", "Vault", "Auftrags-System", "Aufgabenverwaltung"],
                      "bib": True},
-    "buroflow-ceo": {"label": "CEO",           "inbox": "bot:ceo:inbox",       "reply": "bot:ceo:reply:{id}",       "parent": "jarvis",       "desc": "strategie & entscheidungen", "history": "bot:ceo:history",
-                     "rolle": "Strategische Entscheidungen fuer Bueroflow, Qualitaetskontrolle der Marketing-Entwuerfe.",
-                     "faehig": ["Entscheidungs-Framework", "Review von Marketing-Entwuerfen", "Web-Recherche", "Mail lesen", "delegiert an Marketing und SEO"],
+    "buroflow-ceo": {"label": "BÜROFLOW CEO", "inbox": "bot:ceo:inbox",       "reply": "bot:ceo:reply:{id}",       "parent": "jarvis",       "desc": "Strategie & Entscheidungen", "history": "bot:ceo:history",
+                     "rolle": "Strategische Entscheidungen für Büroflow, Qualitätskontrolle der Entwürfe.",
+                     "lauf": "Kein fester Lauf — arbeitet auf Zuruf von JARVIS",
+                     "faehig": ["Entscheidungs-Framework", "Review von Entwürfen", "Web-Recherche", "Mail lesen", "delegiert an Social Media und SEO"],
                      "bib": True},
-    "marketing":    {"label": "MARKETING",     "inbox": "bot:marketing:inbox", "reply": "bot:marketing:reply:{id}", "parent": "buroflow-ceo", "desc": "content, creatives, skills", "history": "bot:marketing:history",
+    "marketing":    {"label": "SOCIAL MEDIA", "inbox": "bot:marketing:inbox", "reply": "bot:marketing:reply:{id}", "parent": "buroflow-ceo", "desc": "Content, Creatives, Skills", "history": "bot:marketing:history",
                      "rolle": "Erstellt Posts und Creatives — mit Brand-Pflicht, Layout-Vielfalt und CEO-Review.",
+                     "lauf": "Kein fester Lauf — arbeitet auf Zuruf",
                      "faehig": ["Creatives rendern (14 Layouts)", "Bilder generieren (MuAPI)", "48 Marketing-Spezialskills", "CEO-Review einholen", "Texte im Vault ablegen"],
                      "bib": True},
-    "immo":         {"label": "IMMO",          "inbox": "bot:immo:inbox",      "reply": "bot:immo:reply:{id}",      "parent": "jarvis",       "desc": "rendite-analysen, telegram", "history": "bot:immo:history",
+    "immo":         {"label": "IMMO",          "inbox": "bot:immo:inbox",      "reply": "bot:immo:reply:{id}",      "parent": "jarvis",       "desc": "Rendite-Analysen, Telegram", "history": "bot:immo:history",
                      "rolle": "Bewertet Immobilien nach Ruis Kriterien: 4 % Rendite, 5,5 % Zins, 11 % Nebenkosten.",
-                     "faehig": ["Rendite-Berechnung (beide Szenarien)", "Plausibilitaetspruefung", "ImmoScout-Mails auswerten", "Kleinanzeigen-Suchen", "Telegram-Meldungen"],
+                     "lauf": "Prüft eingehende ImmoScout-Mails laufend",
+                     "faehig": ["Rendite-Berechnung (beide Szenarien)", "Plausibilitätsprüfung", "ImmoScout-Mails auswerten", "Kleinanzeigen-Suchen", "Telegram-Meldungen"],
                      "bib": False},
-    "seo":          {"label": "SEO",           "inbox": "bot:seo:inbox",       "reply": "bot:seo:reply:{id}",       "parent": "buroflow-ceo", "desc": "gutefrage + quora, entwuerfe", "history": "bot:seo:history",
-                     "rolle": "Findet taeglich passende Fragen auf gutefrage.net und schreibt Antwort-Entwuerfe in Ruis Stil.",
-                     "faehig": ["Taeglicher Lauf um 08:00", "Relevanzfilter", "Entwuerfe in vault/seo/", "Postet selbst nichts"],
+    "seo":          {"label": "SEO",           "inbox": "bot:seo:inbox",       "reply": "bot:seo:reply:{id}",       "parent": "buroflow-ceo", "desc": "gutefrage.net, Entwürfe", "history": "bot:seo:history",
+                     "rolle": "Findet täglich passende Fragen auf gutefrage.net und schreibt Antwort-Entwürfe in Ruis Stil.",
+                     "lauf": "Tagesrecherche täglich (Uhrzeit aus SEO_DAILY_TIME, derzeit 19:00)",
+                     "faehig": ["Relevanzfilter nach Themen", "Relevanzfilter", "Entwürfe in vault/seo/", "Postet selbst nichts — Rui gibt frei"],
                      "bib": False},
 }
 
@@ -79,6 +84,11 @@ app = FastAPI()
 def pg():
     return psycopg2.connect(host=PG_HOST, port=PG_PORT, user=PG_USER,
                             password=PG_PASS, dbname=PG_DB, connect_timeout=5)
+
+
+# Die API rechnet in US-Dollar. Fuer die Anzeige wird umgerechnet —
+# nur das Symbol zu tauschen waere schlicht falsch.
+EUR_KURS = float(os.getenv("EUR_KURS", "0.87"))   # Euro je US-Dollar
 
 
 def _spalten_ergaenzen():
@@ -116,7 +126,10 @@ def count_listeners():
 @app.get("/api/stats")
 def stats():
     listeners = count_listeners()
-    out = {"listeners": listeners, "expected": len(BOTS),
+    # Die Telegram-Bruecke wartet ebenfalls mit blpop (auf Bot-Antworten) und
+    # wird mitgezaehlt, ist aber kein Bot in BOTS. Ohne +1 stand hier dauerhaft
+    # 6/5, obwohl alles korrekt lief.
+    out = {"listeners": listeners, "expected": len(BOTS) + 1,
            "today": 0.0, "month": 0.0, "total": 0.0,
            "requests": 0, "queue": 0, "bots": [], "log": []}
     try:
@@ -146,9 +159,10 @@ def stats():
                 known[b["bot"]] = {"cost": float(b["cost"]), "requests": int(b["requests"]),
                                    "recent": bool(b["recent"]),
                                    "last_seen": b["last_seen"].strftime("%d.%m. %H:%M") if b["last_seen"] else "-"}
+            # 8 Zeilen passten komplett ins Panel — es gab nichts zu scrollen.
             cur.execute("""
                 SELECT bot, model, cost_usd, created_at FROM cost_ledger
-                ORDER BY created_at DESC LIMIT 8""")
+                ORDER BY created_at DESC LIMIT 60""")
             for e in cur.fetchall():
                 out["log"].append({"t": e["created_at"].strftime("%H:%M:%S"), "bot": e["bot"],
                                    "cost": float(e["cost_usd"])})
@@ -191,14 +205,26 @@ def chat(payload: dict = Body(...)):
     text = (payload.get("text") or "").strip()
     if target not in BOTS:
         return JSONResponse({"error": f"Unbekanntes Ziel: {target}"}, status_code=400)
-    if not text:
+    bilder = payload.get("bilder") or []
+    if not text and not bilder:
         return JSONResponse({"error": "Leere Nachricht"}, status_code=400)
+    # Bilder begrenzen: 5 Stueck, je 4 MB Base64 — schuetzt Redis und die Kosten
+    saubere = []
+    for b in bilder[:5]:
+        daten = (b or {}).get("data") or ""
+        if len(daten) > 4_000_000:
+            continue
+        saubere.append({"media_type": (b.get("media_type") or "image/png"),
+                        "data": daten})
     meta = BOTS[target]
     try:
         r = rds()
         req_id = str(uuid.uuid4())
-        r.rpush(meta["inbox"], json.dumps({"id": req_id, "text": text}, ensure_ascii=False))
-        return JSONResponse({"id": req_id, "target": target})
+        auftrag = {"id": req_id, "text": text}
+        if saubere:
+            auftrag["bilder"] = saubere
+        r.rpush(meta["inbox"], json.dumps(auftrag, ensure_ascii=False))
+        return JSONResponse({"id": req_id, "target": target, "bilder": len(saubere)})
     except Exception as e:
         return JSONResponse({"error": str(e)}, status_code=500)
 
@@ -244,7 +270,13 @@ def chat_poll(target: str = "jarvis", id: str = ""):
         r = rds(socket_timeout=20)
         resp = r.blpop(key, timeout=8)
         if resp is None:
-            return JSONResponse({"status": "pending"})
+            # Zwischenstand mitgeben, damit im Chat nicht nur eine Uhr laeuft
+            schritt = ""
+            try:
+                schritt = r.get(f"bot:{target.replace('buroflow-', '')}:fortschritt:{id}") or ""
+            except Exception:
+                pass
+            return JSONResponse({"status": "pending", "schritt": schritt})
         return JSONResponse({"status": "done", "answer": resp[1]})
     except Exception as e:
         # Verbindungsproblem heisst nicht, dass der Bot fertig ist -> weiter pollen
@@ -574,15 +606,17 @@ def woche():
 
             offen = []
             for r in sicher("SELECT titel, to_char(created_at,'DD.MM.'), id FROM qa_seen "
-                            "WHERE entwurf_datei <> '' AND NOT erledigt ORDER BY id DESC LIMIT 4"):
+                            "WHERE entwurf_datei <> '' AND NOT erledigt ORDER BY id DESC LIMIT 8"):
                 offen.append({"text": (r[0] or "Entwurf")[:70],
                               "detail": f"Entwurf vom {r[1]} — zu posten", "heute": False,
                               "id": r[2], "typ": "qa", "quelle": "SEO"})
             # immo_seen hatte urspruenglich keine Spalte "erledigt" — siehe _spalten_ergaenzen()
+            # Frueher LIMIT 3 — bei einem Lauf mit 8 Treffern fielen 5 unter den Tisch.
+            # Jetzt 15 und ein laengeres Fenster, das Panel ist ohnehin scrollbar.
             for r in sicher("SELECT DISTINCT ON (titel) titel, rendite, id FROM immo_seen "
                             "WHERE qualifiziert AND NOT COALESCE(erledigt, FALSE) "
-                            "AND created_at > now() - interval '3 days' "
-                            "ORDER BY titel, created_at DESC LIMIT 3"):
+                            "AND created_at > now() - interval '7 days' "
+                            "ORDER BY titel, created_at DESC LIMIT 15"):
                 offen.append({"text": (r[0] or "Objekt")[:70],
                               "detail": f"{float(r[1] or 0):.1f} % Rendite — prüfen",
                               "heute": False, "id": r[2], "typ": "immo", "quelle": "IMMO"})
@@ -626,7 +660,9 @@ def bot_details(id: str = ""):
     out = {"id": id, "label": meta["label"], "desc": meta.get("desc", ""),
            "rolle": meta.get("rolle", ""), "faehig": meta.get("faehig", []),
            "kategorien": _skill_kategorien() if meta.get("bib") else [],
-           "arbeiten": [], "kosten_7d": 0.0, "requests_7d": 0}
+           "lauf": meta.get("lauf", ""),
+           "arbeiten": [], "kosten_7d": 0.0, "requests_7d": 0,
+           "kosten_heute": 0.0, "requests_heute": 0}
     try:
         conn = pg()
         with conn, conn.cursor() as cur:
@@ -642,6 +678,13 @@ def bot_details(id: str = ""):
                             "WHERE bot = %s AND created_at > now() - interval '7 days'", (id,))
                 row = cur.fetchone()
                 out["kosten_7d"] = float(row[0]); out["requests_7d"] = int(row[1])
+            except Exception:
+                conn.rollback()
+            try:
+                cur.execute("SELECT COALESCE(SUM(cost_usd),0), COUNT(*) FROM cost_ledger "
+                            "WHERE bot = %s AND created_at::date = CURRENT_DATE", (id,))
+                row = cur.fetchone()
+                out["kosten_heute"] = float(row[0]); out["requests_heute"] = int(row[1])
             except Exception:
                 conn.rollback()
         conn.close()
@@ -747,7 +790,8 @@ def vault_delete(payload: dict = Body(...)):
 
 @app.get("/", response_class=HTMLResponse)
 def index():
-    return HTML
+    # Kurs erst hier einsetzen, damit eine .env-Aenderung ohne Rebuild greift
+    return HTML.replace("__EUR_KURS__", str(EUR_KURS))
 
 
 HTML = """<!DOCTYPE html>
@@ -912,7 +956,7 @@ HTML = """<!DOCTYPE html>
   .bmAbschnitt:last-child { margin-bottom: 0; }
   .bmTitel { font-size: 8.5px; letter-spacing: .3em; color: var(--cyan); margin-bottom: 7px; opacity: .85; }
   .bmZeile { display: flex; gap: 8px; padding: 3px 0; color: var(--txt); }
-  .bmZeile::before { content: "\2022"; color: var(--green); flex: none; }
+  .bmZeile::before { content: "•"; color: var(--green); flex: none; }
   .bmChips { display: flex; flex-wrap: wrap; gap: 6px; }
   .bmChip { font-size: 9.5px; padding: 4px 9px; border-radius: 12px; color: var(--txt);
             background: rgba(89, 215, 255, .09); border: 1px solid rgba(89, 215, 255, .18); }
@@ -966,7 +1010,7 @@ HTML = """<!DOCTYPE html>
             height: 27px; overflow: hidden; display: -webkit-box; -webkit-line-clamp: 2;
             -webkit-box-orient: vertical; }
   .agNode { display: flex; flex-direction: column; }
-  .agSpark { margin-top: auto; }
+  .agHint { margin-top: auto; color: var(--dim); font-size: 8.5px; opacity: .7; }
   .agDiv { border-top: 0.5px solid rgba(255, 255, 255, .09); margin: 0 0 8px; }
   .agRow { display: flex; align-items: center; justify-content: space-between; font-size: 9.5px;
            color: var(--dim); margin-bottom: 4px; font-variant-numeric: tabular-nums; }
@@ -995,7 +1039,10 @@ HTML = """<!DOCTYPE html>
   }
 
   .logbox { font-size: 10.5px; display: flex; flex-direction: column; gap: 5px;
-            max-height: 130px; overflow: hidden; }
+            max-height: 190px; overflow-y: auto; padding-right: 8px; margin-right: -4px; }
+  /* Ohne flex: none schrumpfen die Zeilen im begrenzten Flex-Container auf
+     Hoehe 0, sobald mehr Eintraege da sind als hineinpassen. */
+  .logbox > div { flex: 0 0 auto; }
   .logbox div { color: var(--dim); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .logbox b { color: var(--cyan); font-weight: 400; }
   #heuteListe { max-height: 34vh; overflow-y: auto; padding-right: 8px; margin-right: -4px; }
@@ -1058,6 +1105,20 @@ HTML = """<!DOCTYPE html>
              border: 1px solid rgba(89, 215, 255, .1); }
   .msg.bot b { color: var(--cyan); font-weight: 400; font-size: 10px; letter-spacing: .2em;
                display: block; margin-bottom: 4px; }
+  .clip { display: flex; align-items: center; justify-content: center; flex: 0 0 auto;
+          width: 38px; border-radius: 8px; cursor: pointer; color: var(--dim);
+          background: rgba(9, 22, 33, .7); border: 1px solid var(--glass-line);
+          transition: color .15s, border-color .15s; }
+  .clip:hover { color: var(--cyan); border-color: rgba(89, 215, 255, .45); }
+  .bildleiste:empty { display: none; }
+  .bildleiste { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 8px; }
+  .bildleiste .vs { position: relative; }
+  .bildleiste img { height: 44px; border-radius: 4px; display: block;
+                    border: 1px solid var(--glass-line); }
+  .bildleiste .weg { position: absolute; top: -5px; right: -5px; width: 15px; height: 15px;
+                     line-height: 14px; text-align: center; font-size: 10px; cursor: pointer;
+                     border-radius: 50%; background: #14232f; color: var(--red);
+                     border: 1px solid rgba(255,95,107,.5); }
   .chatbar { display: flex; gap: 8px; margin-top: 10px; }
   .chatbar select, .chatbar input {
     background: rgba(9, 22, 33, .7); border: 1px solid var(--glass-line); color: var(--txt);
@@ -1066,7 +1127,9 @@ HTML = """<!DOCTYPE html>
   .chatbar select { width: 92px; }
   .chatbar input { flex: 1; }
   .chatbar input:focus { border-color: var(--cyan-dim); box-shadow: 0 0 12px rgba(89, 215, 255, .15); }
-  .typing { font-size: 10px; color: var(--dim); letter-spacing: .3em; height: 14px; margin-top: 4px; }
+  .typing { font-size: 10px; color: var(--dim); letter-spacing: .12em; height: 14px;
+            margin-top: 4px; white-space: nowrap; overflow: hidden;
+            text-overflow: ellipsis; }
   .verlaufmark { text-align: center; font-size: 8.5px; letter-spacing: .25em; color: var(--dim);
                  margin: 6px 0 2px; opacity: .55; }
 
@@ -1495,8 +1558,17 @@ HTML = """<!DOCTYPE html>
         <option value="immo">IMMO</option>
         <option value="seo">SEO</option>
       </select>
+      <label class="clip" for="datei" title="Screenshot anhängen">
+        <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor"
+             stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+          <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66
+                   l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"/>
+        </svg>
+      </label>
+      <input type="file" id="datei" accept="image/*" multiple style="display:none">
       <input id="input" placeholder="Nachricht..." autocomplete="off">
     </div>
+    <div class="bildleiste" id="bildleiste"></div>
   </div>
 
   <div class="braindetail panel" id="braindetail" style="display:none">
@@ -2449,7 +2521,15 @@ document.addEventListener('keydown', function(ev) {
 
 /* ── Helpers ── */
 function esc(s) { return String(s).replace(/[&<>"]/g, function(c) { return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]; }); }
-function fmt(n) { return '$' + n.toFixed(4); }
+var EUR_KURS = __EUR_KURS__;
+/* Betraege einheitlich in Euro mit zwei Nachkommastellen und Komma.
+   Umrechnung aus US-Dollar, weil die API in Dollar abrechnet. */
+function fmt(n) {
+  var e = (Number(n) || 0) * EUR_KURS;
+  return e.toLocaleString('de-DE', { minimumFractionDigits: 2,
+                                     maximumFractionDigits: 2 }) + ' \u20AC';
+}
+
 
 /* ── Uhr + Session ── */
 var t0 = Date.now();
@@ -2636,11 +2716,6 @@ function renderAgents(bots) {
     var isRoot = !b.parent;
     var depth = depthOf[b.id] || 0;
     var isBusy = busyIds.indexOf(b.id) >= 0;
-    var maxSpark = Math.max.apply(null, (b.spark || [0]).concat([0.0001]));
-    var bars = (b.spark || [0, 0, 0, 0, 0, 0]).map(function(v) {
-      var h = Math.max(2, Math.round((v / maxSpark) * 15));
-      return '<span style="height:' + h + 'px;background:' + col + (v > 0 ? '88' : '26') + '"></span>';
-    }).join('');
     var mono = esc(b.label.substring(0, 2).toUpperCase());
     var enterDelay = firstRender ? (' style-delay') : '';
     html += '<div class="agNode' + (isBusy ? ' busy' : '') + (isRoot ? ' agCoreNode' : '') + (firstRender ? ' enter' : '') +
@@ -2659,8 +2734,7 @@ function renderAgents(bots) {
       '<div class="agRow"><span class="l"><span class="agPing' + (b.online ? ' on' : '') + '" style="background:' +
       (b.online ? col : 'var(--dim)') + '; color:' + col + '"></span>' +
       (isBusy ? 'DENKT ...' : (b.online ? 'ONLINE' : 'STANDBY')) + '</span><span class="cost">' + fmt(b.cost) + '</span></div>' +
-      '<div class="agRow"><span>requests</span><span>' + b.requests + '</span></div>' +
-      '<div class="agSpark">' + bars + '</div>' +
+      '<div class="agRow agHint"><span>Kosten 7 Tage</span></div>' +
       '</div>';
   });
 
@@ -2792,15 +2866,85 @@ document.getElementById('target').addEventListener('change', function() {
 });
 ladeVerlauf(document.getElementById('target').value);
 
+/* Angehaengte Screenshots. Sie werden vor dem Versand verkleinert —
+   ein Vollbild-Screenshot kostet sonst ein Vielfaches, ohne lesbarer zu sein. */
+var anhaenge = [];
+
+function zeigeAnhaenge() {
+  var leiste = document.getElementById('bildleiste');
+  leiste.innerHTML = anhaenge.map(function(b, i) {
+    return '<span class="vs"><img src="data:' + b.media_type + ';base64,' + b.data + '">' +
+           '<span class="weg" data-i="' + i + '">\u2715</span></span>';
+  }).join('');
+}
+
+document.getElementById('bildleiste').addEventListener('click', function(ev) {
+  var i = ev.target && ev.target.getAttribute('data-i');
+  if (i === null || i === undefined) return;
+  anhaenge.splice(parseInt(i, 10), 1);
+  zeigeAnhaenge();
+});
+
+function verkleinern(file) {
+  return new Promise(function(fertig) {
+    var leser = new FileReader();
+    leser.onload = function() {
+      var img = new Image();
+      img.onload = function() {
+        var max = 1400;
+        var w = img.width, h = img.height;
+        if (w > max || h > max) {
+          var f = Math.min(max / w, max / h);
+          w = Math.round(w * f); h = Math.round(h * f);
+        }
+        var c = document.createElement('canvas');
+        c.width = w; c.height = h;
+        c.getContext('2d').drawImage(img, 0, 0, w, h);
+        var url = c.toDataURL('image/jpeg', 0.85);
+        fertig({ media_type: 'image/jpeg', data: url.split(',')[1] });
+      };
+      img.onerror = function() { fertig(null); };
+      img.src = leser.result;
+    };
+    leser.onerror = function() { fertig(null); };
+    leser.readAsDataURL(file);
+  });
+}
+
+document.getElementById('datei').addEventListener('change', async function(ev) {
+  var dateien = Array.prototype.slice.call(ev.target.files || []);
+  for (var i = 0; i < dateien.length && anhaenge.length < 5; i++) {
+    var b = await verkleinern(dateien[i]);
+    if (b) anhaenge.push(b);
+  }
+  ev.target.value = '';
+  zeigeAnhaenge();
+});
+
+/* Einfuegen aus der Zwischenablage (Strg+V nach einem Screenshot) */
+input.addEventListener('paste', async function(ev) {
+  var items = (ev.clipboardData || {}).items || [];
+  for (var i = 0; i < items.length; i++) {
+    if (items[i].type && items[i].type.indexOf('image') === 0 && anhaenge.length < 5) {
+      var b = await verkleinern(items[i].getAsFile());
+      if (b) { anhaenge.push(b); zeigeAnhaenge(); }
+    }
+  }
+});
+
 input.addEventListener('keydown', async function(ev) {
   if (ev.key !== 'Enter' || busy) return;
   var text = input.value.trim();
-  if (!text) return;
+  if (!text && !anhaenge.length) return;
   var target = document.getElementById('target').value;
   input.value = '';
   var leer = msgs.querySelector('.empty');
   if (leer) leer.remove();
-  addMsg('me', '', text);
+  var mitgeschickt = anhaenge.slice();
+  anhaenge = [];
+  zeigeAnhaenge();
+  addMsg('me', '', text + (mitgeschickt.length ?
+        ' [' + mitgeschickt.length + ' Bild' + (mitgeschickt.length > 1 ? 'er' : '') + ']' : ''));
   busy = true;
   setEnergy(1);
   document.body.classList.add('thinking');
@@ -2813,14 +2957,16 @@ input.addEventListener('keydown', async function(ev) {
   }
   var ticker = setInterval(function() {
     document.getElementById('typing').textContent =
-      target.toUpperCase() + ' ARBEITET ... ' + laufzeit();
+      target.toUpperCase() + ' ARBEITET ... ' + laufzeit() +
+      (schrittText ? ' \u00b7 ' + schrittText : '');
   }, 1000);
+  var schrittText = '';
   document.getElementById('typing').textContent = target.toUpperCase() + ' ARBEITET ... 00:00';
 
   try {
     var r = await fetch('/api/chat', { method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ target: target, text: text }) });
+      body: JSON.stringify({ target: target, text: text, bilder: mitgeschickt }) });
     var d = await r.json();
     if (d.error) {
       addMsg('bot', 'SYSTEM', 'Fehler: ' + d.error);
@@ -2836,6 +2982,9 @@ input.addEventListener('keydown', async function(ev) {
         } catch (e) {
           await new Promise(function(res) { setTimeout(res, 3000); });
           continue;
+        }
+        if (p.schritt) {
+          schrittText = p.schritt.length > 38 ? p.schritt.slice(0, 36) + '\u2026' : p.schritt;
         }
         if (p.status === 'done') { antwort = p.answer; break; }
         if (p.status === 'error') { fehler = p.error; break; }
@@ -2998,9 +3147,12 @@ async function botDetails(id) {
     if (b.rolle) {
       h += '<div class="bmAbschnitt"><div class="bmTitel">ROLLE</div>' + esc(b.rolle) + '</div>';
     }
-    h += '<div class="bmAbschnitt"><div class="bmTitel">ZAHLEN (7 TAGE)</div><div class="bmZahlen">' +
-      '<div class="bmZahl"><div class="v">' + fmt(b.kosten_7d || 0) + '</div><div class="k">KOSTEN</div></div>' +
-      '<div class="bmZahl"><div class="v">' + (b.requests_7d || 0) + '</div><div class="k">AUFRUFE</div></div>' +
+    if (b.lauf) {
+      h += '<div class="bmAbschnitt"><div class="bmTitel">WANN ER LÄUFT</div>' + esc(b.lauf) + '</div>';
+    }
+    h += '<div class="bmAbschnitt"><div class="bmTitel">KOSTEN</div><div class="bmZahlen">' +
+      '<div class="bmZahl"><div class="v">' + fmt(b.kosten_heute || 0) + '</div><div class="k">HEUTE</div></div>' +
+      '<div class="bmZahl"><div class="v">' + fmt(b.kosten_7d || 0) + '</div><div class="k">7 TAGE</div></div>' +
       '</div></div>';
     if ((b.faehig || []).length) {
       h += '<div class="bmAbschnitt"><div class="bmTitel">WAS ER KANN</div>' +
