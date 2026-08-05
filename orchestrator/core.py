@@ -45,6 +45,11 @@ PG_PASS = os.getenv("POSTGRES_PASSWORD", "")
 PG_DB   = os.getenv("POSTGRES_DB", "jarvis_brain")
 
 MODEL       = os.getenv("ORCHESTRATOR_MODEL", "claude-sonnet-4-6")
+SPAR_MODEL  = os.getenv("SPAR_MODEL", "claude-haiku-4-5-20251001")
+# Tagesbudget in US-Dollar: ab WARN kommt eine Telegram-Meldung, ab HART
+# laeuft alles auf dem guenstigen Modell weiter (kein Abschalten).
+BUDGET_WARN = float(os.getenv("BUDGET_WARN_USD", "1.50"))
+BUDGET_HART = float(os.getenv("BUDGET_HART_USD", "3.00"))
 EMBED_MODEL = "text-embedding-3-small"   # 1536 Dimensionen, passt zur DB
 MAX_HISTORY = 16
 MAX_TOKENS  = 1024
@@ -100,6 +105,7 @@ NIGHTLY_HOUR = 3                          # 03:00 Europe/Berlin (TZ aus .env)
 MORGEN_ZEIT = os.getenv("JARVIS_MORGEN_ZEIT", "07:00").strip().split()[0] \
     if os.getenv("JARVIS_MORGEN_ZEIT", "07:00").strip() else ""
 MORGEN_MARK = os.path.join(VAULT_DIR, ".morgenlauf")   # ueberlebt Neustarts
+MORGEN_MODELL = os.getenv("MORGEN_MODELL", "claude-haiku-4-5-20251001")
 DEDUP_DIST  = 0.15                        # Vektor-Distanz: darunter = Duplikat
 
 if not CLAUDE_KEY:
@@ -423,6 +429,11 @@ TOOLS = [
         "description": ("Frischt CHANGELOG.md, STATUS.md und CHEATSHEET.md auf. Holt die "
                         "neuen Commits von GitHub und verdichtet sie. Laeuft taeglich nach "
                         "dem Morgen-Durchgang automatisch; hiermit auf Zuruf."),
+        "input_schema": {"type": "object", "properties": {}},
+    },
+    {
+        "name": "budget",
+        "description": "Zeigt die heutigen Kosten, das Tagesbudget und welches Modell gerade laeuft.",
         "input_schema": {"type": "object", "properties": {}},
     },
     {
@@ -2144,6 +2155,8 @@ GITHUB_REPO = os.getenv("GITHUB_REPO", "jarvis-brain")
 DOKU_DIR    = os.getenv("JARVIS_DOKU_DIR", "/app/repo")     # Repo-Wurzel im Container
 DOKU_MARK   = os.path.join(VAULT_DIR, ".changelog_stand")   # zuletzt verarbeiteter Commit
 DOKU_ERLAUBT = ("CHANGELOG.md", "STATUS.md", "CHEATSHEET.md")
+# STATUS.md ist Verdichten von Commit-Messages — dafuer reicht das guenstige Modell.
+DOKU_MODELL = os.getenv("DOKU_MODELL", "claude-haiku-4-5-20251001")
 
 
 def _doku_ziel():
@@ -2444,10 +2457,10 @@ def _doku_status(neue):
                .replace("{COMMITS}", commits))
     try:
         resp = client.messages.create(
-            model=MODEL, max_tokens=3000,
+            model=DOKU_MODELL, max_tokens=3000,
             messages=[{"role": "user", "content": auftrag}])
         try:
-            track_cost(MODEL, resp.usage.input_tokens, resp.usage.output_tokens,
+            track_cost(DOKU_MODELL, resp.usage.input_tokens, resp.usage.output_tokens,
                        getattr(resp.usage, "cache_read_input_tokens", 0) or 0,
                        getattr(resp.usage, "cache_creation_input_tokens", 0) or 0)
         except Exception:
@@ -2538,6 +2551,13 @@ def run_tool(name: str, inp: dict) -> str:
         return tool_mail_verwerfen(inp)
     if name == "doku":
         return tool_doku(inp)
+    if name == "budget":
+        k = _tageskosten()
+        aktiv = SPAR_MODEL if k >= BUDGET_HART else MODEL
+        return (f"Kosten heute: ${k:.4f}\n"
+                f"Warnung ab ${BUDGET_WARN:.2f}, Sparmodus ab ${BUDGET_HART:.2f}\n"
+                f"Aktuell aktives Modell: {aktiv}\n"
+                f"Morgen-Durchgang laeuft auf {MORGEN_MODELL}, Doku auf {DOKU_MODELL}")
     if name == "lage":
         return tool_lage(inp)
     if name == "aufgabe_erledigt":
@@ -2883,7 +2903,9 @@ def morgenlauf(grund="planmaessig"):
     auftrag = MORGEN_AUFTRAG.replace("{POSTEINGAENGE}", posteingaenge)
     MORGEN_LAEUFT["ja"] = True
     try:
-        ergebnis = think([], auftrag)        # eigene Historie, faellt danach weg
+        # Mails lesen und Aufgaben ableiten ist Extraktion, keine Denkarbeit —
+        # das guenstige Modell reicht und spart taeglich mehrere Cent.
+        ergebnis = think([], auftrag, modell_vorgabe=MORGEN_MODELL)
     finally:
         MORGEN_LAEUFT["ja"] = False
     print(f"  [morgen] fertig ({', '.join(geprueft)}): {str(ergebnis)[:160]}", flush=True)
@@ -3007,7 +3029,105 @@ def _ist_leere_ankuendigung(text):
     return False
 
 
-def think(history, user_text, bilder=None):
+# Anfragen, die ohne Langzeitgedaechtnis auskommen — reine Systemfragen,
+# Kurzbefehle, Bestaetigungen.
+_KEIN_RECALL = re.compile(
+    r"^(ja|nein|ok|okay|passt|danke|weiter|mach|los|stop|gut|alles klar|"
+    r"lage|status|jobs|morgenlauf|changelog|doku|konsolidiere|reset|"
+    r"was laeuft|was läuft|wie sieht|zeig mir die|liste)", re.I)
+
+
+def _recall_noetig(text):
+    t = (text or "").strip()
+    if len(t) < 12:                      # "ok", "mach", "ja bitte"
+        return False
+    if _KEIN_RECALL.match(t):
+        return False
+    return True
+
+
+TOOL_KURZ_AB = int(os.getenv("TOOL_ERGEBNIS_KURZ", "700"))   # Zeichen
+
+
+def _ergebnisse_eindampfen(messages, schonen=2):
+    """Kuerzt alte Tool-Ergebnisse im laufenden Gespraech.
+
+    Der Bot hat das Ergebnis in der Runde danach bereits verarbeitet — der
+    Volltext muss nicht bis zum Schluss mitgeschleppt werden. Die juengsten
+    Runden bleiben unangetastet, damit nichts Aktuelles verloren geht.
+    """
+    tool_indizes = [i for i, m in enumerate(messages)
+                    if isinstance(m.get("content"), list)
+                    and any(isinstance(b, dict) and b.get("type") == "tool_result"
+                            for b in m["content"])]
+    for i in tool_indizes[:-schonen] if schonen else tool_indizes:
+        for b in messages[i]["content"]:
+            if not (isinstance(b, dict) and b.get("type") == "tool_result"):
+                continue
+            inhalt = b.get("content")
+            if isinstance(inhalt, str) and len(inhalt) > TOOL_KURZ_AB:
+                b["content"] = (inhalt[:TOOL_KURZ_AB]
+                                + f"\n[… gekuerzt, urspruenglich {len(inhalt)} Zeichen]")
+
+
+
+
+# ── TAGESBUDGET ──────────────────────────────────────────────
+def send_telegram(text):
+    """Kurznachricht an Rui. Der Core hatte bisher keinen eigenen Weg dahin."""
+    token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat = str(os.getenv("TELEGRAM_CHAT_ID", "")).strip()
+    if not (token and chat):
+        return False
+    try:
+        requests.post(f"https://api.telegram.org/bot{token}/sendMessage",
+                      json={"chat_id": chat, "text": text,
+                            "disable_web_page_preview": True}, timeout=20)
+        return True
+    except Exception as e:
+        print(f"  [telegram] {type(e).__name__}", flush=True)
+        return False
+
+
+_BUDGET = {"stand": 0.0, "geprueft": 0.0, "gewarnt": ""}
+
+
+def _tageskosten():
+    """Kosten von heute, hoechstens alle 60 Sekunden frisch aus der DB."""
+    if time.time() - _BUDGET["geprueft"] < 60:
+        return _BUDGET["stand"]
+    try:
+        conn = pg_conn()
+        with conn, conn.cursor() as cur:
+            cur.execute("SELECT COALESCE(SUM(cost_usd),0) FROM cost_ledger "
+                        "WHERE created_at::date = CURRENT_DATE")
+            _BUDGET["stand"] = float(cur.fetchone()[0])
+        conn.close()
+    except Exception:
+        pass
+    _BUDGET["geprueft"] = time.time()
+    return _BUDGET["stand"]
+
+
+def modell_waehlen():
+    """Bei ueberschrittenem Tagesbudget auf das guenstige Modell wechseln."""
+    kosten = _tageskosten()
+    heute = datetime.now().strftime("%Y-%m-%d")
+    if kosten >= BUDGET_WARN and _BUDGET["gewarnt"] != heute:
+        _BUDGET["gewarnt"] = heute
+        hinweis = (f"Tagesbudget: ${kosten:.2f} von ${BUDGET_WARN:.2f} erreicht. "
+                   f"Ab ${BUDGET_HART:.2f} laeuft alles auf {SPAR_MODEL}.")
+        print(f"  [budget] {hinweis}", flush=True)
+        try:
+            send_telegram("\U0001F4B0 " + hinweis)
+        except Exception:
+            pass
+    if kosten >= BUDGET_HART:
+        return SPAR_MODEL
+    return MODEL
+
+
+def think(history, user_text, bilder=None, modell_vorgabe=None):
     """Agent-Loop wie im lokalen v5: Claude darf Tools nutzen, bis end_turn.
 
     bilder: Liste von {"media_type": "image/png", "data": "<base64>"} — z.B.
@@ -3015,9 +3135,11 @@ def think(history, user_text, bilder=None):
     aktuellen Anfrage beigelegt, nicht dauerhaft in der Historie gespeichert
     (sonst waechst der Verlauf mit jedem Bild um mehrere hundert Kilobyte).
     """
-    # AUTO-RECALL: relevantes Langzeitwissen als Kontext mitgeben
+    # AUTO-RECALL nur wenn sinnvoll: frueher lief bei JEDER Anfrage ein
+    # Embedding plus Datenbanksuche, und die Treffer landeten im Kontext —
+    # auch bei "was laeuft gerade?". Das kostet bei jeder Folgerunde erneut.
     context = ""
-    if oai is not None:
+    if oai is not None and _recall_noetig(user_text):
         hits = tool_recall({"query": user_text}, k=3)
         if hits and not hits.startswith("Keine Treffer") and not hits.startswith("Fehler"):
             context = f"\n\n[AUTO-RECALL — relevantes Langzeitgedaechtnis:\n{hits}]"
@@ -3043,13 +3165,18 @@ def think(history, user_text, bilder=None):
     nachfass_zahl = 0
     genutzte_tools = set()
     braucht_remember = _verlangt_speichern(user_text)
+    modell = modell_vorgabe or modell_waehlen()
     for _round in range(MAX_TOOL_ROUNDS):
+        # Aeltere Tool-Ergebnisse kuerzen: ein voller Posteingang oder ein
+        # Lagebild haengt sonst bis zum Ende im Verlauf und wird in JEDER
+        # Folgerunde erneut bezahlt. Die letzten beiden Runden bleiben ganz.
+        _ergebnisse_eindampfen(messages, schonen=2)
         resp = client.messages.create(
-            model=MODEL, max_tokens=MAX_TOKENS, system=SYS_CACHED,
+            model=modell, max_tokens=MAX_TOKENS, system=SYS_CACHED,
             tools=TOOLS_CACHED, messages=messages,
         )
         try:
-            track_cost(MODEL, resp.usage.input_tokens, resp.usage.output_tokens, getattr(resp.usage, 'cache_read_input_tokens', 0) or 0, getattr(resp.usage, 'cache_creation_input_tokens', 0) or 0)
+            track_cost(modell, resp.usage.input_tokens, resp.usage.output_tokens, getattr(resp.usage, 'cache_read_input_tokens', 0) or 0, getattr(resp.usage, 'cache_creation_input_tokens', 0) or 0)
         except Exception:
             pass
 
@@ -3191,6 +3318,8 @@ def main():
     print("  JARVIS CORE v7.9 — GEDAECHTNIS, MAIL, WEB, KALENDER, GITHUB, BOTS", flush=True)
     print(f"  Modell    : {MODEL}", flush=True)
     print(f"  Extraktion: {EXTRACT_MODEL}", flush=True)
+    print(f"  Budget    : Warnung ab ${BUDGET_WARN:.2f}, "
+          f"ab ${BUDGET_HART:.2f} auf {SPAR_MODEL}", flush=True)
     print(f"  Embeddings: {EMBED_MODEL if oai else 'DEAKTIVIERT (kein Key)'}", flush=True)
     print(f"  Nightly   : taeglich {NIGHTLY_HOUR:02d}:00", flush=True)
     print(f"  Morgen    : {MORGEN_ZEIT or 'aus'} (Mails + Kalender -> Aufgaben)", flush=True)

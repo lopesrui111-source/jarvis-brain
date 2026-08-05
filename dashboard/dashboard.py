@@ -20,6 +20,12 @@ import psycopg2.extras
 from fastapi import FastAPI, Body
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, PlainTextResponse
 import uvicorn
+try:
+    from anthropic import Anthropic
+    _anthropic = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY", ""))
+except Exception:
+    _anthropic = None
+HEALTH_MODELL = os.getenv("HEALTH_MODELL", "claude-sonnet-4-6")
 
 REDIS_HOST = os.getenv("REDIS_HOST", "redis")
 REDIS_PORT = int(os.getenv("REDIS_PORT", "6379"))
@@ -102,6 +108,31 @@ def _spalten_ergaenzen():
         with conn, conn.cursor() as cur:
             cur.execute("ALTER TABLE immo_seen "
                         "ADD COLUMN IF NOT EXISTS erledigt boolean DEFAULT FALSE")
+            # HEALTH-Reiter: Profil (eine Zeile) und Mahlzeiten-Liste
+            cur.execute("""CREATE TABLE IF NOT EXISTS profil (
+                id integer PRIMARY KEY DEFAULT 1,
+                groesse_cm integer DEFAULT 183,
+                gewicht_kg real DEFAULT 80,
+                alter_jahre integer DEFAULT 25,
+                geschlecht text DEFAULT 'm',
+                training_pro_woche text DEFAULT '3-4',
+                koerperfett_prozent real,
+                ziel_kcal integer DEFAULT 2800,
+                ziel_protein_g integer DEFAULT 160,
+                ziel_kh_g integer DEFAULT 310,
+                ziel_fett_g integer DEFAULT 80,
+                aktualisiert timestamptz DEFAULT now())""")
+            cur.execute("INSERT INTO profil (id) VALUES (1) ON CONFLICT (id) DO NOTHING")
+            cur.execute("""CREATE TABLE IF NOT EXISTS mahlzeiten (
+                id serial PRIMARY KEY,
+                datum date DEFAULT CURRENT_DATE,
+                gegessen_um timestamptz DEFAULT now(),
+                gericht text,
+                kcal integer DEFAULT 0,
+                protein_g real DEFAULT 0,
+                kh_g real DEFAULT 0,
+                fett_g real DEFAULT 0,
+                foto_pfad text)""")
         conn.close()
         print("  [db] Spalten geprueft", flush=True)
     except Exception as e:
@@ -183,6 +214,25 @@ def stats():
     except Exception:
         pass
 
+    # Letzter Handgriff je Bot — eigene Verbindung, weil conn oben schon zu ist.
+    letzte = {}
+    try:
+        conn3 = pg()
+        with conn3, conn3.cursor() as cur:
+            cur.execute("""
+                SELECT DISTINCT ON (bot) bot, aktion, to_char(created_at,'HH24:MI') AS zeit,
+                       EXTRACT(EPOCH FROM (now() - created_at)) AS alt
+                FROM arbeit_log ORDER BY bot, created_at DESC""")
+            for bot, aktion, zeit, alt in cur.fetchall():
+                alt = int(alt or 0)
+                wann = (f"vor {alt//60}s" if alt < 3600
+                        else f"vor {alt//3600}h" if alt < 86400 else zeit)
+                letzte[bot] = {"aktion": (aktion or "")[:38], "wann": wann}
+        conn3.close()
+    except Exception:
+        pass
+
+    maxcost = max([k.get("cost", 0) for k in known.values()] + [0.0001])
     online_all = listeners >= len(BOTS)
     for key, meta in BOTS.items():
         k = known.get(key, {"cost": 0.0, "requests": 0, "last_seen": "-", "recent": False})
@@ -190,6 +240,8 @@ def stats():
                             "desc": meta.get("desc", "agent"),
                             "cost": k["cost"], "requests": k["requests"], "last_seen": k["last_seen"],
                             "spark": spark.get(key, [0.0] * 6),
+                            "letzte": letzte.get(key),
+                            "kostenanteil": round(k["cost"] / maxcost, 3) if maxcost else 0,
                             "online": online_all or k.get("recent", False) or (key == "jarvis" and listeners > 0)})
     for name, k in known.items():
         if name not in BOTS:
@@ -454,6 +506,187 @@ def umami(tage: int = 7):
     return JSONResponse(out)
 
 
+@app.post("/api/health/analyse")
+def api_health_analyse(daten: dict = Body(...)):
+    """Nimmt ein Foto (base64), gibt Claudes Schaetzung zurueck — noch nicht gespeichert."""
+    if _anthropic is None:
+        return JSONResponse({"ok": False, "fehler": "Anthropic nicht verfuegbar"}, status_code=500)
+    b64 = (daten or {}).get("bild") or ""
+    media = (daten or {}).get("media_type") or "image/jpeg"
+    if "," in b64:
+        b64 = b64.split(",", 1)[1]
+    if not b64:
+        return JSONResponse({"ok": False, "fehler": "Kein Bild"}, status_code=400)
+    prompt = (
+        "Du bist ein Ernaehrungs-Assistent. Schaetze fuer das Essen auf dem Foto die Naehrwerte. "
+        "Antworte AUSSCHLIESSLICH mit JSON, keine Erklaerung, kein Markdown:\n"
+        '{"gericht":"kurze deutsche Bezeichnung","kcal":123,"protein_g":12,"kh_g":34,"fett_g":5,'
+        '"portion":"z.B. 1 Teller / ca. 350g","hinweis":"kurz, was unsicher ist"}\n'
+        "Schaetze realistische Portionsgroessen. Wenn du unsicher bist, nimm eine mittlere Portion an."
+    )
+    try:
+        resp = _anthropic.messages.create(
+            model=HEALTH_MODELL, max_tokens=400,
+            messages=[{"role": "user", "content": [
+                {"type": "image", "source": {"type": "base64", "media_type": media, "data": b64}},
+                {"type": "text", "text": prompt}]}])
+        txt = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+        if txt.startswith("```"):
+            txt = txt.split("```", 2)[1].lstrip("json").strip() if "```" in txt else txt
+        import re as _re
+        m = _re.search(r"\{.*\}", txt, _re.S)
+        d = json.loads(m.group(0) if m else txt)
+        return JSONResponse({"ok": True, "schaetzung": {
+            "gericht": str(d.get("gericht", "Mahlzeit"))[:80],
+            "kcal": int(d.get("kcal", 0) or 0),
+            "protein_g": round(float(d.get("protein_g", 0) or 0), 1),
+            "kh_g": round(float(d.get("kh_g", 0) or 0), 1),
+            "fett_g": round(float(d.get("fett_g", 0) or 0), 1),
+            "portion": str(d.get("portion", ""))[:60],
+            "hinweis": str(d.get("hinweis", ""))[:120]}})
+    except Exception as e:
+        return JSONResponse({"ok": False, "fehler": f"{type(e).__name__}: {e}"}, status_code=500)
+
+
+@app.post("/api/health/speichern")
+def api_health_speichern(daten: dict = Body(...)):
+    """Speichert die (ggf. korrigierte) Mahlzeit nach Bestaetigung."""
+    d = daten or {}
+    try:
+        conn = pg()
+        with conn, conn.cursor() as cur:
+            cur.execute("""INSERT INTO mahlzeiten (gericht, kcal, protein_g, kh_g, fett_g)
+                           VALUES (%s,%s,%s,%s,%s) RETURNING id""",
+                        (str(d.get("gericht", "Mahlzeit"))[:80],
+                         int(d.get("kcal", 0) or 0), float(d.get("protein_g", 0) or 0),
+                         float(d.get("kh_g", 0) or 0), float(d.get("fett_g", 0) or 0)))
+            neu = cur.fetchone()[0]
+        conn.close()
+        return JSONResponse({"ok": True, "id": neu})
+    except Exception as e:
+        return JSONResponse({"ok": False, "fehler": str(e)}, status_code=500)
+
+
+@app.post("/api/health/loeschen")
+def api_health_loeschen(daten: dict = Body(...)):
+    try:
+        mid = int((daten or {}).get("id") or 0)
+        conn = pg()
+        with conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM mahlzeiten WHERE id = %s", (mid,))
+        conn.close()
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        return JSONResponse({"ok": False, "fehler": str(e)}, status_code=500)
+
+
+@app.get("/mensch.glb")
+def mensch_glb():
+    """Liefert das lokale 3D-Menschmodell aus (umgeht CORS von externen CDNs)."""
+    pfad = os.path.join(os.path.dirname(__file__), "mensch.glb")
+    if os.path.exists(pfad):
+        return FileResponse(pfad, media_type="model/gltf-binary")
+    return JSONResponse({"fehler": "Modell nicht gefunden"}, status_code=404)
+
+
+@app.get("/api/health")
+def api_health():
+    """Tagesuebersicht: Profil, heutige Summen, Mahlzeitenliste."""
+    prof, tag, mahlzeiten = {}, {"kcal": 0, "protein_g": 0, "kh_g": 0, "fett_g": 0}, []
+    try:
+        conn = pg()
+        with conn, conn.cursor() as cur:
+            cur.execute("""SELECT groesse_cm, gewicht_kg, alter_jahre, geschlecht,
+                           training_pro_woche, koerperfett_prozent, ziel_kcal,
+                           ziel_protein_g, ziel_kh_g, ziel_fett_g FROM profil WHERE id=1""")
+            r = cur.fetchone()
+            if r:
+                prof = {"groesse_cm": r[0], "gewicht_kg": r[1], "alter": r[2],
+                        "geschlecht": r[3], "training": r[4], "koerperfett": r[5],
+                        "ziel_kcal": r[6], "ziel_protein_g": r[7],
+                        "ziel_kh_g": r[8], "ziel_fett_g": r[9]}
+                if r[0] and r[1]:
+                    prof["bmi"] = round(r[1] / ((r[0]/100.0) ** 2), 1)
+            cur.execute("""SELECT id, gericht, kcal, protein_g, kh_g, fett_g,
+                           to_char(gegessen_um,'HH24:MI') FROM mahlzeiten
+                           WHERE datum = CURRENT_DATE ORDER BY gegessen_um DESC""")
+            for m in cur.fetchall():
+                mahlzeiten.append({"id": m[0], "gericht": m[1], "kcal": m[2],
+                                   "protein_g": m[3], "kh_g": m[4], "fett_g": m[5], "zeit": m[6]})
+                tag["kcal"] += m[2] or 0
+                tag["protein_g"] += m[3] or 0
+                tag["kh_g"] += m[4] or 0
+                tag["fett_g"] += m[5] or 0
+        conn.close()
+    except Exception as e:
+        return JSONResponse({"ok": False, "fehler": str(e)}, status_code=500)
+    for k in ("protein_g", "kh_g", "fett_g"):
+        tag[k] = round(tag[k], 1)
+    return JSONResponse({"ok": True, "profil": prof, "tag": tag, "mahlzeiten": mahlzeiten})
+
+
+@app.post("/api/health/profil")
+def api_health_profil(daten: dict = Body(...)):
+    d = daten or {}
+    felder = {"gewicht_kg": float, "groesse_cm": int, "alter_jahre": int,
+              "koerperfett_prozent": float, "ziel_kcal": int, "ziel_protein_g": int,
+              "ziel_kh_g": int, "ziel_fett_g": int, "training_pro_woche": str}
+    sets, werte = [], []
+    for f, typ in felder.items():
+        if f in d and d[f] not in (None, ""):
+            try:
+                sets.append(f"{f} = %s")
+                werte.append(typ(d[f]))
+            except Exception:
+                pass
+    if not sets:
+        return JSONResponse({"ok": False, "fehler": "nichts zu speichern"}, status_code=400)
+    werte.append(1)
+    try:
+        conn = pg()
+        with conn, conn.cursor() as cur:
+            cur.execute(f"UPDATE profil SET {', '.join(sets)}, aktualisiert = now() WHERE id = %s", werte)
+        conn.close()
+        return JSONResponse({"ok": True})
+    except Exception as e:
+        return JSONResponse({"ok": False, "fehler": str(e)}, status_code=500)
+
+
+@app.get("/api/stream")
+def api_stream():
+    """Live-Ereignisstrom fuer den Agenten-Tab: letzte Aktionen + naechste Laeufe."""
+    events = []
+    try:
+        conn = pg()
+        with conn, conn.cursor() as cur:
+            cur.execute("""SELECT bot, aktion, to_char(created_at,'HH24:MI:SS') AS zeit,
+                                  EXTRACT(EPOCH FROM (now()-created_at)) AS alt
+                           FROM arbeit_log ORDER BY created_at DESC LIMIT 20""")
+            for bot, aktion, zeit, alt in cur.fetchall():
+                events.append({"bot": bot, "aktion": (aktion or "")[:60],
+                               "zeit": zeit, "alt": int(alt or 0)})
+        conn.close()
+    except Exception:
+        pass
+    # Naechste planmaessige Laeufe (statisch aus der Konfiguration abgeleitet)
+    plan = []
+    try:
+        from datetime import datetime, timedelta
+        jetzt = datetime.now()
+        def naechste(stunde, minute=0):
+            z = jetzt.replace(hour=stunde, minute=minute, second=0, microsecond=0)
+            if z <= jetzt:
+                z += timedelta(days=1)
+            return z.strftime("%H:%M")
+        plan = [
+            {"bot": "jarvis", "aktion": "Morgen-Durchgang", "zeit": naechste(7)},
+            {"bot": "seo", "aktion": "Tagesrecherche", "zeit": naechste(19)},
+        ]
+    except Exception:
+        pass
+    return JSONResponse({"events": events, "plan": plan})
+
+
 @app.post("/api/erledigt")
 def api_erledigt(daten: dict = Body(...)):
     """Hakt eine Aufgabe oder einen SEO-Entwurf ab (Klick im Wochen-Panel)."""
@@ -590,9 +823,12 @@ def woche():
                     d.append(r[2])
                 q = (r[2] or "").strip().lower()
                 aufgaben.append({"text": (r[0] or "")[:70],
+                                 "voll": (r[0] or ""),
                                  "detail": " · ".join(d) or (r[1] or "")[:50],
+                                 "info": (r[1] or ""),
                                  "heute": bool(r[3] and r[3] <= datetime.now().date()),
                                  "id": r[4], "typ": "aufgabe",
+                                 "faellig": r[3].strftime("%d.%m.%Y") if r[3] else "",
                                  "quelle": "INFO" if q == "info" else (q.upper() or "MAIL")})
             gruppe("AUFGABEN", "aufgabe", aufgaben)
 
@@ -605,19 +841,50 @@ def woche():
             gruppe("LÄUFT GERADE", "job", laufend)
 
             offen = []
-            for r in sicher("SELECT titel, to_char(created_at,'DD.MM.'), id FROM qa_seen "
+            for r in sicher("SELECT titel, to_char(created_at,'DD.MM.'), id, "
+                            "COALESCE(url,''), COALESCE(entwurf_datei,'') FROM qa_seen "
                             "WHERE entwurf_datei <> '' AND NOT erledigt ORDER BY id DESC LIMIT 8"):
+                seo_info = f"Frage: {r[0] or ''}"
+                if r[3]:
+                    seo_info += f"\n\nURL: {r[3]}"
+                if r[4]:
+                    seo_info += f"\n\nEntwurf liegt im Vault: {r[4]}"
                 offen.append({"text": (r[0] or "Entwurf")[:70],
+                              "voll": (r[0] or "Entwurf"),
+                              "info": seo_info,
                               "detail": f"Entwurf vom {r[1]} — zu posten", "heute": False,
                               "id": r[2], "typ": "qa", "quelle": "SEO"})
             # immo_seen hatte urspruenglich keine Spalte "erledigt" — siehe _spalten_ergaenzen()
             # Frueher LIMIT 3 — bei einem Lauf mit 8 Treffern fielen 5 unter den Tisch.
             # Jetzt 15 und ein laengeres Fenster, das Panel ist ohnehin scrollbar.
-            for r in sicher("SELECT DISTINCT ON (titel) titel, rendite, id FROM immo_seen "
+            immo_rows = sicher("SELECT DISTINCT ON (titel) titel, rendite, id, "
+                            "COALESCE(preis,0), COALESCE(ort,''), COALESCE(zimmer,''), "
+                            "COALESCE(flaeche,''), COALESCE(url,''), COALESCE(notiz,'') "
+                            "FROM immo_seen "
                             "WHERE qualifiziert AND NOT COALESCE(erledigt, FALSE) "
                             "AND created_at > now() - interval '7 days' "
-                            "ORDER BY titel, created_at DESC LIMIT 15"):
+                            "ORDER BY titel, created_at DESC LIMIT 15")
+            reich = True
+            if not immo_rows:
+                # Spalten evtl. nicht vorhanden — Basis-Abfrage als Rueckfall
+                reich = False
+                immo_rows = [list(r) + [0, "", "", "", "", ""] for r in
+                    sicher("SELECT DISTINCT ON (titel) titel, rendite, id FROM immo_seen "
+                           "WHERE qualifiziert AND NOT COALESCE(erledigt, FALSE) "
+                           "AND created_at > now() - interval '7 days' "
+                           "ORDER BY titel, created_at DESC LIMIT 15")]
+            for r in immo_rows:
+                zeilen = []
+                if r[4]: zeilen.append(f"Ort: {r[4]}")
+                if float(r[3] or 0) > 0: zeilen.append(f"Preis: {float(r[3]):,.0f} €".replace(",", "."))
+                if r[5]: zeilen.append(f"Zimmer: {r[5]}")
+                if r[6]: zeilen.append(f"Fläche: {r[6]}")
+                zeilen.append(f"Bruttorendite: {float(r[1] or 0):.1f} %")
+                if r[8]: zeilen.append(f"\nNotiz: {r[8]}")
+                if r[7]: zeilen.append(f"\nExposé: {r[7]}")
                 offen.append({"text": (r[0] or "Objekt")[:70],
+                              "voll": (r[0] or "Objekt"),
+                              "info": "\n".join(zeilen),
                               "detail": f"{float(r[1] or 0):.1f} % Rendite — prüfen",
                               "heute": False, "id": r[2], "typ": "immo", "quelle": "IMMO"})
             gruppe("ZU ERLEDIGEN", "offen", offen)
@@ -993,11 +1260,164 @@ HTML = """<!DOCTYPE html>
   .agNode::before { content: ""; position: absolute; top: 0; left: 8%; right: 8%; height: 1px;
                      background: linear-gradient(90deg, transparent, rgba(255, 255, 255, .16), transparent); }
   .agNode:hover { transform: translateY(-2px); }
-  .agNode.busy { animation: agcardpulse 1.4s ease-in-out infinite; }
+  .agNode.busy { animation: agcardpulse 2.2s ease-in-out infinite; }
   @keyframes agcardpulse {
-    0%, 100% { filter: brightness(1); }
-    50% { filter: brightness(1.3); }
+    0%, 100% { box-shadow: 0 0 0 0 rgba(89,215,255,0); }
+    50% { box-shadow: 0 0 22px 1px var(--cyan-dim), inset 0 0 12px rgba(89,215,255,.06); }
   }
+  /* Letzter Handgriff — dezent in --dim, damit die Karte etwas erzaehlt */
+  .agLast { font-size: 8.5px; color: var(--dim); line-height: 1.35; margin-top: 3px;
+            overflow: hidden; text-overflow: ellipsis; white-space: nowrap; opacity: .82; }
+  .agLast b { color: var(--cyan); font-weight: 500; opacity: .8; }
+  .agStream { position: absolute; top: 118px; right: 20px; width: 218px; bottom: 24px;
+              background: rgba(10,26,38,.42); border: 1px solid var(--glass-line);
+              border-radius: 14px; padding: 13px 13px 10px; backdrop-filter: blur(10px);
+              display: flex; flex-direction: column; z-index: 6; pointer-events: none; }
+  .agStreamHd { font-size: 9px; letter-spacing: 2.5px; color: var(--cyan); margin-bottom: 10px;
+                display: flex; justify-content: space-between; align-items: center; }
+  .agLive { display: inline-flex; align-items: center; gap: 5px; color: var(--green); font-size: 8.5px;
+            font-variant-numeric: tabular-nums; }
+  .agLive::before { content:''; width:6px; height:6px; border-radius:50%; background: var(--green);
+                    box-shadow: 0 0 8px var(--green); animation: agBlink 1.4s infinite; }
+  @keyframes agBlink { 0%,100%{opacity:1} 50%{opacity:.3} }
+  #agStreamList { flex: 1; overflow: hidden; }
+  .agEv { font-size: 9.5px; padding: 5px 7px; margin-bottom: 3px; border-left: 2px solid;
+          border-radius: 0 4px 4px 0; background: rgba(255,255,255,.015);
+          display: flex; gap: 7px; animation: agRowIn .4s ease; }
+  @keyframes agRowIn { from{opacity:0;transform:translateX(-8px)} to{opacity:1;transform:none} }
+  .agEv .et { color: var(--dim); flex: none; font-variant-numeric: tabular-nums; }
+  .agEv .eb { font-weight: 600; width: 46px; flex: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agEv .em { color: #9fd4e8; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .agStreamPlan { border-top: 1px solid var(--glass-line); padding-top: 8px; margin-top: 6px; }
+  .agStreamPlan .pl { font-size: 8.5px; color: var(--dim); letter-spacing: .5px;
+                      display: flex; justify-content: space-between; padding: 2px 0; }
+  .agStreamPlan .pl b { color: var(--cyan); font-weight: 500; }
+
+  /* ── HEALTH ── */
+  .healthView { position: absolute; inset: 64px 0 0 0; overflow-y: auto; padding: 20px 28px 40px;
+                -webkit-overflow-scrolling: touch; }
+  .hlWrap { display: grid; grid-template-columns: 380px 1fr; gap: 26px; max-width: 1180px; margin: 0 auto; }
+  .hlLeft { display: flex; flex-direction: column; gap: 16px; }
+  .hlModelBox { position: relative; height: 440px; border-radius: 18px;
+                background: radial-gradient(ellipse at 50% 40%, rgba(89,215,255,.1), transparent 65%),
+                            linear-gradient(165deg, rgba(16,38,54,.6), rgba(8,20,30,.5));
+                border: 1px solid rgba(89,215,255,.22); overflow: hidden;
+                box-shadow: inset 0 0 60px rgba(89,215,255,.06), 0 0 30px rgba(0,0,0,.3); }
+  /* leuchtende Eckwinkel */
+  .hlModelBox::before, .hlModelBox::after,
+  .hlEck1, .hlEck2 { content:''; position:absolute; width:20px; height:20px; pointer-events:none; z-index:3; }
+  .hlModelBox::before { top:10px; left:10px; border-top:2px solid var(--cyan); border-left:2px solid var(--cyan);
+                        border-top-left-radius:4px; }
+  .hlModelBox::after { top:10px; right:10px; border-top:2px solid var(--cyan); border-right:2px solid var(--cyan);
+                       border-top-right-radius:4px; }
+  .hlEck1 { bottom:10px; left:10px; border-bottom:2px solid var(--cyan); border-left:2px solid var(--cyan);
+            border-bottom-left-radius:4px; }
+  .hlEck2 { bottom:10px; right:10px; border-bottom:2px solid var(--cyan); border-right:2px solid var(--cyan);
+            border-bottom-right-radius:4px; }
+  /* langsame Scanlinie ueber der Figur */
+  .hlScan { position:absolute; left:0; right:0; height:70px; z-index:2; pointer-events:none;
+            background: linear-gradient(180deg, transparent, rgba(89,215,255,.09), transparent);
+            animation: hlScanMove 4.5s linear infinite; }
+  @keyframes hlScanMove { 0%{top:-70px} 100%{top:100%} }
+  /* rotierende Mess-Ringe hinter der Figur */
+  .hlScanRing { position:absolute; left:50%; top:46%; transform:translate(-50%,-50%);
+                pointer-events:none; z-index:0; opacity:.5; }
+  #hlModel { width: 100%; height: 100%; cursor: grab; position: relative; z-index: 1; }
+  #hlModel:active { cursor: grabbing; }
+  .hlModelHint { position: absolute; bottom: 10px; left: 0; right: 0; text-align: center;
+                 font-size: 8.5px; letter-spacing: 2px; color: var(--dim); text-transform: uppercase; }
+  .hlStats { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+  .hlStat { position: relative; border-radius: 12px; padding: 13px 15px; overflow: hidden;
+            background: linear-gradient(160deg, rgba(89,215,255,.06), rgba(12,28,40,.4));
+            border: 1px solid rgba(89,215,255,.16);
+            box-shadow: inset 0 0 22px rgba(89,215,255,.05); transition: all .25s; }
+  .hlStat::before { content:''; position:absolute; top:0; left:0; width:14px; height:14px;
+                    border-top:1.5px solid var(--cyan-dim); border-left:1.5px solid var(--cyan-dim);
+                    border-top-left-radius:4px; opacity:.6; }
+  .hlStat .l { font-size: 8.5px; letter-spacing: 1.5px; color: var(--dim); text-transform: uppercase; }
+  .hlStat .v { font-size: 22px; font-weight: 600; color: #eaf9ff; margin-top: 3px;
+               font-variant-numeric: tabular-nums; text-shadow: 0 0 14px rgba(89,215,255,.35); }
+  .hlStat .v small { font-size: 11px; color: var(--dim); font-weight: 400; text-shadow: none; }
+  .hlStat.edit { cursor: pointer; }
+  .hlStat.edit:hover { border-color: var(--cyan);
+                       box-shadow: inset 0 0 22px rgba(89,215,255,.1), 0 0 18px rgba(89,215,255,.15); }
+
+  .hlRight { display: flex; flex-direction: column; gap: 18px; }
+  .hlRing { position: relative; width: 220px; height: 220px; margin: 4px auto 0; }
+  .hlRingSvg { transform: rotate(-90deg); }
+  .hlRingBg { fill: none; stroke: rgba(89,215,255,.1); stroke-width: 12; }
+  .hlRingFg { fill: none; stroke: var(--green); stroke-width: 12; stroke-linecap: round;
+              stroke-dasharray: 578; stroke-dashoffset: 578; transition: stroke-dashoffset .6s ease;
+              filter: drop-shadow(0 0 6px rgba(93,202,165,.6)); }
+  .hlRingCenter { position: absolute; inset: 0; display: flex; flex-direction: column;
+                  align-items: center; justify-content: center; }
+  .hlRingBig { font-size: 42px; font-weight: 700; color: #eaf9ff; line-height: 1; font-variant-numeric: tabular-nums; text-shadow: 0 0 18px rgba(89,215,255,.4); }
+  .hlRingLbl { font-size: 10px; letter-spacing: 2px; color: var(--dim); text-transform: uppercase; margin-top: 4px; }
+  .hlRingSide { position: absolute; top: 50%; transform: translateY(-50%); text-align: center; }
+  .hlRingSide b { display: block; font-size: 18px; color: #cfeeff; font-variant-numeric: tabular-nums; }
+  .hlRingSide span { font-size: 8px; letter-spacing: 1px; color: var(--dim); text-transform: uppercase; }
+  .hlRingL { left: -58px; } .hlRingR { right: -58px; }
+
+  .hlMakros { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 12px; margin-top: 30px; }
+  .hlMakro { text-align: center; }
+  .hlMakro .mn { font-size: 9px; letter-spacing: 1px; color: var(--dim); text-transform: uppercase; }
+  .hlMakroBar { height: 4px; border-radius: 3px; background: rgba(89,215,255,.12); margin: 6px 0; overflow: hidden; }
+  .hlMakroBar > i { display: block; height: 100%; border-radius: 3px; transition: width .5s ease; box-shadow: 0 0 8px currentColor; }
+  .hlMakro .mv { font-size: 11px; color: #cfeeff; font-variant-numeric: tabular-nums; }
+
+  .hlCam { margin-top: 6px; padding: 16px; border-radius: 14px; border: 1px solid rgba(93,202,165,.5);
+           background: linear-gradient(160deg, rgba(93,202,165,.14), rgba(93,202,165,.05));
+           color: var(--green); font-size: 13px; font-weight: 600; letter-spacing: .5px; cursor: pointer;
+           transition: all .25s; box-shadow: inset 0 0 20px rgba(93,202,165,.08); position: relative; overflow: hidden; }
+  .hlCam:hover { background: linear-gradient(160deg, rgba(93,202,165,.24), rgba(93,202,165,.1));
+                 box-shadow: 0 0 26px rgba(93,202,165,.35), inset 0 0 20px rgba(93,202,165,.15);
+                 text-shadow: 0 0 10px rgba(93,202,165,.5); }
+
+  .hlListHd { font-size: 9px; letter-spacing: 2.5px; color: var(--cyan); margin-top: 10px; }
+  .hlList { display: flex; flex-direction: column; gap: 8px; }
+  .hlItem { display: flex; align-items: center; gap: 12px; padding: 12px 15px; position: relative;
+            background: linear-gradient(160deg, rgba(89,215,255,.05), rgba(12,28,40,.35));
+            border: 1px solid rgba(89,215,255,.14); border-radius: 12px; overflow: hidden;
+            box-shadow: inset 0 0 18px rgba(89,215,255,.04); transition: all .2s; }
+  .hlItem::before { content:''; position:absolute; left:0; top:0; bottom:0; width:2px;
+                    background: var(--green); box-shadow: 0 0 8px var(--green); }
+  .hlItem:hover { border-color: rgba(89,215,255,.3); }
+  .hlItem .ig { flex: 1; }
+  .hlItem .ig b { font-size: 12.5px; color: #eaf9ff; font-weight: 500; }
+  .hlItem .ig span { font-size: 9px; color: var(--dim); display: block; margin-top: 2px; }
+  .hlItem .ik { font-size: 15px; font-weight: 600; color: var(--green); font-variant-numeric: tabular-nums; }
+  .hlItem .idel { color: var(--dim); cursor: pointer; padding: 2px 6px; border-radius: 6px; font-size: 13px; }
+  .hlItem .idel:hover { color: var(--red); background: rgba(255,95,107,.1); }
+  .hlEmpty { color: var(--dim); font-size: 11px; padding: 14px; text-align: center; }
+
+  .hlOverlay { position: fixed; inset: 0; z-index: 9999; display: none; align-items: center;
+               justify-content: center; background: rgba(2,8,14,.66); backdrop-filter: blur(5px); }
+  .hlOverlay.open { display: flex; }
+  .hlCard { width: min(460px, 92vw); background: linear-gradient(160deg, rgba(14,32,46,.98), rgba(8,20,30,.98));
+            border: 1px solid var(--glass-line); border-radius: 18px; padding: 22px 24px;
+            box-shadow: 0 24px 80px rgba(0,0,0,.6), 0 0 40px var(--cyan-dim); }
+  .hlCardHd { display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;
+              font-size: 10px; letter-spacing: 2.5px; color: var(--cyan); }
+  .hlClose { cursor: pointer; color: var(--dim); font-size: 16px; }
+  .hlClose:hover { color: #eaf9ff; }
+  .hlSpin { text-align: center; color: var(--dim); font-size: 12px; padding: 30px; letter-spacing: 1px; }
+  .hlGuess { font-size: 20px; font-weight: 600; color: #eaf9ff; margin-bottom: 4px; }
+  .hlGuessSub { font-size: 10px; color: var(--dim); margin-bottom: 16px; }
+  .hlField { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+  .hlField label { font-size: 10px; letter-spacing: 1px; color: var(--dim); width: 90px; text-transform: uppercase; }
+  .hlField input { flex: 1; background: rgba(4,20,30,.7); border: 1px solid var(--glass-line);
+                   border-radius: 8px; padding: 8px 10px; color: #eaf9ff; font-size: 13px; }
+  .hlField input:focus { outline: none; border-color: var(--cyan); }
+  .hlHinweis { font-size: 10px; color: var(--dim); margin: 8px 0 16px; line-height: 1.5; }
+  .hlBtns { display: flex; gap: 10px; }
+  .hlBtns button { flex: 1; padding: 12px; border-radius: 10px; font-size: 12px; font-weight: 600;
+                   cursor: pointer; letter-spacing: .5px; }
+  .hlBtnSave { background: var(--green); color: #04121c; border: none; }
+  .hlBtnCancel { background: transparent; color: var(--dim); border: 1px solid var(--glass-line); }
+  /* Duenner Kostenbalken: teure Bots auf einen Blick */
+  .agCostBar { height: 2px; border-radius: 2px; margin-top: 7px;
+               background: rgba(89,215,255,.10); overflow: hidden; }
+  .agCostBar > i { display: block; height: 100%; border-radius: 2px; }
   .agLayer { font-size: 8px; letter-spacing: .26em; color: var(--dim); margin-bottom: 10px; opacity: .8; }
   .agLayer b { color: inherit; }
   .agTop { display: flex; align-items: center; gap: 9px; }
@@ -1059,6 +1479,34 @@ HTML = """<!DOCTYPE html>
            border-bottom: 1px solid rgba(89, 215, 255, .06); font-size: 11px; }
   .hitem:last-child { border-bottom: none; }
   .hitem { border-left: 2px solid rgba(89, 215, 255, .12); }
+  .hitem.hclick { cursor: pointer; transition: background .15s, border-color .15s; }
+  .hitem.hclick:hover { background: rgba(89,215,255,.05); border-left-color: var(--cyan); }
+  .aufgKasten { font-size: 12px; line-height: 1.7; }
+  .aufgMeta { display: flex; gap: 8px; align-items: center; margin-bottom: 12px; }
+  .aufgMeta .q { font-size: 9px; letter-spacing: 1px; padding: 2px 8px; border-radius: 6px;
+                 background: rgba(89,215,255,.1); color: var(--cyan); }
+  .aufgMeta .f { font-size: 10px; color: var(--dim); }
+  .aufgText { color: var(--txt); white-space: pre-wrap; }
+  .aufgOverlay { position: fixed; inset: 0; z-index: 9999; display: none;
+                 align-items: center; justify-content: center;
+                 background: rgba(2,8,14,.62); backdrop-filter: blur(4px); }
+  .aufgOverlay.open { display: flex; animation: aufgFade .18s ease; }
+  @keyframes aufgFade { from { opacity: 0; } to { opacity: 1; } }
+  .aufgBox { width: min(560px, 92vw); max-height: 80vh; overflow-y: auto;
+             background: linear-gradient(160deg, rgba(14,32,46,.98), rgba(8,20,30,.98));
+             border: 1px solid var(--glass-line); border-radius: 18px;
+             padding: 22px 24px; box-shadow: 0 24px 80px rgba(0,0,0,.6), 0 0 40px var(--cyan-dim); }
+  .aufgHead { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px;
+              margin-bottom: 14px; }
+  .aufgTitel { font-size: 15px; font-weight: 600; color: #eaf9ff; line-height: 1.4; }
+  .aufgClose { cursor: pointer; color: var(--dim); font-size: 18px; flex: none;
+               padding: 2px 8px; border-radius: 8px; transition: all .2s; }
+  .aufgClose:hover { color: #eaf9ff; background: rgba(89,215,255,.12); }
+  .aufgKopf { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; }
+  .aufgKopf .q { font-size: 9px; letter-spacing: 1.5px; padding: 3px 10px; border-radius: 7px;
+                 background: rgba(89,215,255,.12); color: var(--cyan); }
+  .aufgKopf .f { font-size: 10px; color: var(--dim); }
+  .aufgInhalt { font-size: 12.5px; line-height: 1.75; color: var(--txt); white-space: pre-wrap; }
   .hitem.dringend { border-left-color: var(--green); }
   .hitem .txt { flex: 1; min-width: 0; }
   .hquelle { display: inline-block; font-size: 8.5px; letter-spacing: .12em;
@@ -1287,6 +1735,16 @@ HTML = """<!DOCTYPE html>
     /* Gehirn-Detailpanel unten statt rechts */
     .braindetail { right: 10px; left: 10px; width: auto; top: auto; bottom: 12px; max-height: 42vh; }
     .brainlegend { left: 10px; bottom: 8px; font-size: 9px; gap: 7px; max-width: 92vw; }
+
+    /* HEALTH: alles untereinander */
+    .healthView { inset: 56px 0 0 0; padding: 14px 14px 60px; }
+    .hlWrap { grid-template-columns: 1fr; gap: 18px; }
+    .hlModelBox { height: 340px; }
+    .hlStats { grid-template-columns: 1fr 1fr; }
+    .hlRing { width: 200px; height: 200px; }
+    .hlRingL { left: -46px; } .hlRingR { right: -46px; }
+    .hlMakros { margin-top: 34px; }
+    .hlCam { padding: 16px; font-size: 14px; }
   }
 
   @media (max-width: 400px) {
@@ -1464,8 +1922,20 @@ HTML = """<!DOCTYPE html>
   .msg { font-size: 12.5px; line-height: 1.65; }
   .msg.bot b { font-size: 9.5px; }
 </style>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/loaders/GLTFLoader.js"></script>
 </head>
 <body class="view-0">
+  <div class="aufgOverlay" id="aufgOverlay">
+    <div class="aufgBox">
+      <div class="aufgHead">
+        <span class="aufgTitel" id="aufgTitel"></span>
+        <span class="aufgClose" id="aufgClose">\u2715</span>
+      </div>
+      <div class="aufgKopf" id="aufgKopf"></div>
+      <div class="aufgInhalt" id="aufgInhalt"></div>
+    </div>
+  </div>
 <canvas id="space"></canvas>
 <canvas id="brain" style="display:none"></canvas>
 
@@ -1477,6 +1947,7 @@ HTML = """<!DOCTYPE html>
       <span class="vt" data-view="2">AGENTEN</span>
       <span class="vt" data-view="3">BÜROFLOW</span>
       <span class="vt" data-view="1">GEHIRN</span>
+      <span class="vt" data-view="4">HEALTH</span>
     </div>
     <div class="clock"><span id="time">--:--:--</span><small id="date"></small></div>
   </header>
@@ -1528,6 +1999,64 @@ HTML = """<!DOCTYPE html>
     </div>
     <div class="agInner">
       <div id="agChart" style="position:relative;"></div>
+    </div>
+    <div id="agStream" class="agStream">
+      <div class="agStreamHd"><span>LIVE-STROM</span><span class="agLive" id="agLiveClock"></span></div>
+      <div id="agStreamList"></div>
+      <div class="agStreamPlan" id="agStreamPlan"></div>
+    </div>
+  </div>
+
+  <div class="healthView" id="healthView" style="display:none">
+    <div class="hlWrap">
+      <div class="hlLeft">
+        <div class="hlModelBox">
+          <svg class="hlScanRing" width="360" height="360" viewBox="0 0 360 360">
+            <circle cx="180" cy="180" r="150" fill="none" stroke="rgba(89,215,255,.14)" stroke-width="1" stroke-dasharray="3 9">
+              <animateTransform attributeName="transform" type="rotate" from="0 180 180" to="360 180 180" dur="40s" repeatCount="indefinite"/>
+            </circle>
+            <circle cx="180" cy="180" r="120" fill="none" stroke="rgba(89,215,255,.1)" stroke-width="1" stroke-dasharray="1 14">
+              <animateTransform attributeName="transform" type="rotate" from="360 180 180" to="0 180 180" dur="55s" repeatCount="indefinite"/>
+            </circle>
+            <g>
+              <animateTransform attributeName="transform" type="rotate" from="0 180 180" to="360 180 180" dur="24s" repeatCount="indefinite"/>
+              <circle cx="180" cy="30" r="2.5" fill="#59d7ff"/>
+              <circle cx="180" cy="330" r="2" fill="#5DCAA5"/>
+            </g>
+          </svg>
+          <div class="hlScan"></div>
+          <div id="hlModel"></div>
+          <div class="hlEck1"></div><div class="hlEck2"></div>
+          <div class="hlModelHint">ziehen zum Drehen</div>
+        </div>
+        <div class="hlStats" id="hlStats"></div>
+      </div>
+      <div class="hlRight">
+        <div class="hlRing">
+          <svg viewBox="0 0 220 220" class="hlRingSvg">
+            <circle cx="110" cy="110" r="92" class="hlRingBg"/>
+            <circle cx="110" cy="110" r="92" class="hlRingFg" id="hlRingFg"/>
+          </svg>
+          <div class="hlRingCenter">
+            <div class="hlRingBig" id="hlUebrig">2800</div>
+            <div class="hlRingLbl">kcal übrig</div>
+          </div>
+          <div class="hlRingSide hlRingL"><b id="hlGegessen">0</b><span>gegessen</span></div>
+          <div class="hlRingSide hlRingR"><b id="hlZiel">2800</b><span>Ziel</span></div>
+        </div>
+        <div class="hlMakros" id="hlMakros"></div>
+        <button class="hlCam" id="hlCam">＋ Mahlzeit per Foto</button>
+        <input type="file" id="hlFile" accept="image/*" capture="environment" style="display:none">
+        <div class="hlListHd">HEUTE GEGESSEN</div>
+        <div class="hlList" id="hlList"></div>
+      </div>
+    </div>
+
+    <div class="hlOverlay" id="hlAnalyse">
+      <div class="hlCard">
+        <div class="hlCardHd"><span>Foto-Analyse</span><span class="hlClose" id="hlAnalyseClose">\u2715</span></div>
+        <div id="hlAnalyseBody"><div class="hlSpin">analysiere Foto \u2026</div></div>
+      </div>
     </div>
   </div>
 
@@ -2475,7 +3004,8 @@ function setView(v) {
   var brainMode = (v === 1);
   var agentMode = (v === 2);
   var bfMode = (v === 3);
-  var overlay = (brainMode || agentMode || bfMode);
+  var healthMode = (v === 4);
+  var overlay = (brainMode || agentMode || bfMode || healthMode);
   brainCanvas.style.display = (brainMode || agentMode) ? 'block' : 'none';
   canvas.style.display = overlay ? 'none' : 'block';
   document.querySelector('.col-left').style.display = overlay ? 'none' : 'flex';
@@ -2483,6 +3013,7 @@ function setView(v) {
   document.getElementById('vtab').style.display = overlay ? 'none' : 'block';
   document.getElementById('bfView').style.display = bfMode ? 'block' : 'none';
   document.getElementById('agentsView').style.display = agentMode ? 'block' : 'none';
+  document.getElementById('healthView').style.display = healthMode ? 'block' : 'none';
   if (agentMode) { document.getElementById('agChart').innerHTML = ''; agLastHash = ''; renderAgents(lastBots); }
   document.getElementById('brainlegend').style.display = brainMode ? 'flex' : 'none';
   if (!brainMode) document.getElementById('braindetail').style.display = 'none';
@@ -2501,6 +3032,22 @@ function setView(v) {
     brainAnim = null;
     drawBrain();
   }
+  var streamEl = document.getElementById('agStream');
+  if (streamEl) streamEl.style.display = agentMode ? 'flex' : 'none';
+  if (agentMode) {
+    loadStream();
+    if (agStreamTimer) clearInterval(agStreamTimer);
+    agStreamTimer = setInterval(loadStream, 4000);
+    if (agClockTimer) clearInterval(agClockTimer);
+    agClockTimer = setInterval(function() {
+      var c = document.getElementById('agLiveClock');
+      if (c) c.textContent = new Date().toTimeString().slice(0,8);
+    }, 1000);
+  } else {
+    if (agStreamTimer) { clearInterval(agStreamTimer); agStreamTimer = null; }
+    if (agClockTimer) { clearInterval(agClockTimer); agClockTimer = null; }
+  }
+  if (healthMode) { loadHealth(); initHealthModel(); }
   if (brainMode) {
     if (brainPollTimer) clearInterval(brainPollTimer);
     brainPollTimer = setInterval(function() { loadBrain(true); }, 20000);
@@ -2512,6 +3059,33 @@ function setView(v) {
 document.querySelectorAll('.vt').forEach(function(t) {
   t.addEventListener('click', function() { setView(parseInt(t.getAttribute('data-view'))); });
 });
+
+var agStreamTimer = null, agClockTimer = null;
+var AG_KURZ = { 'buroflow-ceo':'CEO', 'marketing':'SOCIAL', 'seo':'SEO', 'immo':'IMMO',
+                'jarvis':'JARVIS', 'telegram':'TG' };
+function agColor(id) { return (agMeta && agMeta.colorOf && agMeta.colorOf[id]) || 'var(--cyan)'; }
+function loadStream() {
+  fetch('/api/stream').then(function(r){ return r.json(); }).then(function(d) {
+    var list = document.getElementById('agStreamList');
+    var plan = document.getElementById('agStreamPlan');
+    if (list) {
+      list.innerHTML = (d.events || []).slice(0, 9).map(function(e) {
+        var kurz = AG_KURZ[e.bot] || (e.bot || '').toUpperCase().slice(0,6);
+        return '<div class="agEv" style="border-left-color:' + agColor(e.bot) + '">' +
+               '<span class="et">' + esc((e.zeit||'').slice(0,5)) + '</span>' +
+               '<span class="eb" style="color:' + agColor(e.bot) + '">' + esc(kurz) + '</span>' +
+               '<span class="em">' + esc(e.aktion) + '</span></div>';
+      }).join('') || '<div class="agEv" style="border-left-color:var(--dim)"><span class="em" style="color:var(--dim)">Noch keine Ereignisse heute.</span></div>';
+    }
+    if (plan) {
+      plan.innerHTML = '<div class="pl" style="color:var(--cyan);letter-spacing:2px;margin-bottom:4px">NÄCHSTE LÄUFE</div>' +
+        (d.plan || []).map(function(p) {
+          var kurz = AG_KURZ[p.bot] || (p.bot||'').toUpperCase();
+          return '<div class="pl"><span>' + esc(kurz) + ' · ' + esc(p.aktion) + '</span><b>' + esc(p.zeit) + '</b></div>';
+        }).join('');
+    }
+  }).catch(function(){});
+}
 document.addEventListener('keydown', function(ev) {
   if (ev.key !== 'ArrowRight' && ev.key !== 'ArrowLeft') return;
   var i = VIEW_ORDER.indexOf(currentView);
@@ -2597,6 +3171,7 @@ var agDragMoved = false;
 function buildAgSvg(pos) {
   var defs = '<defs>';
   var paths = '';
+  var busy = window.agBusy || [];
   agMeta.bots.forEach(function(b, bi) {
     if (!b.parent || !pos[b.parent] || !pos[b.id]) return;
     var a = pos[b.parent], c = pos[b.id];
@@ -2605,13 +3180,21 @@ function buildAgSvg(pos) {
     var x1 = a.x + agMeta.CW / 2, y1 = a.y + agMeta.CH - 4;
     var x2 = c.x + agMeta.CW / 2, y2 = c.y + 6;
     var gid = 'agg' + bi;
+    // Pfad ist "aktiv", wenn Kind ODER Elternbot gerade arbeitet — dann fliesst
+    // die Delegation sichtbar entlang der Hierarchie.
+    var aktiv = busy.indexOf(b.id) >= 0 || busy.indexOf(b.parent) >= 0;
     defs += '<linearGradient id="' + gid + '" x1="' + x1 + '" y1="' + y1 + '" x2="' + x2 + '" y2="' + y2 +
             '" gradientUnits="userSpaceOnUse"><stop offset="0" stop-color="' + colP + '"/><stop offset="1" stop-color="' + col + '"/></linearGradient>';
     var path = 'M ' + x1 + ' ' + y1 + ' C ' + x1 + ' ' + (y1 + 38) + ', ' + x2 + ' ' + (y2 - 38) + ', ' + x2 + ' ' + y2;
-    paths += '<path d="' + path + '" fill="none" stroke="url(#' + gid + ')" stroke-width="5" stroke-opacity=".07"/>';
-    paths += '<path d="' + path + '" fill="none" stroke="url(#' + gid + ')" stroke-width="1.2" stroke-opacity=".55"/>';
-    paths += '<circle r="2.2" fill="' + col + '"><animateMotion dur="3.2s" repeatCount="indefinite" path="' + path + '"/></circle>';
-    paths += '<circle r="1.5" fill="' + colP + '" opacity=".7"><animateMotion dur="3.2s" begin="1.6s" repeatCount="indefinite" path="' + path + '"/></circle>';
+    paths += '<path d="' + path + '" fill="none" stroke="url(#' + gid + ')" stroke-width="5" stroke-opacity="' + (aktiv ? '.16' : '.07') + '"/>';
+    paths += '<path d="' + path + '" fill="none" stroke="url(#' + gid + ')" stroke-width="' + (aktiv ? '1.8' : '1.2') + '" stroke-opacity="' + (aktiv ? '.95' : '.55') + '"';
+    if (aktiv) paths += ' stroke-dasharray="4 6"><animate attributeName="stroke-dashoffset" from="20" to="0" dur="0.7s" repeatCount="indefinite"/></path';
+    paths += '/>';
+    var dur = aktiv ? '1.3s' : '4.2s';
+    var rad = aktiv ? '2.8' : '1.8';
+    var op = aktiv ? '1' : '.4';
+    paths += '<circle r="' + rad + '" fill="' + col + '" opacity="' + op + '"><animateMotion dur="' + dur + '" repeatCount="indefinite" path="' + path + '"/></circle>';
+    if (aktiv) paths += '<circle r="1.6" fill="' + colP + '" opacity=".8"><animateMotion dur="' + dur + '" begin="0.65s" repeatCount="indefinite" path="' + path + '"/></circle>';
   });
   return '<svg class="agSvg" width="' + agMeta.W + '" height="' + agMeta.totalH + '" viewBox="0 0 ' + agMeta.W + ' ' + agMeta.totalH + '">' + defs + '</defs>' + paths + '</svg>';
 }
@@ -2706,6 +3289,7 @@ function renderAgents(bots) {
   var totalH = Math.max(levels.length * (CH + GAPY) - GAPY, maxY + CH) + 10;
   agMeta = { bots: bots, colorOf: colorOf, CW: CW, CH: CH, W: W, totalH: totalH };
 
+  window.agBusy = busyIds;
   var svg = buildAgSvg(pos);
 
   var html = svg;
@@ -2742,6 +3326,8 @@ function renderAgents(bots) {
   chart.innerHTML = html;
 }
 
+function escAttr(x) { return String(x == null ? '' : x)
+  .replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
 var GRUPPEN_SYM = { termin: "\u25f7", aufgabe: "\u2709", job: "\u25d0", offen: "\u270e" };
 
 async function loadHeute() {
@@ -2762,7 +3348,13 @@ async function loadHeute() {
           var qk = p.quelle ? '<span class="hquelle ' +
                               String(p.quelle).toLowerCase() + '">' + esc(p.quelle) +
                               '</span>' : '';
-          return '<div class="hitem' + (p.heute ? ' dringend' : '') + '">' + hak +
+          var klick = (p.info || p.voll)
+            ? ' hclick" data-voll="' + escAttr(p.voll || p.text) +
+              '" data-info="' + escAttr(p.info || '') +
+              '" data-quelle="' + escAttr(p.quelle || '') +
+              '" data-faellig="' + escAttr(p.faellig || '') + '"'
+            : '"';
+          return '<div class="hitem' + (p.heute ? ' dringend' : '') + klick + '>' + hak +
             '<span class="txt"><b>' + esc(p.text) + '</b>' +
             '<span>' + qk + esc(p.detail || '') + '</span></span></div>';
         }).join('') + '</div>';
@@ -2774,8 +3366,259 @@ async function loadHeute() {
    damit keine Anfuehrungszeichen ineinander verschachtelt werden. */
 document.addEventListener('click', function(ev) {
   var el = ev.target;
-  if (!el || !el.classList || !el.classList.contains('whak')) return;
-  erledigt(el, el.getAttribute('data-typ'), parseInt(el.getAttribute('data-id'), 10));
+  if (el && el.classList && el.classList.contains('whak')) {
+    ev.stopPropagation();
+    erledigt(el, el.getAttribute('data-typ'), parseInt(el.getAttribute('data-id'), 10));
+    return;
+  }
+  // Klick auf eine Aufgabe (nicht auf das Haekchen) -> Kasten mit Details
+  var row = el && el.closest ? el.closest('.hitem.hclick') : null;
+  if (row) aufgabeOeffnen(row);
+});
+
+function aufgabeOeffnen(row) {
+  var voll = row.getAttribute('data-voll') || '';
+  var info = row.getAttribute('data-info') || '';
+  var quelle = row.getAttribute('data-quelle') || '';
+  var faellig = row.getAttribute('data-faellig') || '';
+  var ov = document.getElementById('aufgOverlay');
+  document.getElementById('aufgTitel').textContent = voll;
+  document.getElementById('aufgKopf').innerHTML =
+    (quelle ? '<span class="q">' + esc(quelle) + '</span>' : '') +
+    (faellig ? '<span class="f">fällig ' + esc(faellig) + '</span>' : '');
+  document.getElementById('aufgInhalt').innerHTML =
+    info ? esc(info) : '<span style="color:var(--dim)">Keine weiteren Details hinterlegt.</span>';
+  ov.classList.add('open');
+}
+function aufgabeZu() { document.getElementById('aufgOverlay').classList.remove('open'); }
+
+// ══════════ HEALTH ══════════
+var hlModel = { scene:null, cam:null, ren:null, mesh:null, anim:null, drag:false, px:0, rotY:0, geladen:false };
+function holoLook(model) {
+  // Kein separates Wireframe-Kind-Mesh! Bei SkinnedMesh fuehrt das zu
+  // "Maximum call stack size exceeded". Holo-Look nur ueber das Material.
+  model.traverse(function(o){
+    if (o.isMesh) {
+      o.material = new THREE.MeshStandardMaterial({
+        color: 0x18a6d8, emissive: 0x0e6c96, emissiveIntensity: 0.9,
+        metalness: 0.6, roughness: 0.25, transparent: true, opacity: 0.78,
+        wireframe: false });
+    }
+  });
+}
+function ladeMenschModell() {
+  if (hlModel.geladen || !hlModel.mesh) return;
+  var box = document.getElementById('hlModel');
+  if (box && !document.getElementById('hlLoad')) {
+    box.insertAdjacentHTML('beforeend',
+      '<div id="hlLoad" style="position:absolute;inset:0;display:flex;align-items:center;'+
+      'justify-content:center;color:#5f8ba3;font-size:11px;letter-spacing:1px">lade Modell \u2026</div>');
+  }
+  if (typeof THREE === 'undefined' || typeof THREE.GLTFLoader === 'undefined') {
+    setTimeout(ladeMenschModell, 300); return;   // three.js/Loader noch nicht bereit -> erneut versuchen
+  }
+  hlModel.geladen = true;
+  new THREE.GLTFLoader().load('/mensch.glb', function(gltf) {
+    try {
+      var mdl = gltf.scene || (gltf.scenes && gltf.scenes[0]);
+      mdl.updateMatrixWorld(true);
+      var b = new THREE.Box3().setFromObject(mdl);
+      var size = b.getSize(new THREE.Vector3());
+      var scl = 4.2 / (size.y || 1);
+      mdl.scale.setScalar(scl);
+      // nach Skalierung neu vermessen fuer korrekte Zentrierung
+      mdl.updateMatrixWorld(true);
+      var b2 = new THREE.Box3().setFromObject(mdl);
+      var c = b2.getCenter(new THREE.Vector3());
+      mdl.position.x -= c.x;
+      mdl.position.z -= c.z;
+      // vertikal zentrieren: Modellmitte auf y=0
+      mdl.position.y -= (b2.min.y + b2.max.y) / 2;
+      hlModel.mesh.add(mdl);        // ERST einhaengen, damit sichtbar
+      try { holoLook(mdl); } catch(e) {}   // Holo-Look ist Kosmetik, darf nicht blockieren
+      var ld = document.getElementById('hlLoad'); if (ld) ld.remove();
+      console.log('[health] Modell eingehaengt, children:', hlModel.mesh.children.length);
+    } catch(e) {
+      console.log('[health] Fehler beim Einhaengen:', e);
+      hlModel.geladen = false;
+      var ld2 = document.getElementById('hlLoad');
+      if (ld2) ld2.textContent = 'Fehler: ' + e.message;
+    }
+  }, undefined, function(err) {
+    hlModel.geladen = false;
+    console.log('[health] Ladefehler:', err);
+    var ld = document.getElementById('hlLoad');
+    if (ld) ld.textContent = 'Modell konnte nicht geladen werden';
+  });
+}
+function initHealthModel() {
+  if (hlModel.ren || typeof THREE === 'undefined') {
+    if (hlModel.ren) { hlModel.onResize(); ladeMenschModell(); }
+    return;
+  }
+  var box = document.getElementById('hlModel');
+  if (!box) return;
+  var w = box.clientWidth, h = box.clientHeight;
+  var scene = new THREE.Scene();
+  var cam = new THREE.PerspectiveCamera(42, w/h, 0.1, 100);
+  cam.position.set(0, 0, 7.9);
+  var ren = new THREE.WebGLRenderer({ antialias:true, alpha:true });
+  ren.setSize(w, h); ren.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  box.appendChild(ren.domElement);
+  // Licht
+  scene.add(new THREE.AmbientLight(0x8fd4ff, 0.5));
+  var key = new THREE.DirectionalLight(0x59d7ff, 1.1); key.position.set(3,5,4); scene.add(key);
+  var rim = new THREE.DirectionalLight(0x5DCAA5, 0.7); rim.position.set(-4,2,-3); scene.add(rim);
+  // ── Container fuer das GLB-Modell ──
+  var g = new THREE.Group();
+  scene.add(g);
+  hlModel.mesh = g;
+  ladeMenschModell();
+
+  hlModel.scene = scene; hlModel.cam = cam; hlModel.ren = ren; hlModel.mesh = g;
+  hlModel.onResize = function() {
+    var w = box.clientWidth, h = box.clientHeight;
+    cam.aspect = w/h; cam.updateProjectionMatrix(); ren.setSize(w,h);
+  };
+  // Drag-Rotation
+  box.addEventListener('pointerdown', function(e){ hlModel.drag=true; hlModel.px=e.clientX; });
+  window.addEventListener('pointerup', function(){ hlModel.drag=false; });
+  window.addEventListener('pointermove', function(e){
+    if(!hlModel.drag) return;
+    hlModel.rotY += (e.clientX - hlModel.px) * 0.01; hlModel.px = e.clientX;
+  });
+  function loop(){
+    hlModel.anim = requestAnimationFrame(loop);
+    if(!hlModel.drag) hlModel.rotY += 0.003;
+    g.rotation.y = hlModel.rotY;
+    ren.render(scene, cam);
+  }
+  loop();
+}
+
+function loadHealth() {
+  fetch('/api/health').then(function(r){return r.json();}).then(function(d){
+    if(!d.ok) return;
+    var p = d.profil || {}, t = d.tag || {};
+    // Stats
+    var stats = document.getElementById('hlStats');
+    stats.innerHTML =
+      statCard('Größe', (p.groesse_cm||'–'), 'cm', false) +
+      statCard('Gewicht', (p.gewicht_kg||'–'), 'kg', true, 'gewicht_kg') +
+      statCard('BMI', (p.bmi||'–'), '', false) +
+      statCard('Alter', (p.alter||'–'), 'J', false) +
+      statCard('Körperfett', (p.koerperfett!=null?p.koerperfett:'–'), '%', true, 'koerperfett_prozent') +
+      statCard('Training', (p.training||'–'), '×/W', false);
+    // Ring
+    var ziel = p.ziel_kcal || 2800, geg = Math.round(t.kcal||0), uebrig = Math.max(0, ziel-geg);
+    document.getElementById('hlUebrig').textContent = uebrig;
+    document.getElementById('hlGegessen').textContent = geg;
+    document.getElementById('hlZiel').textContent = ziel;
+    var frac = Math.min(1, geg/ziel);
+    document.getElementById('hlRingFg').style.strokeDashoffset = 578*(1-frac);
+    // Makros
+    var mk = document.getElementById('hlMakros');
+    mk.innerHTML =
+      makro('Kohlenhydrate', t.kh_g||0, p.ziel_kh_g||310, '#59d7ff') +
+      makro('Eiweiß', t.protein_g||0, p.ziel_protein_g||160, '#5DCAA5') +
+      makro('Fett', t.fett_g||0, p.ziel_fett_g||80, '#f0b95f');
+    // Liste
+    var list = document.getElementById('hlList');
+    if(!(d.mahlzeiten||[]).length){ list.innerHTML = '<div class="hlEmpty">Heute noch nichts erfasst.</div>'; return; }
+    list.innerHTML = d.mahlzeiten.map(function(m){
+      return '<div class="hlItem"><div class="ig"><b>'+esc(m.gericht)+'</b>'+
+        '<span>'+esc(m.zeit)+' · '+Math.round(m.protein_g)+'g P · '+Math.round(m.kh_g)+'g KH · '+Math.round(m.fett_g)+'g F</span></div>'+
+        '<span class="ik">'+m.kcal+'</span>'+
+        '<span class="idel" data-hlid="'+m.id+'">\\u2715</span></div>';
+    }).join('');
+  });
+}
+function statCard(label, val, unit, edit, feld){
+  return '<div class="hlStat'+(edit?' edit" data-feld="'+feld:'')+'">'+
+    '<div class="l">'+label+'</div><div class="v">'+val+(unit?' <small>'+unit+'</small>':'')+'</div></div>';
+}
+function makro(name, ist, ziel, farbe){
+  var pct = Math.min(100, Math.round(ist/ziel*100));
+  return '<div class="hlMakro"><div class="mn">'+name+'</div>'+
+    '<div class="hlMakroBar"><i style="width:'+pct+'%;background:'+farbe+'"></i></div>'+
+    '<div class="mv">'+Math.round(ist)+' / '+ziel+' g</div></div>';
+}
+
+// Kamera-Flow
+document.getElementById('hlCam').addEventListener('click', function(){
+  document.getElementById('hlFile').click();
+});
+document.getElementById('hlFile').addEventListener('change', function(ev){
+  var f = ev.target.files && ev.target.files[0];
+  if(!f) return;
+  var rd = new FileReader();
+  rd.onload = function(){ hlAnalysiere(rd.result, f.type); };
+  rd.readAsDataURL(f);
+  ev.target.value = '';
+});
+function hlAnalysiere(dataUrl, mime){
+  var ov = document.getElementById('hlAnalyse');
+  document.getElementById('hlAnalyseBody').innerHTML = '<div class="hlSpin">analysiere Foto \\u2026</div>';
+  ov.classList.add('open');
+  fetch('/api/health/analyse', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({ bild: dataUrl, media_type: mime }) })
+    .then(function(r){return r.json();})
+    .then(function(d){
+      if(!d.ok){ document.getElementById('hlAnalyseBody').innerHTML =
+        '<div class="hlSpin" style="color:var(--red)">Analyse fehlgeschlagen.<br><span style="font-size:9px">'+esc(d.fehler||'')+'</span></div>'; return; }
+      var g = d.schaetzung;
+      document.getElementById('hlAnalyseBody').innerHTML =
+        '<div class="hlGuess">'+esc(g.gericht)+'</div>'+
+        '<div class="hlGuessSub">'+esc(g.portion||'')+'</div>'+
+        field('Kalorien', 'g_kcal', g.kcal, 'kcal')+
+        field('Eiweiß', 'g_prot', g.protein_g, 'g')+
+        field('Kohlenhydrate', 'g_kh', g.kh_g, 'g')+
+        field('Fett', 'g_fett', g.fett_g, 'g')+
+        (g.hinweis ? '<div class="hlHinweis">\\u26a0 '+esc(g.hinweis)+'</div>' : '')+
+        '<div class="hlBtns"><button class="hlBtnCancel" onclick="hlAnalyseZu()">Verwerfen</button>'+
+        '<button class="hlBtnSave" onclick="hlSpeichern()">Speichern</button></div>';
+      window._hlGericht = g.gericht;
+    });
+}
+function field(label, id, val, unit){
+  return '<div class="hlField"><label>'+label+'</label>'+
+    '<input id="hl_'+id+'" type="number" value="'+val+'"><span style="font-size:10px;color:var(--dim)">'+unit+'</span></div>';
+}
+function hlAnalyseZu(){ document.getElementById('hlAnalyse').classList.remove('open'); }
+document.getElementById('hlAnalyseClose').addEventListener('click', hlAnalyseZu);
+function hlSpeichern(){
+  var body = {
+    gericht: window._hlGericht || 'Mahlzeit',
+    kcal: parseInt(document.getElementById('hl_g_kcal').value)||0,
+    protein_g: parseFloat(document.getElementById('hl_g_prot').value)||0,
+    kh_g: parseFloat(document.getElementById('hl_g_kh').value)||0,
+    fett_g: parseFloat(document.getElementById('hl_g_fett').value)||0
+  };
+  fetch('/api/health/speichern', { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body) }).then(function(r){return r.json();}).then(function(){
+      hlAnalyseZu(); loadHealth();
+  });
+}
+// Loeschen + Stat-Bearbeiten
+document.addEventListener('click', function(ev){
+  var del = ev.target.closest ? ev.target.closest('.idel') : null;
+  if(del){ var id=parseInt(del.getAttribute('data-hlid'));
+    fetch('/api/health/loeschen',{method:'POST',headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({id:id})}).then(function(){loadHealth();}); return; }
+  var st = ev.target.closest ? ev.target.closest('.hlStat.edit') : null;
+  if(st){ var feld=st.getAttribute('data-feld');
+    var neu = prompt('Neuer Wert für '+st.querySelector('.l').textContent+':');
+    if(neu!=null && neu!==''){ var b={}; b[feld]=neu;
+      fetch('/api/health/profil',{method:'POST',headers:{'Content-Type':'application/json'},
+        body:JSON.stringify(b)}).then(function(){loadHealth();}); } }
+});
+
+document.getElementById('aufgClose').addEventListener('click', aufgabeZu);
+document.getElementById('aufgOverlay').addEventListener('click', function(ev) {
+  if (ev.target === this) aufgabeZu();
+});
+document.addEventListener('keydown', function(ev) {
+  if (ev.key === 'Escape') aufgabeZu();
 });
 
 async function erledigt(el, typ, id) {

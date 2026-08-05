@@ -1043,7 +1043,7 @@ def _ist_leere_ankuendigung(text):
     return False
 
 
-def think(history, user_text):
+def think(history, user_text, bilder=None):
     SKILL_GELADEN["ja"] = False
     VOM_CEO["ja"] = "[REVIEW]" in user_text or "[von-ceo]" in user_text.lower()
     BILD_VERLANGT["ja"] = bool(_BILD_MUSTER.search(user_text))
@@ -1053,8 +1053,22 @@ def think(history, user_text):
     ABLEHNUNGEN["n"] = 0
     TOOL_LOG.clear()
     ECHTE_DATEIEN.clear()
-    history.append({"role": "user", "content": user_text})
-    messages = list(history)
+    # Ins Gedaechtnis nur ein Textvermerk (base64 wuerde die Historie sprengen);
+    # die eigentlichen Bilder gehen nur in die aktuelle Anfrage.
+    merk_text = user_text + (f"\n[{len(bilder)} Bild(er) mitgeschickt]" if bilder else "")
+    history.append({"role": "user", "content": merk_text})
+    messages = list(history[:-1])
+    if bilder:
+        print(f"  [bild] {len(bilder)} Bild(er) empfangen", flush=True)
+        inhalt = [{"type": "text", "text": user_text}]
+        for b in bilder[:5]:
+            inhalt.append({"type": "image", "source": {
+                "type": "base64",
+                "media_type": b.get("media_type", "image/png"),
+                "data": b.get("data", "")}})
+        messages.append({"role": "user", "content": inhalt})
+    else:
+        messages.append({"role": "user", "content": user_text})
     final_text = ""
     tool_benutzt = False
     nachfass_zahl = 0
@@ -1191,10 +1205,13 @@ def main():
                 continue
             req_id = msg.get("id", str(uuid.uuid4()))
             text = (msg.get("text") or "").strip()
+            bilder = msg.get("bilder") or msg.get("images") or []
             reply_q = REPLY_KEY.format(id=req_id)
-            if not text:
+            if not text and not bilder:
                 _antwort_senden(r, reply_q, "Leere Anfrage.")
                 continue
+            if bilder and not text:
+                text = "Schau dir die mitgeschickten Bilder an."
             if text.lower() in ("reset", "vergiss alles"):
                 r.delete(HISTORY_KEY)
                 _antwort_senden(r, reply_q, "Marketing-Kurzzeitgedaechtnis geleert.")
@@ -1207,7 +1224,7 @@ def main():
             fortschritt("denkt nach")
             history = load_history(r)
             try:
-                answer = think(history, text)
+                answer = think(history, text, bilder=bilder)
             except Exception as e:
                 answer = f"Fehler: {type(e).__name__}: {e}"
                 print(f"  [think] {answer}", flush=True)

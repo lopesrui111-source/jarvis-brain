@@ -2,6 +2,11 @@
 
 Automatisch gepflegt von JARVIS aus den Commit-Messages. Nicht von Hand bearbeiten.
 
+## 2026-08-02
+- `dbe86a1` Reddit-Anbindung (read-only), Quellenfehler sichtbar, Fortschrittsanzeige im Chat, LISTENER-Anzeige korrigiert, _antwort_senden im SEO-Bot ergaenzt
+
+Automatisch gepflegt von JARVIS aus den Commit-Messages. Nicht von Hand bearbeiten.
+
 ## 2026-07-29
 - `04dad2c` Doku-System, Morgen-Durchgang, Lagebild, SEO-Quellen gefixt, Dashboard-Typografie und Abhaken
 
