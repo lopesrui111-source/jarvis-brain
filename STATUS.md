@@ -1,61 +1,64 @@
-<!-- automatisch erzeugt am 03.08.2026 07:01 — nicht von Hand bearbeiten -->
+<!-- automatisch erzeugt am 06.08.2026 07:00 — nicht von Hand bearbeiten -->
 
 # STATUS
 
 ## Was das System ist
 
-Multi-Bot-Orchestrator auf Hetzner (CX23). **JARVIS** (core.py) koordiniert spezialisierte Bots: CEO (Strategie), MARKETING (Content + 48 Skills), SEO (Recherche), IMMO (Rendite-Analysen), TELEGRAM (Chat-Bridge). Alle laufen in Docker Compose, teilen PostgreSQL 16 + pgvector für Gedächtnis und Redis für Queues.
+Multi-Bot-System auf Hetzner CX23 (195.201.7.109), Docker Compose, Ubuntu. JARVIS ist der Orchestrator mit Gedächtnis (PostgreSQL 16 + pgvector), liest Mail (IMAP IONOS/Gmail) und Google-Kalender (read-only), delegiert Aufgaben an spezialisierte Bots: CEO (Strategie/Review), MARKETING (Creatives, 48 Skills + 345 Anleitungen), SEO (Recherche gutefrage.net), IMMO (Rendite-Analyse), TELEGRAM (Durchreiche). Alles läuft in Redis-Cache, PostgreSQL-Speicher, mit Watchtower als Auto-Update und Dashboard zur Übersicht.
 
 ## Infrastruktur
 
-- **Server:** Hetzner CX23, 195.201.7.109, Ubuntu
-- **Root-Pfad:** `/opt/jarvis-brain/`
-- **Container:** docker-compose.yml mit redis, postgres, adminer, watchtower, dashboard, alle Bots
-- **DB:** PostgreSQL 16, Datenbankname `jarvis_brain`, Benutzer `jarvis`
-- **Secrets:** `.env` (NIE anfassen)
-- **Zeitzone:** Europe/Berlin in allen Bot-Dockerfiles
+- **Server**: Hetzner CX23, 195.201.7.109, Ubuntu, Docker Compose
+- **Repo-Root**: `/opt/jarvis-brain/` (nicht `/opt/jarvis/`)
+- **Datenbank**: PostgreSQL 16 mit pgvector Extension, DB `jarvis_brain`, User `jarvis`
+- **Cache**: Redis
+- **Zeitzone**: Europe/Berlin (in allen Bot-Dockerfiles)
+- **Laufende Services**: redis, postgres, adminer, watchtower, dashboard, jarvis-core, jarvis-ceo, jarvis-marketing, camofox, jarvis-immo, jarvis-seo, jarvis-telegram
+- **Daten**: Mail read-only (IMAP), Kalender read-only (Google iCal), GitHub-Lesezugriff, kein Schreiben nach außen außer über Bot-spezifische Ausgabe-Pfade (Vault, Telegram, Logs)
 
 ## Aktueller Stand je Komponente
 
-| Komponente | Zeilen | Funktion | Zuletzt geändert |
-|---|---|---|---|
-| **orchestrator/core.py** | 3434 | Orchestrator, Gedächtnis (pgvector), Mail (IMAP IONOS+Gmail), Kalender (Google iCal read-only), Web-Recherche, GitHub, Auftrags-System, Morgen-Durchgang 07:00, Lagebild-Tool, Doku-System | Quellenfehler-Tracking, Fortschrittsanzeige |
-| **dashboard/dashboard.py** | 3274 | Web-UI, Aufgabenstatus, Logs, Systemmetriken, Manual Triggers | — |
-| **bots/ceo/bot.py** | 763 | Strategie + Büroflow-Entscheidungen, CEO-Review für Marketing-Entwürfe | — |
-| **bots/marketing/bot.py** | 1230 | Content-Generierung, 48 Marketing-Skills + 345 Skill-Bibliothek, Bildgen (MuAPI), legt Ergebnisse in Vault (postet NICHT selbst) | — |
-| **bots/seo/bot.py** | 1548 | Recherche gutefrage.net, schreibt Antwort-Entwürfe in Vault (postet NICHT), Reddit (neu, read-only), Quora ABGESCHALTET (Cloudflare) | Reddit-Anbindung hinzugefügt, _antwort_senden ergänzt |
-| **bots/immo/bot.py** | 1077 | Rendite-Analysen Immobilien-Inserate, Plausibilität, Telegram-Hinweise | — |
-| **bots/telegram/bridge.py** | 350 | Chat-Durchreiche, kein Gedächtnis | — |
+| Datei | Zeilen | Was sie macht | Zuletzt geändert |
+|-------|--------|---------------|------------------|
+| `orchestrator/core.py` | 3434 | Orchestrator: Mail/Kalender-Lesen, Gedächtnis (pgvector), Auftrags-Dispatch, Morgen-Durchgang 07:00, Lagebild, Doku-System | HEALTH-Reiter, 3D-Figur, Foto-Kalorientracking, lebendiger Agenten-Baum mit Live-Stream |
+| `dashboard/dashboard.py` | 4117 | Web-UI: Agent-Status, Aufgabenliste, Kosten-Tracking, Entwurf-Inbox, Immo-Queue, Bildempfang | Aufgaben-Box, Kostenoptim, Bildempfang für alle Bots |
+| `bots/ceo/bot.py` | 777 | Strategie/Entscheidungen für Büroflow, CEO-Review (prueft Marketing-Entwürfe) | Stabil |
+| `bots/marketing/bot.py` | 1261 | 48 Marketing-Skills, 345 Skill-Anleitungen, Bildgenerierung (MuAPI), legt Dateien im Vault ab (postet NICHT selbst) | Bildgenerierung, MuAPI-Integration |
+| `bots/seo/bot.py` | 1563 | Recherche gutefrage.net, schreibt Antwort-ENTWÜRFE in Vault, postet NIEMALS selbst. Quora abgeschaltet (Cloudflare). Tagesrecherche gemäß SEO_DAILY_TIME | Quora-Abschaltung, Vault-Integration |
+| `bots/immo/bot.py` | 1092 | Rendite-Analysen von Immobilien-Inseraten, Plausibilitätsprüfung, Telegram-Hinweise | Telegram-Integration |
+| `bots/telegram/bridge.py` | 350 | Durchreiche-Schicht zu Telegram, kein eigenes Gedächtnis | Stabil |
 
 ## Zuletzt gebaut
 
-- **Reddit-Integration (SEO):** Read-only-Anbindung, Quellenfehler im Chat sichtbar, Fortschrittsbalken beim Recherchieren
-- **SEO-Fehlerbehandlung:** `_antwort_senden()` ergänzt, robustere Fehlerquellen-Anzeige
-- **Listener-Status:** LISTENER-Anzeige im Dashboard korrigiert
+- **Dashboard**: HEALTH-Reiter mit 3D-Agent-Figur und Foto-Kalorientracking, Bildempfang für alle Bots
+- **Agenten-Ansicht**: Lebendiger Baum mit Live-Stream, Aufgaben-Kasten, Kostenoptimierung
+- **SEO**: Quora-Plattform deaktiviert (Cloudflare-Schutz macht Scraping unmöglich)
+- **Marketing**: MuAPI-Bildgenerierung integriert
+- **Immo**: Telegram-Benachrichtigungen bei neuen Treffern
 
 ## Offene Punkte
 
-- Quora: Cloudflare-Schutz blockiert Zugriff (derzeit deaktiviert)
-- 1 SEO-Entwurf wartet auf Freigabe
-- 3 Immo-Treffer ungeklärt
-- 3 offene Aufgaben im System
+- Quora-Recherche ist blockiert (Cloudflare); Alternative (Google News, Medium, Reddit) noch nicht implementiert
+- SEO-Entwürfe: 1 wartend (müssen manuell freigegeben werden)
+- Immo-Treffer: 0 ungeprueft (System läuft stabil)
 
 ## Arbeitsweise mit Rui
 
-1. **Dateiaustausch:** Komplette Datei-Ersetzung statt Patches/Snippets (copy-paste-Sicherheit)
-2. **Shell:** CMD (`cmd.exe`) statt PowerShell
-3. **Sprache:** Deutsch, sachlich, direkt, kompakt
-4. **Deployment-Schritte:** Schrittweise, nach jedem Block `wc -l <datei>` zur Verifikation
-5. **docker-compose.yml:** Fertige Blöcke zum manuellen Einfügen, KEINE Automatisierungs-Skripte
-6. **Secrets:** `.env` wird NIEMALS geändert oder angefasst
-7. **JavaScript-Auslieferung:** Alle JS-Dateien vor Deployment prüfen (Syntax, Imports, API-Calls)
+- **Dateien**: Komplette Ersetzungsdateien liefern, NICHT Patches oder Diff-Snippets
+- **Shell**: CMD (Windows) oder Bash (Linux), NICHT PowerShell
+- **Sprache**: Deutsch, sachlich, kurz und direkt
+- **Deployment-Prozess**: Schrittweise, nach jedem Deploy Zeilenzahl prüfen (`wc -l DATEI`)
+- **Konfiguration**: `.env` wird NIEMALS angefasst — neue Werte gehören in `.env.local` oder Docker-Secrets
+- **docker-compose.yml**: Keine Deploy-Skripte, sondern fertige Blöcke zum manuellen Einfuegen
+- **JavaScript**: Vor Auslieferung prüfen (Syntax, Console-Fehler, Performance)
+- **Git**: Commits sollten ein Thema pro Commit haben, nicht 20 kleine Commits für eine Datei
 
 ## Kritische Regeln
 
-- `.env` ist unveränderlich — alle Änderungen gehen in Code, nicht in Konfiguration
-- Neue Bot-Bots-Dockerfiles müssen `TZ=Europe/Berlin` haben
-- Mail und Kalender sind **read-only** (JARVIS liest nur, schreibt NIE)
-- MARKETING und SEO schreiben nur in den Vault, nicht ins Netz
-- IMMO und CEO schreiben Hinweise an TELEGRAM, nicht direkt ins Internet
-- pgvector-Queries müssen mit `similarity_threshold` tesseliert werden (bei >50k Einträgen)
-- Redis-TTL für Aufgaben: 7 Tage Standard
+- `.env` wird niemals verändert oder commitet; Geheimnisse gehen in `.env.local` (nicht im Repo)
+- Bei Änderungen an `docker-compose.yml`: Fertige `services`-Blöcke bereitstellen zum Copy-Paste, keine Automatisierungsskripte
+- JavaScript vor Auslieferung prüfen: `console.log` entfernen, `eval()` vermeiden, Abhängigkeiten lockern
+- Postgres-Dump vor größeren Migrationen: `pg_dump -U jarvis jarvis_brain > backup_DATUM.sql`
+- pgvector-Queries: Immer `LIMIT` setzen; `ORDER BY ... <-> ... LIMIT 5` für Similarity-Search
+- JARVIS-Mail-Abruf lädt IMMER zuerst, DANN delegiert; keine parallelen Mail-Reads auf demselben IMAP-Account
+- SEO/IMMO: Daten landen IMMER zuerst im Vault oder in der Datenbank, NIEMALS direkt auf fremden Plattformen

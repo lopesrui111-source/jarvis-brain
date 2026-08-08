@@ -1679,8 +1679,11 @@ HTML = """<!DOCTYPE html>
     .clock { font-size: 17px; }
     .clock small { font-size: 8px; letter-spacing: .25em; }
     .viewtabs { position: static; transform: none; order: 3; width: 100%;
-                justify-content: center; margin-top: 4px; padding: 3px; }
-    .vt { padding: 8px 11px; font-size: 8.5px; letter-spacing: .14em; }
+                justify-content: space-between; margin-top: 6px; padding: 3px 4px;
+                gap: 2px; box-sizing: border-box; }
+    .vt { flex: 1 1 0; text-align: center; padding: 8px 2px; font-size: 8px;
+          letter-spacing: .04em; border-radius: 13px; white-space: nowrap; }
+    .vt.active { background: rgba(89, 215, 255, .14); }
 
     /* CORE: alles untereinander, scrollbar — Header nimmt Platz ein statt zu ueberlappen */
     body.view-0 .hud { pointer-events: auto; overflow-y: auto; -webkit-overflow-scrolling: touch; }
@@ -1718,12 +1721,12 @@ HTML = """<!DOCTYPE html>
     .vview { min-height: 180px; }
 
     /* Agenten + Bueroflow */
-    .agentsView { padding: 74px 8px 24px; overflow-y: auto; overflow-x: hidden;
+    .agentsView { padding: 120px 8px 24px; overflow-y: auto; overflow-x: hidden;
                   scrollbar-width: thin; }
     .agZoom { right: 10px; bottom: 62px; gap: 6px; }
     .agZbtn { width: 34px; height: 34px; font-size: 15px; }
     .agName { font-size: 12px; }
-    .bfView { padding: 74px 12px 28px; }
+    .bfView { padding: 120px 12px 28px; }
     .bfHero { padding: 16px; gap: 12px; }
     .bfHero .big { font-size: 27px; }
     .bfGrid { grid-template-columns: repeat(2, 1fr); gap: 9px; }
@@ -1737,7 +1740,7 @@ HTML = """<!DOCTYPE html>
     .brainlegend { left: 10px; bottom: 8px; font-size: 9px; gap: 7px; max-width: 92vw; }
 
     /* HEALTH: alles untereinander */
-    .healthView { inset: 56px 0 0 0; padding: 14px 14px 60px; }
+    .healthView { inset: 116px 0 0 0; padding: 14px 14px 60px; }
     .hlWrap { grid-template-columns: 1fr; gap: 18px; }
     .hlModelBox { height: 340px; }
     .hlStats { grid-template-columns: 1fr 1fr; }
@@ -1775,8 +1778,11 @@ HTML = """<!DOCTYPE html>
     .clock { font-size: 17px; }
     .clock small { font-size: 8px; letter-spacing: .25em; }
     .viewtabs { position: static; transform: none; order: 3; width: 100%;
-                justify-content: center; margin-top: 4px; padding: 3px; }
-    .vt { padding: 8px 11px; font-size: 8.5px; letter-spacing: .14em; }
+                justify-content: space-between; margin-top: 6px; padding: 3px 4px;
+                gap: 2px; box-sizing: border-box; }
+    .vt { flex: 1 1 0; text-align: center; padding: 8px 2px; font-size: 8px;
+          letter-spacing: .04em; border-radius: 13px; white-space: nowrap; }
+    .vt.active { background: rgba(89, 215, 255, .14); }
 
     /* CORE: alles untereinander, scrollbar — Header nimmt Platz ein statt zu ueberlappen */
     body.view-0 .hud { pointer-events: auto; overflow-y: auto; -webkit-overflow-scrolling: touch; }
@@ -1814,12 +1820,12 @@ HTML = """<!DOCTYPE html>
     .vview { min-height: 180px; }
 
     /* Agenten + Bueroflow */
-    .agentsView { padding: 74px 8px 24px; overflow-y: auto; overflow-x: hidden;
+    .agentsView { padding: 120px 8px 24px; overflow-y: auto; overflow-x: hidden;
                   scrollbar-width: thin; }
     .agZoom { right: 10px; bottom: 62px; gap: 6px; }
     .agZbtn { width: 34px; height: 34px; font-size: 15px; }
     .agName { font-size: 12px; }
-    .bfView { padding: 74px 12px 28px; }
+    .bfView { padding: 120px 12px 28px; }
     .bfHero { padding: 16px; gap: 12px; }
     .bfHero .big { font-size: 27px; }
     .bfGrid { grid-template-columns: repeat(2, 1fr); gap: 9px; }

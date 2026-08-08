@@ -1,6 +1,6 @@
 # Cheatsheet
 
-Stand: 05.08.2026 07:01 — automatisch erzeugt.
+Stand: 07.08.2026 07:01 — automatisch erzeugt.
 
 ## Verbindung
 ```
@@ -30,11 +30,11 @@ cd /opt/jarvis-brain && wc -l PFAD && docker compose up -d --build SERVICE
 | Datei | Zeilen |
 |---|---|
 | orchestrator/core.py | 3434 |
-| dashboard/dashboard.py | 3527 |
-| bots/ceo/bot.py | 763 |
-| bots/marketing/bot.py | 1247 |
-| bots/seo/bot.py | 1548 |
-| bots/immo/bot.py | 1077 |
+| dashboard/dashboard.py | 4117 |
+| bots/ceo/bot.py | 777 |
+| bots/marketing/bot.py | 1261 |
+| bots/seo/bot.py | 1563 |
+| bots/immo/bot.py | 1092 |
 | bots/telegram/bridge.py | 350 |
 
 ## Haeufige Befehle

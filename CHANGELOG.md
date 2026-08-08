@@ -2,6 +2,11 @@
 
 Automatisch gepflegt von JARVIS aus den Commit-Messages. Nicht von Hand bearbeiten.
 
+## 2026-08-05
+- `4e71499` HEALTH-Reiter mit 3D-Figur und Foto-Kalorientracking, Bildempfang fuer alle Bots, lebendiger Agenten-Baum mit Live-Strom, Aufgaben-Kasten, Kostenoptim
+
+Automatisch gepflegt von JARVIS aus den Commit-Messages. Nicht von Hand bearbeiten.
+
 ## 2026-08-02
 - `dbe86a1` Reddit-Anbindung (read-only), Quellenfehler sichtbar, Fortschrittsanzeige im Chat, LISTENER-Anzeige korrigiert, _antwort_senden im SEO-Bot ergaenzt
 

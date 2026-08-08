@@ -306,6 +306,19 @@ LAYOUTS = {
                 "Bewusst aus der Achse.",
     "rahmen": "Duenner gruener Rahmen um die gesamte Flaeche, Text zentriert darin, "
               "viel Weissraum innen.",
+    "showcase": "PRODUKT-SHOWCASE im Bueroflow-Markenstil (wie die offiziellen Ads). Aufbau: "
+                "Bueroflow-Logo klein oben links. Oben rechts ein Badge/Button mit abgerundeten "
+                "Ecken und duennem gruenem Rand ('Jetzt testen', 'Vorab-Zugang', 'Jetzt starten'). "
+                "Grosse fette Headline (80-140px, weiss oder anthrazit) ueber 1-2 Zeilen im oberen "
+                "Drittel, darunter eine kurze Subline (28-36px, gedaempft). Untere zwei Drittel: "
+                "mehrere Dashboard-Screenshots schraeg/perspektivisch gestaffelt, ueberlappend, "
+                "mit gruenem Glow (#5DCAA5) an den Kanten (box-shadow, drop-shadow). Optional kleine "
+                "schwebende UI-Karten (Aufgaben, Credits, Kontakt) mit gruenem Rand um die Screenshots. "
+                "Hintergrund: dunkles Anthrazit (#12161C-#1A1D24), oft mit dezentem radial-gradient-Glow "
+                "in Gruen hinter den Screenshots, ODER ein stark gedaempftes generiertes Motiv "
+                "(Buerogebaeude, Atrium) als Hintergrund. Screenshots per {{ASSET:datei.png}} einbetten "
+                "(echte Dashboard-Bilder wirken am besten) — alternativ mit CSS gebaute Fake-Dashboards "
+                "(dunkle Karten, gruene Balken, Platzhalter-Text). Viel Tiefe durch Staffelung und Glow.",
     # ── Mit Bildmaterial (erst generate_image, dann per {{ASSET:datei}} einbetten) ──
     "foto_vollflaeche": "Generiertes Bild fuellt die ganze Flaeche. Darueber ein dunkler Verlauf "
                         "(linear-gradient von transparent zu #1A1D24), Text unten drauf. "
@@ -968,6 +981,7 @@ AKTUELLES JAHR: {AKTUELLES_JAHR} — nutze nie eine aeltere Jahreszahl in Creati
    im Feed wird es klein dargestellt und faellt durch. Frag im Zweifel nicht, nimm 1200x1200.
 
 8. CREATIVES (Social-Grafiken, Ads, Banner): IMMER render_creative (HTML/CSS) — Text pixelgenau, Umlaute korrekt, Brand exakt. NIEMALS generate_image fuer Text-Creatives (KI-Modelle verhunzen deutschen Text, falsche Logos). generate_image nur fuer textfreie Illustrationen/Hintergruende.
+   - Fuer hochwertige PRODUKT-ADS im offiziellen Bueroflow-Look (grosse Headline oben, Badge oben rechts, gestaffelte Dashboard-Screenshots mit gruenem Glow) das Layout 'showcase' nutzen. Das ist der Marken-Stil fuer starke Werbe-Grafiken — greif oefter darauf zurueck, wenn es um das Produkt selbst geht (nicht bei reinen Statement-/Zitat-Posts).
    ECHTES BRAND-KIT: Nutze IMMER {{{{LOGO_SVG}}}} fuer das Logo (nimmt automatisch die weisse Variante — richtig fuer dunkle Creatives; nie selbst nachbauen!). Andere Varianten gezielt per {{{{ASSET:dateiname}}}} (z.B. <img src="{{{{ASSET:logo_dark_transparent.png}}}}"> auf hellem Grund). Verfuegbare Brand-Dateien: {brand_files}
    Brand-Bauplan fuer Creatives: body margin:0 exakt auf Format; Hintergrund radial-gradient(circle at 50% 30%, #24303a 0%, #1A1D24 60%); Schrift 'Segoe UI',system-ui; Headline GROSS fett weiss (90-130px), Subline #5DCAA5 mit letter-spacing; Fliesstext #c9cdd6; Logo-Wordmark "Büroflow" oben links (B in #5DCAA5); optional CTA-Pill (Rand #5DCAA5, transparent); dezente Glow-Punkte via box-shadow. Radikal minimalistisch, viel Negativraum, KEINE Stockfoto-Optik.
 4. POST-TEXTE NICHT SELBST ABLEGEN: Der Begleittext zu einem Creative wird automatisch
