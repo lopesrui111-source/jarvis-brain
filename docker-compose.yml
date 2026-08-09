@@ -145,6 +145,21 @@ services:
     networks:
       - jarvis-net
 
+  jarvis-regie:
+    build: ./bots/regie
+    container_name: jarvis-regie
+    restart: unless-stopped
+    env_file: .env
+    volumes:
+      - ./vault:/app/vault
+    depends_on:
+      redis:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+    networks:
+      - jarvis-net
+
   camofox:
     build: ./camofox
     container_name: jarvis-camofox

@@ -2,6 +2,11 @@
 
 Automatisch gepflegt von JARVIS aus den Commit-Messages. Nicht von Hand bearbeiten.
 
+## 2026-08-08
+- `e16e3ef` Recorder-Bot fertig fuer oeffentliche Seiten, Dashboard-Auth offen
+
+Automatisch gepflegt von JARVIS aus den Commit-Messages. Nicht von Hand bearbeiten.
+
 ## 2026-08-05
 - `4e71499` HEALTH-Reiter mit 3D-Figur und Foto-Kalorientracking, Bildempfang fuer alle Bots, lebendiger Agenten-Baum mit Live-Strom, Aufgaben-Kasten, Kostenoptim
 
