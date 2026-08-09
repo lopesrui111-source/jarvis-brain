@@ -152,6 +152,7 @@ services:
     env_file: .env
     volumes:
       - ./vault:/app/vault
+      - ./skills-repo/skills:/app/skills:ro
     depends_on:
       redis:
         condition: service_healthy
@@ -168,6 +169,7 @@ services:
     shm_size: "1gb"
     volumes:
       - ./vault:/app/vault
+      - ./vault/custom:/app/src/custom
     depends_on:
       redis:
         condition: service_healthy

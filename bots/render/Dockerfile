@@ -29,6 +29,8 @@ RUN npx remotion browser ensure || true
 
 COPY remotion.config.js .
 COPY src ./src
+# custom-Ordner sicherstellen (wird zur Laufzeit per Volume ueberlagert)
+RUN mkdir -p /app/src/custom
 COPY render_server.js .
 # Logos als statische Dateien fuer Remotion (staticFile sucht in public/)
 COPY brand ./public/brand

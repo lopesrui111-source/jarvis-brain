@@ -51,7 +51,10 @@ async function main() {
         "--codec", "h264",
         "--public-dir", "/app/public",
       ];
-      if (msg.dauer_sek) {
+      // Story-Kompositionen bestimmen ihre Dauer selbst (calculateMetadata) —
+      // hier NIE --frames setzen, sonst wird die Story abgeschnitten.
+      const istStory = komposition.startsWith("story");
+      if (msg.dauer_sek && !istStory) {
         args.push("--frames", `0-${Math.round(msg.dauer_sek * 60) - 1}`);
       }
 
@@ -61,7 +64,8 @@ async function main() {
           if (err) {
             log(`[render] Fehler: ${err.message}`);
             log(stderr ? stderr.slice(-400) : "");
-            await antwort(r, replyQ, `Render fehlgeschlagen: ${err.message.slice(0, 200)}`);
+            const detail = (stderr || err.message || "").slice(-700);
+            await antwort(r, replyQ, `FEHLER beim Render: ${detail}`);
             return;
           }
           const sek = ((Date.now() - start) / 1000).toFixed(1);
