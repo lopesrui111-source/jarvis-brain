@@ -71,10 +71,12 @@ export function useKameraPush(dauerFrames) {
   return interpolate(frame, [0, dauerFrames], [1.0, 1.03], { easing: Easing.out(Easing.ease), extrapolateRight: "clamp" });
 }
 
-// Pivot-Flash-Overlay (Luminance-Flash) — nur an dramatischen Momenten
-export function FlashOverlay({ farbe = "#FFFFFF" }) {
+// Pivot-Flash-Overlay (Luminance-Flash) — nur an dramatischen Momenten.
+// triggerFrame: ab welchem Frame der Blitz zuendet (Standard 0).
+export function FlashOverlay({ farbe = "#FFFFFF", triggerFrame = 0 }) {
   const frame = useCurrentFrame();
-  const op = interpolate(frame, [0, 3, 9], [0, 0.85, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const f = frame - triggerFrame;
+  const op = interpolate(f, [0, 3, 9], [0, 0.85, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
   if (op <= 0.001) return null;
   return <div style={{ position: "absolute", inset: 0, background: farbe, opacity: op, zIndex: 30, pointerEvents: "none" }} />;
 }

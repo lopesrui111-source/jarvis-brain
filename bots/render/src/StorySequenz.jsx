@@ -1,13 +1,28 @@
 import React from "react";
 import {
-  AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate, staticFile, Img, Sequence, Easing,
+  AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate, staticFile, Img, Sequence,
 } from "remotion";
 import { BRAND, logoFuer } from "./brand.js";
 import { segmenteAufbereiten, segmentStarts } from "./story_helper.js";
 import { EXPO, TextBlock, Surface, useKameraPush, FlashOverlay, StoryHintergrund } from "./motion_helpers.jsx";
 
+// custom-Komponenten dynamisch laden (wie in Root) — Map name -> Komponente.
+// Remotion buendelt bei jedem Render neu, daher sind neue custom-Dateien sofort da.
+let CUSTOM_MAP = {};
+try {
+  const ctx = require.context("./custom", false, /\.jsx$/);
+  ctx.keys().forEach((k) => {
+    try {
+      const mod = ctx(k);
+      const name = k.replace("./", "").replace(".jsx", "");
+      CUSTOM_MAP[name] = mod.Komponente || mod.default;
+    } catch (e) { /* fehlerhafte custom-Datei ueberspringen */ }
+  });
+} catch (e) { /* kein custom-Ordner */ }
+
 // ═══ STORY nach Referenz-DNA ═══
-// harte Cuts, metronomisch, easeOutExpo, Text auf Surface, 1 Pivot moeglich.
+// harte Cuts, metronomisch, easeOutExpo, 1 Pivot moeglich.
+// Segmente koennen einfache Stile ODER reiche custom-Komponenten sein.
 export const StorySequenz = ({ segmente = [], palette = "dunkel", logo = true }) => {
   const { width, height } = useVideoConfig();
   const istHoch = height > width;
@@ -21,7 +36,7 @@ export const StorySequenz = ({ segmente = [], palette = "dunkel", logo = true })
 
       {segs.map((seg, i) => (
         <Sequence key={i} from={starts[i]} durationInFrames={seg.frames}>
-          <SegmentRenderer seg={seg} p={p} istHoch={istHoch} width={width} height={height} />
+          <SegmentRenderer seg={seg} p={p} istHoch={istHoch} width={width} height={height} palette={palette} />
         </Sequence>
       ))}
 
@@ -36,17 +51,31 @@ export const StorySequenz = ({ segmente = [], palette = "dunkel", logo = true })
   );
 };
 
-// Segment-Container: Kamera-Push + optional Dissolve-in + optional Flash
-const SegmentRenderer = ({ seg, p, istHoch, width, height }) => {
+const SegmentRenderer = ({ seg, p, istHoch, width, height, palette }) => {
   const frame = useCurrentFrame();
-  const push = useKameraPush(seg.frames);
-  const hell = p.text !== "#FFFFFF";
+  const istCustom = typeof seg.stil === "string" && seg.stil.startsWith("custom-");
 
-  // Dissolve: ganzer Inhalt fadet ein (statt hartem Cut)
   const dissolveOp = seg.uebergang === "dissolve"
     ? interpolate(frame, [0, 12], [0, 1], { easing: EXPO, extrapolateLeft: "clamp", extrapolateRight: "clamp" })
     : 1;
 
+  // custom-Komponente fuellt den Frame selbst (eigener BG/Layout), kein zentrierter Wrapper, kein Push
+  if (istCustom) {
+    const name = seg.stil.replace("custom-", "");
+    const Comp = CUSTOM_MAP[name];
+    return (
+      <AbsoluteFill style={{ opacity: dissolveOp }}>
+        {Comp
+          ? <Comp palette={palette} {...(seg.props || {})} />
+          : <FehlendHinweis name={seg.stil} p={p} />}
+        {seg.uebergang === "flash" && <FlashOverlay farbe={p.akzent} />}
+      </AbsoluteFill>
+    );
+  }
+
+  // einfache Stile: zentriert + Kamera-Push
+  const push = useKameraPush(seg.frames);
+  const hell = p.text !== "#FFFFFF";
   return (
     <AbsoluteFill style={{ justifyContent: "center", alignItems: "center", opacity: dissolveOp }}>
       <div style={{ transform: `scale(${push})`, width: "100%", height: "100%",
@@ -58,15 +87,21 @@ const SegmentRenderer = ({ seg, p, istHoch, width, height }) => {
   );
 };
 
+const FehlendHinweis = ({ name, p }) => (
+  <AbsoluteFill style={{ justifyContent: "center", alignItems: "center", background: p.hintergrund }}>
+    <div style={{ color: p.akzent, fontSize: 32, fontFamily: BRAND.fonts.display }}>
+      Komponente „{name}" nicht gefunden
+    </div>
+  </AbsoluteFill>
+);
+
 const SegmentInhalt = ({ seg, p, istHoch, width, height, hell }) => {
   const { stil, props } = seg;
   if (stil === "zahl")    return <ZahlSeg props={props} p={p} istHoch={istHoch} width={width} height={height} hell={hell} surface={seg.surface} />;
   if (stil === "wortpop") return <WortPopSeg props={props} p={p} istHoch={istHoch} width={width} height={height} hell={hell} surface={seg.surface} />;
-  // szenen / kinetic / formen -> alle als Text-auf-Surface (DNA: Text nie nackt)
   return <AussageSeg props={props} p={p} istHoch={istHoch} width={width} height={height} hell={hell} surface={seg.surface} />;
 };
 
-// Kern: eine Aussage auf Surface (Glas/Card), easeOutExpo Blur-Text
 const AussageSeg = ({ props, p, istHoch, width, height, hell, surface }) => {
   const txt = (props.szenen && props.szenen[0]) || (props.zeilen && props.zeilen.join(" ")) || props.text || "Aussage";
   const istAkzent = !!props.akzent;
@@ -83,7 +118,6 @@ const AussageSeg = ({ props, p, istHoch, width, height, hell, surface }) => {
   );
 };
 
-// Zahl auf Surface: zaehlt hoch (easeOutExpo), Vor-/Nachtext als Blur-Blocks
 const ZahlSeg = ({ props, p, istHoch, width, height, hell, surface }) => {
   const frame = useCurrentFrame();
   const ziel = props.zielZahl ?? 30;
@@ -110,7 +144,6 @@ const ZahlSeg = ({ props, p, istHoch, width, height, hell, surface }) => {
   );
 };
 
-// WortPop: Hook-Woerter, aber je in kleinen Pills (DNA: Text nie ganz nackt)
 const WortPopSeg = ({ props, p, istHoch, width, height, hell }) => {
   const frame = useCurrentFrame();
   const worte = props.worte || ["WORT"];

@@ -41,7 +41,7 @@ PG_PASS = os.getenv("POSTGRES_PASSWORD", "")
 PG_DB   = os.getenv("POSTGRES_DB", "jarvis_brain")
 
 MODEL      = os.getenv("ORCHESTRATOR_MODEL", "claude-sonnet-4-6")
-MAX_TOKENS = 3000
+MAX_TOKENS = 8000
 MAX_HISTORY = 8
 MAX_TOOL_ROUNDS = 14
 VAULT_DIR = "/app/vault"
@@ -55,6 +55,7 @@ MAX_CLIPS_PRO_LAUF = int(os.getenv("REGIE_MAX_CLIPS", "6"))
 
 # ── SKILLS (Marketing-Wissen) ────────────────────────────────
 SKILLS_DIR = os.getenv("SKILLS_DIR", "/app/skills")
+MOTION_SKILLS_DIR = os.getenv("MOTION_SKILLS_DIR", "/app/motion-skills")
 # Kuratierte, video-relevante Skills (Name -> Ordner im skills-repo)
 VERFUEGBARE_SKILLS = {
     "marketing-psychology": "Psychologische Trigger, warum Menschen klicken/kaufen, Hooks",
@@ -65,6 +66,10 @@ VERFUEGBARE_SKILLS = {
     "copy-editing":         "Knackige Texte, Kuerzen, Klarheit",
     "product-marketing":    "Nutzen kommunizieren, Positionierung, Messaging",
     "offers":               "Angebote, CTAs, Conversion",
+    "motion-design":        "MOTION: Timing, Easing, Disney-Prinzipien, Choreografie fuer Animationen (fuer Komponenten-Bau!)",
+    "motion-principles":    "MOTION: Anti-AI-Slop-Prinzipien (Emil Kowalski/Krehel), wann/wie animieren, was billig wirkt",
+    "ui-animation":         "MOTION: Springs, Easing-Kurven, Clip-path-Reveals, Timing, Transition-Rezepte",
+    "video-template":       "MOTION: Multi-Scene-Video-Aufbau, Szenen-Transitions",
 }
 
 def skill_liste_text():
@@ -75,7 +80,10 @@ def lade_skill(name):
     """Liest eine SKILL.md aus dem skills-repo. Gibt Text (gekuerzt) zurueck."""
     if name not in VERFUEGBARE_SKILLS:
         return f"Skill '{name}' nicht verfuegbar. Verfuegbar: {', '.join(VERFUEGBARE_SKILLS)}"
-    pfad = os.path.join(SKILLS_DIR, name, "SKILL.md")
+    # Motion-Skills liegen in eigenem Ordner, Marketing-Skills im skills-repo
+    motion_namen = {"motion-design", "motion-principles", "ui-animation", "video-template"}
+    basis = MOTION_SKILLS_DIR if name in motion_namen else SKILLS_DIR
+    pfad = os.path.join(basis, name, "SKILL.md")
     try:
         with open(pfad, encoding="utf-8") as f:
             txt = f.read()
@@ -157,12 +165,23 @@ Fuer atmosphaerische, cineastische HINTERGRUND-Clips (fliessende Texturen, Stimm
 ═══ EIGENE KOMPONENTEN BAUEN (Komponenten-Schmiede) ═══
 Du bist nicht auf die festen Stile beschraenkt. Mit dem Tool 'komponente_bauen' kannst du EIGENE Motion-Komponenten in Remotion (JSX) schreiben — fuer Effekte, die es noch nicht gibt. So wird das Studio mit der Zeit besser: du kombinierst Vorhandenes und erfindest Neues.
 
+TIPP: Bevor du eine neue Komponente baust, lies bei Bedarf einen Motion-Skill ('motion-design' fuer Timing/Easing/Disney-Prinzipien/Choreografie, 'motion-principles' um AI-Slop zu vermeiden, 'ui-animation' fuer konkrete Easing-Kurven/Reveals). Das hebt die Qualitaet deutlich.
+
 REGELN fuer den JSX-Code:
 - MUSS zwei Exports haben: `export const meta = {{ dauerSek: N, defaultProps: {{...}} }};` und `export const Komponente = (props) => {{ ... }};`
 - Importiere Bausteine relativ: `import {{ EXPO, TextBlock, Surface, FlashOverlay, StoryHintergrund, useKameraPush }} from "../motion_helpers.jsx";` und `import {{ BRAND, logoFuer }} from "../brand.js";`
 - Nutze `useVideoConfig()` fuer width/height (damit es in allen Formaten laeuft) und `useCurrentFrame()`.
 - HALTE DICH AN DIE MOTION-DNA: easeOutExpo (EXPO) als Kurve, KEIN Bounce/Elastic. Text auf Surface (Glas/Card), nie nackt. Metronomisch. Max 2 Dekor-Elemente. Subtile Bewegung statt Zappeln.
 - Verfuegbare Bausteine: EXPO (Easing), TextBlock (Fade+Blur-Text), Surface (Glas/Card), FlashOverlay (Pivot-Blitz), StoryHintergrund (Blob-BG), useKameraPush (Scale-Push). BRAND.paletten.{{dunkel,hell,gruen,limette}} mit .hintergrund/.text/.akzent.
+
+GRAFIK-BAUSTEINE fuer visuellen Reichtum (import aus "../grafik.jsx"):
+- Icon: <Icon name="rechnung" groesse={{48}} farbe={{p.akzent}} delay={{10}} /> — verfuegbare Namen: rechnung, dokument, mail, uhr, sanduhr, check, euro, warnung, blitz, karte, glocke, kalender, prozent, pfeil, x, robot, stapel
+- Pille: <Pille text="Rechtssicher" icon="check" akzent={{p.akzent}} hell={{hell}} farbe={{p.text}} delay={{12}} /> — kleines Badge mit Icon+Text
+- MiniKarte: <MiniKarte titel="Zahlung offen" zeile="Seit 21 Tagen" statusIcon="warnung" statusFarbe="#ff5a5a" hell={{hell}} akzent={{p.akzent}} delay={{8}} /> — App-UI-Snippet (wie in Referenzen!)
+- CheckZeichnen: <CheckZeichnen groesse={{90}} farbe={{p.akzent}} delay={{10}} /> — Haekchen das sich zeichnet
+- Ring: <Ring groesse={{120}} farbe={{p.akzent}} prozent={{100}} delay={{6}} /> — Fortschritts-Ring der sich fuellt
+
+WICHTIG fuer Reichtum: Deine Referenzen leben von UI-Elementen (Karten, Pillen, Icons, Status-Meldungen), NICHT nur Text auf Panel. Baue diese Grafik-Bausteine ein — z.B. eine MiniKarte "Payment failed"-Style, mehrere Pillen als Feature-Liste, ein Haekchen-Moment beim Erfolg. Das hebt den Look deutlich. Halte dich trotzdem an "max 2-3 Elemente gleichzeitig, clean".
 
 VORLAGE (Beispiel-Template, an dem du dich orientierst):
 ```jsx

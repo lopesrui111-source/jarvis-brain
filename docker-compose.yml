@@ -153,6 +153,7 @@ services:
     volumes:
       - ./vault:/app/vault
       - ./skills-repo/skills:/app/skills:ro
+      - ./motion-skills:/app/motion-skills:ro
     depends_on:
       redis:
         condition: service_healthy
