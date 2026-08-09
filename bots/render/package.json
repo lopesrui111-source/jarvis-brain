@@ -1,0 +1,16 @@
+{
+  "name": "jarvis-remotion",
+  "version": "1.0.0",
+  "description": "Motion-Design-Rendering fuer das JARVIS Studio-Team",
+  "scripts": {
+    "render": "remotion render",
+    "studio": "remotion studio"
+  },
+  "dependencies": {
+    "@remotion/cli": "4.0.230",
+    "remotion": "4.0.230",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "redis": "^4.7.0"
+  }
+}

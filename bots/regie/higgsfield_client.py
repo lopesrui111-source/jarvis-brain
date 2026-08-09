@@ -19,7 +19,7 @@ SECRET = os.getenv("HIGGSFIELD_SECRET", "")
 
 # Standard-Modelle (ueber .env ueberschreibbar)
 BILD_MODELL  = os.getenv("HF_BILD_MODELL", "higgsfield-ai/soul/standard")
-VIDEO_MODELL = os.getenv("HF_VIDEO_MODELL", "bytedance/seedance/v1/pro/image-to-video")
+VIDEO_MODELL = os.getenv("HF_VIDEO_MODELL", "kling-video/v2.1/pro/image-to-video")
 
 POLL_INTERVALL = 6      # Sekunden zwischen Status-Abfragen
 POLL_MAX = 60           # max. Versuche (~6 Min)

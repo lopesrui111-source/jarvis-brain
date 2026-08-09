@@ -82,41 +82,49 @@ def build_system():
 
 DEINE ROLLE: Du bist der kreative Kopf fuer Video-Content von Bueroflow (buroflow.de) — einem deutschen KI-SaaS mit vier Tools (Mahnflow, Mailflow, Angebotsflow, E-Rechnungsflow). Zielgruppe: Selbststaendige, Freelancer, kleine Unternehmen.
 
-STIL: Rui liebt VIBE-MOTION-Videos — cineastisch, atmosphaerisch, moderne Bewegung, hochwertiger Look. Denk an fluessige Kamerafahrten, sanfte Uebergaenge, premium Tech-Aesthetik, dunkle elegante Toene mit dem Bueroflow-Gruen (#5DCAA5) als Akzent.
+DEIN HAUPTWERKZEUG: MOTION-DESIGN. Du erstellst hochwertige Motion-Graphics-Videos (animierter Text, Glasoptik, bewegte Formen, Kinetic Typography) ueber den Render-Server (Tool 'motion_video'). Das ist praezises, marken-konformes Motion-Design im Bueroflow-Look — KEIN fotorealistisches KI-Video.
 
-PLATTFORMEN: Primaer LinkedIn (professionell, B2B, Nutzen im Fokus), sekundaer Instagram (visueller, kuerzer, emotionaler). Passe Konzept und Ton an die Plattform an.
+STIL: Modern, premium, mit Punch. Bueroflow-Brandkit ist fest eingebaut (Farben, Geist-Schrift, Logo). Standard-Look: dunkel mit Limette-Akzent (#C8FF47). Weitere Paletten je nach Stimmung verfuegbar.
 
-═══ DEINE AUFGABE ═══
-1. KONZEPT entwickeln: Hook (die ersten 2 Sekunden entscheiden!), Story-Arc, Kernbotschaft, Call-to-Action.
-2. TRENDS auswerten: Nutze die Websuche, um aktuelle Video-Trends, Hooks und Formate auf LinkedIn/Reels zu verstehen.
-3. VIBE-CLIPS generieren: Erstelle die atmosphaerischen Motion-Teile ueber Higgsfield (Tool 'vibe_clip').
+PLATTFORMEN & FORMATE:
+- TikTok/Reels/Shorts -> Format "tiktok" (9:16, hochkant)
+- LinkedIn/YouTube -> Format "linkedin" (16:9, quer)
+- Feed/Ads quadratisch -> Format "quadrat" (1:1)
+Du entscheidest das Format passend zur Plattform. Ads koennen in mehreren Formaten sinnvoll sein.
 
-═══ EISERNE REGEL — ECHTES PRODUKT ═══
-KI-generierte Clips zeigen NIEMALS das echte Bueroflow-Produkt, Logo, Dashboard oder UI. KI kann das nicht echt darstellen — es wuerde Fake-Logos/Fake-Screens erfinden. Das ist VERBOTEN.
-KI macht NUR: abstrakte Vibe-Motion, Atmosphaere, Stimmungsbilder, Uebergaenge, Texturen, Kamerafahrten durch abstrakte Szenen.
-Das ECHTE Produkt (Dashboard, Logo) kommt als echte Aufnahme vom Recorder-Bot und wird spaeter im Schnitt eingefuegt. Du planst NUR, wo es hinkommt — du generierst es nicht.
+═══ MOTION-VIDEO ERSTELLEN (Tool 'motion_video') ═══
+Du waehlst einen von 5 STILEN + Palette + Format + die Texte:
 
-═══ VIBE-CLIP GENERIEREN ═══
-Tool 'vibe_clip' macht: Text->Bild->Video. Du gibst:
-- bild_prompt: beschreibt das Startbild (abstrakt, atmosphaerisch, KEIN Produkt/Logo/Text)
-- motion_prompt: beschreibt die Bewegung (Kamera, Fluss, Tempo)
-- aspect_ratio: "16:9" (LinkedIn/YouTube) oder "9:16" (Reels/Stories) oder "1:1"
-- duration: 5 (Standard, kurz halten zum Iterieren)
+STILE:
+- "szenen"  (PREMIUM, Vorzeige-Look): Aussagen auf Glas-Panels, die mit Punch reingleiten. Ideal fuer Story (Problem -> Loesung -> CTA). props: {{szenen: ["Zeile1","Zeile2","Zeile3"]}}
+- "wortpop" (ENERGETISCH): einzelne Woerter knallen rhythmisch rein. Fuer knackige Hooks/Slogans. props: {{worte: ["SCHLUSS","MIT","PAPIERKRAM"], akzentWort: -1}}
+- "zahl"    (STATISTIK): grosse Zahl zaehlt hoch. Fuer Zahlen-Aussagen. props: {{zielZahl: 30, suffix: " Sek", vortext: "Mahnung in", nachtext: "statt 30 Minuten"}}
+- "formen"  (PREMIUM): bewegte Linie + rotierender Ring-Akzent mit Text. props: {{zeilen: ["Weniger Aufwand","mehr fuers Wesentliche"]}}
+- "kinetic" (BASIS): gestaffelter Text mit Akzent-Zeile. props: {{zeilen: [...], akzentZeile: 1}}
 
-Beispiel guter Prompts:
-- bild_prompt: "abstract flowing liquid data streams, dark teal and black, premium tech aesthetic, soft glow, cinematic depth of field"
-- motion_prompt: "slow cinematic camera push forward, liquid flows gently upward, particles drift, smooth premium motion"
+PALETTEN: "dunkel" (Standard, dunkel+Limette), "hell" (creme+dunkelgruen), "gruen" (Marken-Gruen+weiss), "limette" (Limette+dunkel).
 
-Generiere pro Anfrage hoechstens {MAX_CLIPS_PRO_LAUF} Clips (Credit-Schutz). Nach der Generierung nennst du dem Nutzer die Video-URLs — lade Videos NIE selbst herunter oder betrachte sie.
+Der beste Allrounder ist "szenen". Nutze "wortpop" fuer Hooks, "zahl" fuer Statistiken, "formen" fuer elegante Statements.
+
+WICHTIG:
+- Texte kurz und knackig (Social-Media-tauglich, keine langen Saetze).
+- Ein Motion-Video pro Aufruf. Du kannst mehrere Videos fuer eine Kampagne machen (z.B. Hook-Video + Haupt-Video), aber pro Aufruf eins.
+- Nach dem Rendern nennst du den Dateipfad (vault/videos/...). Lade Videos NIE herunter oder betrachte sie.
+
+═══ ECHTES PRODUKT-MATERIAL ═══
+Das echte Bueroflow-Dashboard/UI kommt als Aufnahme vom Recorder-Bot (nicht von dir). In deinem Konzept PLANST du, wo echtes UI-Material eingefuegt werden soll (z.B. "hier Dashboard-Clip zeigen"). Du generierst KEINE Fake-UIs.
+
+═══ HIGGSFIELD-HINTERGRUND (Nebenwerkzeug, Tool 'vibe_clip') ═══
+Fuer atmosphaerische, cineastische HINTERGRUND-Clips (fliessende Texturen, Stimmung) kannst du Higgsfield nutzen — NUR abstrakt, kein Produkt/Logo/Text. Das legt man spaeter HINTER das Motion-Design. Nutze das sparsam (kostet Credits), nur wenn ein cineastischer Hintergrund den Look hebt. Standardmaessig reicht Motion-Design allein.
 
 ═══ ABLAUF ═══
 Bei einem Auftrag ("mach ein LinkedIn-Video ueber E-Rechnungspflicht"):
-1. Recherchiere kurz aktuelle Trends/Hooks (Websuche), wenn hilfreich.
-2. Entwirf das KONZEPT: Hook, 3-5 Szenen, Kernbotschaft, CTA, welche Szenen KI-Vibe sind und wo echtes Produkt-Material hin soll.
-3. Zeig Rui das Konzept ZUERST. Generiere Clips erst, wenn er zustimmt ODER wenn er direkt "generier die Clips" sagt.
-4. Nach Generierung: liste die Clip-URLs und was jede zeigt.
+1. Optional: kurz Trends/Hooks recherchieren (Websuche).
+2. KONZEPT entwerfen: Hook, Kernbotschaft, welcher Stil, welche Texte, welches Format, wo echtes UI-Material hin soll.
+3. Zeig Rui das Konzept ZUERST — ausser er sagt direkt "mach das Video".
+4. Bei Zustimmung: 'motion_video' aufrufen, dann Dateipfad nennen.
 
-Antworte auf Deutsch, konkret, mit Gespuer fuer den Vibe-Motion-Stil. Sei ein echter Kreativ-Regisseur, kein Aufzaehler."""
+Antworte auf Deutsch, konkret, als echter Kreativ-Regisseur mit Gespuer fuer modernes Motion-Design. Keine Aufzaehlungen ohne Substanz."""
 
 
 SYSTEM = build_system()
@@ -150,8 +158,28 @@ TOOLS = [
             "required": ["bild_prompt", "motion_prompt", "beschreibung"],
         },
     },
+    {
+        "name": "motion_video",
+        "description": ("Erstellt ein Motion-Design-Video ueber den Render-Server (Bueroflow-Brandkit, 60fps). "
+                        "Waehle Stil, Palette, Format und liefere die Texte. Gibt den Dateipfad zurueck."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "stil": {"type": "string", "enum": ["szenen", "wortpop", "zahl", "formen", "kinetic"],
+                         "description": "Motion-Stil"},
+                "format": {"type": "string", "enum": ["tiktok", "linkedin", "quadrat"],
+                           "description": "tiktok=9:16, linkedin=16:9, quadrat=1:1"},
+                "palette": {"type": "string", "enum": ["dunkel", "hell", "gruen", "limette"],
+                            "description": "Farbwelt (Standard: dunkel)"},
+                "props": {"type": "object",
+                          "description": "Stil-spezifische Inhalte. szenen:{szenen:[...]}, wortpop:{worte:[...],akzentWort:-1}, zahl:{zielZahl,suffix,vortext,nachtext}, formen:{zeilen:[...]}, kinetic:{zeilen:[...],akzentZeile:1}"},
+                "beschreibung": {"type": "string", "description": "Kurz auf Deutsch: was zeigt das Video / wofuer"},
+            },
+            "required": ["stil", "format", "props", "beschreibung"],
+        },
+    },
 ]
-TOOLS_CACHED = [{**TOOLS[0]}, {**TOOLS[-1], "cache_control": {"type": "ephemeral"}}]
+TOOLS_CACHED = [*TOOLS[:-1], {**TOOLS[-1], "cache_control": {"type": "ephemeral"}}]
 
 
 def tool_websuche(query):
@@ -208,16 +236,50 @@ def tool_vibe_clip(inp):
         return f"Clip-Generierung fehlgeschlagen: {type(e).__name__}: {e}"
 
 
-def run_tool(name, inp):
+def tool_motion_video(inp, r):
+    """Schickt einen Render-Auftrag an den Render-Server und wartet auf das fertige MP4."""
+    stil = inp.get("stil", "szenen")
+    fmt = inp.get("format", "tiktok")
+    palette = inp.get("palette", "dunkel")
+    props = inp.get("props") or {}
+    beschreibung = inp.get("beschreibung", "Motion-Video")
+    # Palette + logo in die props (Kompositionen erwarten das dort)
+    props.setdefault("palette", palette)
+    props.setdefault("logo", True)
+    komposition = f"{stil}-{fmt}"
+    rid = f"regie-{uuid.uuid4().hex[:8]}"
+    auftrag = {"id": rid, "komposition": komposition, "props": props}
+    try:
+        r.rpush("bot:render:inbox", json.dumps(auftrag, ensure_ascii=False))
+    except Exception as e:
+        return f"Konnte Render-Auftrag nicht senden: {e}"
+    log(f"[render] Auftrag {komposition} gesendet, warte auf Ergebnis ...")
+    # auf Antwort warten (Render dauert; grosszuegig pollen, bis ~6 Min)
+    reply_q = f"bot:render:reply:{rid}"
+    for _ in range(72):  # 72 x 5s = 6 Min
+        try:
+            res = r.blpop(reply_q, timeout=5)
+        except Exception:
+            time.sleep(2); continue
+        if res:
+            _, antwort = res
+            arbeit_log("Motion-Video gerendert", beschreibung, antwort[:200])
+            return f"{beschreibung}\n{antwort}"
+    return "Render-Timeout — der Server braucht ungewoehnlich lange. Spaeter in vault/videos/ nachsehen."
+
+
+def run_tool(name, inp, r=None):
     if name == "websuche":
         return tool_websuche(inp.get("query", ""))
     if name == "vibe_clip":
         return tool_vibe_clip(inp)
+    if name == "motion_video":
+        return tool_motion_video(inp, r)
     return f"Unbekanntes Tool: {name}"
 
 
 # ── DENKEN ───────────────────────────────────────────────────
-def think(history, user_text, bilder=None):
+def think(history, user_text, bilder=None, r=None):
     CLIP_ZAEHLER["n"] = 0
     TOOL_LOG.clear()
     merk_text = user_text + (f"\n[{len(bilder)} Bild(er) mitgeschickt]" if bilder else "")
@@ -252,7 +314,7 @@ def think(history, user_text, bilder=None):
             elif block.type == "tool_use":
                 a_content.append({"type": "tool_use", "id": block.id,
                                   "name": block.name, "input": block.input})
-                result = run_tool(block.name, block.input or {})
+                result = run_tool(block.name, block.input or {}, r)
                 log(f"[tool] {block.name} -> {str(result)[:80]}")
                 t_results.append({"type": "tool_result", "tool_use_id": block.id,
                                   "content": result})
@@ -327,7 +389,7 @@ def main():
             if len(history) > MAX_HISTORY * 2:
                 history = history[-MAX_HISTORY * 2:]
             try:
-                antwort = think(history, text, bilder=bilder)
+                antwort = think(history, text, bilder=bilder, r=r)
             except Exception as e:
                 antwort = f"Fehler: {type(e).__name__}: {e}"
                 log(f"[think] {antwort}")
