@@ -171,6 +171,7 @@ services:
     volumes:
       - ./vault:/app/vault
       - ./vault/custom:/app/src/custom
+      - ./vault/sfx:/app/public/sfx
     depends_on:
       redis:
         condition: service_healthy

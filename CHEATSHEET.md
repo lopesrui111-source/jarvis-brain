@@ -1,6 +1,6 @@
 # Cheatsheet
 
-Stand: 09.08.2026 07:01 — automatisch erzeugt.
+Stand: 10.08.2026 07:00 — automatisch erzeugt.
 
 ## Verbindung
 ```

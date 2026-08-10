@@ -2,6 +2,14 @@
 
 Automatisch gepflegt von JARVIS aus den Commit-Messages. Nicht von Hand bearbeiten.
 
+## 2026-08-09
+- `9e04714` Studio: 4 Motion-Skills angebunden (Disney/easing/anti-slop), Grafik-Bausteine, custom-Segmente in Story, MAX_TOKENS 8000 fuer volle Komponenten
+- `7fba1f5` Studio: Motion-DNA aus Referenzen (easeOutExpo/Glas/Cuts), Referenz-Analyse-Tool, Komponenten-Schmiede (Bot baut eigene Komponenten)
+- `36999fa` Studio-Team: Regie-Bot rendert Motion-Design autonom via Render-Server (Kreislauf komplett)
+- `55558c4` Regie-Bot + Higgsfield-Client bereit, warten auf API-Guthaben
+
+Automatisch gepflegt von JARVIS aus den Commit-Messages. Nicht von Hand bearbeiten.
+
 ## 2026-08-08
 - `e16e3ef` Recorder-Bot fertig fuer oeffentliche Seiten, Dashboard-Auth offen
 

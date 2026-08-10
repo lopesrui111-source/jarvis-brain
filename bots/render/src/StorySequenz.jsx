@@ -1,13 +1,16 @@
 import React from "react";
 import {
-  AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate, staticFile, Img, Sequence,
+  AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate, staticFile, Img, Audio, Sequence,
 } from "remotion";
+import { TransitionSeries, springTiming, linearTiming } from "@remotion/transitions";
+import { fade } from "@remotion/transitions/fade";
+import { slide } from "@remotion/transitions/slide";
+import { wipe } from "@remotion/transitions/wipe";
 import { BRAND, logoFuer } from "./brand.js";
-import { segmenteAufbereiten, segmentStarts } from "./story_helper.js";
+import { segmenteAufbereiten, istFliessend, UEBERGANG_FRAMES } from "./story_helper.js";
 import { EXPO, TextBlock, Surface, useKameraPush, FlashOverlay, StoryHintergrund } from "./motion_helpers.jsx";
 
-// custom-Komponenten dynamisch laden (wie in Root) — Map name -> Komponente.
-// Remotion buendelt bei jedem Render neu, daher sind neue custom-Dateien sofort da.
+// custom-Komponenten dynamisch laden
 let CUSTOM_MAP = {};
 try {
   const ctx = require.context("./custom", false, /\.jsx$/);
@@ -16,33 +19,59 @@ try {
       const mod = ctx(k);
       const name = k.replace("./", "").replace(".jsx", "");
       CUSTOM_MAP[name] = mod.Komponente || mod.default;
-    } catch (e) { /* fehlerhafte custom-Datei ueberspringen */ }
+    } catch (e) {}
   });
-} catch (e) { /* kein custom-Ordner */ }
+} catch (e) {}
 
-// ═══ STORY nach Referenz-DNA ═══
-// harte Cuts, metronomisch, easeOutExpo, 1 Pivot moeglich.
-// Segmente koennen einfache Stile ODER reiche custom-Komponenten sein.
-export const StorySequenz = ({ segmente = [], palette = "dunkel", logo = true }) => {
+// Uebergang-String -> Remotion-Presentation
+function presentation(uebergang, width, height) {
+  if (uebergang === "fade") return fade();
+  if (uebergang === "slide-links")  return slide({ direction: "from-right" });
+  if (uebergang === "slide-rechts") return slide({ direction: "from-left" });
+  if (uebergang === "slide-hoch")   return slide({ direction: "from-bottom" });
+  if (uebergang === "slide-runter") return slide({ direction: "from-top" });
+  if (uebergang === "wipe")     return wipe({ direction: "from-right" });
+  return fade(); // Fallback fuer fliessende
+}
+
+export const StorySequenz = ({ segmente = [], palette = "dunkel", logo = true, sfx = [] }) => {
   const { width, height } = useVideoConfig();
   const istHoch = height > width;
   const p = BRAND.paletten[palette] || BRAND.paletten.dunkel;
   const segs = segmenteAufbereiten(segmente);
-  const starts = segmentStarts(segs);
 
   return (
     <AbsoluteFill style={{ background: p.hintergrund, fontFamily: BRAND.fonts.display, overflow: "hidden" }}>
-      <StoryHintergrund p={p} />
+      <TransitionSeries>
+        {segs.map((seg, i) => {
+          const el = [];
+          // Uebergang VOR diesem Segment (ausser dem ersten)
+          if (i > 0 && istFliessend(seg.uebergang)) {
+            el.push(
+              <TransitionSeries.Transition key={`t${i}`}
+                timing={linearTiming({ durationInFrames: UEBERGANG_FRAMES })}
+                presentation={presentation(seg.uebergang, width, height)} />
+            );
+          }
+          el.push(
+            <TransitionSeries.Sequence key={`s${i}`} durationInFrames={seg.frames}>
+              <SegmentRenderer seg={seg} p={p} istHoch={istHoch} width={width} height={height} palette={palette} />
+            </TransitionSeries.Sequence>
+          );
+          return el;
+        })}
+      </TransitionSeries>
 
-      {segs.map((seg, i) => (
-        <Sequence key={i} from={starts[i]} durationInFrames={seg.frames}>
-          <SegmentRenderer seg={seg} p={p} istHoch={istHoch} width={width} height={height} palette={palette} />
+      {/* SFX-Spuren: jeder Effekt startet bei seinem Frame */}
+      {(sfx || []).map((s, i) => (
+        <Sequence key={`sfx${i}`} from={Math.max(0, s.frame || 0)}>
+          <Audio src={staticFile(s.datei)} volume={s.lautstaerke ?? 0.7} />
         </Sequence>
       ))}
 
       {logo && (
         <div style={{ position: "absolute", bottom: istHoch ? "8%" : "6%", width: "100%",
-          textAlign: "center", zIndex: 20 }}>
+          textAlign: "center", zIndex: 30 }}>
           <Img src={staticFile(logoFuer(palette))}
             style={{ height: istHoch ? width * 0.045 : height * 0.045, opacity: 0.85 }} />
         </div>
@@ -52,36 +81,31 @@ export const StorySequenz = ({ segmente = [], palette = "dunkel", logo = true })
 };
 
 const SegmentRenderer = ({ seg, p, istHoch, width, height, palette }) => {
-  const frame = useCurrentFrame();
   const istCustom = typeof seg.stil === "string" && seg.stil.startsWith("custom-");
 
-  const dissolveOp = seg.uebergang === "dissolve"
-    ? interpolate(frame, [0, 12], [0, 1], { easing: EXPO, extrapolateLeft: "clamp", extrapolateRight: "clamp" })
-    : 1;
-
-  // custom-Komponente fuellt den Frame selbst (eigener BG/Layout), kein zentrierter Wrapper, kein Push
   if (istCustom) {
     const name = seg.stil.replace("custom-", "");
     const Comp = CUSTOM_MAP[name];
     return (
-      <AbsoluteFill style={{ opacity: dissolveOp }}>
-        {Comp
-          ? <Comp palette={palette} {...(seg.props || {})} />
-          : <FehlendHinweis name={seg.stil} p={p} />}
+      <AbsoluteFill>
+        {Comp ? <Comp palette={palette} {...(seg.props || {})} /> : <FehlendHinweis name={seg.stil} p={p} />}
         {seg.uebergang === "flash" && <FlashOverlay farbe={p.akzent} />}
       </AbsoluteFill>
     );
   }
 
-  // einfache Stile: zentriert + Kamera-Push
+  // einfache Stile: eigener Hintergrund + zentriert + Kamera-Push
   const push = useKameraPush(seg.frames);
   const hell = p.text !== "#FFFFFF";
   return (
-    <AbsoluteFill style={{ justifyContent: "center", alignItems: "center", opacity: dissolveOp }}>
-      <div style={{ transform: `scale(${push})`, width: "100%", height: "100%",
-        display: "flex", justifyContent: "center", alignItems: "center" }}>
-        <SegmentInhalt seg={seg} p={p} istHoch={istHoch} width={width} height={height} hell={hell} />
-      </div>
+    <AbsoluteFill style={{ background: p.hintergrund }}>
+      <StoryHintergrund p={p} />
+      <AbsoluteFill style={{ justifyContent: "center", alignItems: "center" }}>
+        <div style={{ transform: `scale(${push})`, width: "100%", height: "100%",
+          display: "flex", justifyContent: "center", alignItems: "center" }}>
+          <SegmentInhalt seg={seg} p={p} istHoch={istHoch} width={width} height={height} hell={hell} />
+        </div>
+      </AbsoluteFill>
       {seg.uebergang === "flash" && <FlashOverlay farbe={p.akzent} />}
     </AbsoluteFill>
   );

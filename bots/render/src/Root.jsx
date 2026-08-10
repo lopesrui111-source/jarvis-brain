@@ -21,6 +21,7 @@ const defsZahl    = { zielZahl: 30, suffix: " Sek", vortext: "Mahnung in", nacht
 const defsFormen  = { zeilen: ["Weniger Aufwand","mehr fürs Wesentliche"], palette: "dunkel", logo: true };
 
 const defsStory = {
+  sfx: [],
   palette: "dunkel", logo: true,
   segmente: [
     { stil: "wortpop", props: { worte: ["SCHLUSS","MIT","PAPIERKRAM"], akzentWort: -1 }, dauer: 1.7, surface: "glas", uebergang: "cut" },

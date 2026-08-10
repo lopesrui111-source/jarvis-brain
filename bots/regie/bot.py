@@ -56,6 +56,10 @@ MAX_CLIPS_PRO_LAUF = int(os.getenv("REGIE_MAX_CLIPS", "6"))
 # ── SKILLS (Marketing-Wissen) ────────────────────────────────
 SKILLS_DIR = os.getenv("SKILLS_DIR", "/app/skills")
 MOTION_SKILLS_DIR = os.getenv("MOTION_SKILLS_DIR", "/app/motion-skills")
+REFERENZ_DIR = os.getenv("REFERENZ_DIR", "/app/vault/referenzen")
+CUSTOM_DIR = os.getenv("CUSTOM_DIR", "/app/vault/custom")
+SFX_DIR = os.getenv("SFX_DIR", "/app/vault/sfx")
+ELEVENLABS_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 # Kuratierte, video-relevante Skills (Name -> Ordner im skills-repo)
 VERFUEGBARE_SKILLS = {
     "marketing-psychology": "Psychologische Trigger, warum Menschen klicken/kaufen, Hooks",
@@ -122,6 +126,15 @@ def arbeit_log(aktion, ergebnis, datei=""):
 
 
 # ── SYSTEM-PROMPT ────────────────────────────────────────────
+def custom_komponenten_liste():
+    """Listet die aktuell verfuegbaren custom-Komponenten (Dateinamen ohne .jsx)."""
+    try:
+        namen = [f[:-4] for f in os.listdir(CUSTOM_DIR)
+                 if f.endswith(".jsx") and not f.startswith("_") and f != "beispiel.jsx"]
+        return sorted(namen)
+    except Exception:
+        return []
+
 def build_system():
     return f"""Du bist der REGIE-BOT im JARVIS Studio-Team von Rui. Heute ist {datetime.now():%d.%m.%Y}, Jahr {AKTUELLES_JAHR}.
 
@@ -155,6 +168,40 @@ WICHTIG:
 - Texte kurz und knackig (Social-Media-tauglich, keine langen Saetze).
 - Ein Motion-Video pro Aufruf. Du kannst mehrere Videos fuer eine Kampagne machen (z.B. Hook-Video + Haupt-Video), aber pro Aufruf eins.
 - Nach dem Rendern nennst du den Dateipfad (vault/videos/...). Lade Videos NIE herunter oder betrachte sie.
+
+═══ SOUND-EFFEKTE (Tool 'sfx_generieren') ═══
+Du kannst passende SFX generieren (ElevenLabs) und in Videos einsetzen. Typische SFX fuer Motion-Videos:
+- Uebergangs-Whoosh (bei slide/wipe-Uebergaengen)
+- Pop/Tick (wenn Text/Elemente reinkommen)
+- Impact/Boom (bei einem flash-Pivot)
+- Erfolgs-Chime (beim positiven Moment, z.B. "Bezahlt")
+Beschreibe SFX wie ein PROFESSIONELLER SOUND-DESIGNER — detailliert, mit Textur/Charakter, nicht generisch. Schlechte Prompts geben billige Sounds. Beispiele:
+- statt "whoosh" -> "punchy cinematic transition whoosh, fast air movement with a subtle low-end tail, crisp and modern, professional sound design"
+- statt "success chime" -> "bright premium success chime, short glassy bell with a warm harmonic shimmer, satisfying and clean, UI reward sound"
+- statt "pop" -> "tight snappy UI pop, subtle click with a soft body, modern app interaction"
+- Impact -> "deep cinematic impact hit with tight punch and short reverb tail, trailer-style"
+Nutze prompt_influence 0.6-0.8 fuer literalere Ergebnisse. Generiere jeden SFX EINMAL, dann wiederverwendbar.
+Im story_video gibst du die SFX mit Timing an: sfx: [{{datei: "whoosh-up", bei_sek: 2.0, lautstaerke: 0.6}}, ...]. bei_sek = wann im Video der Sound startet (z.B. genau am Uebergang). Setze SFX gezielt und sparsam — je nachdem was die Szene braucht, nicht wahllos.
+
+═══ KOMPLETTE VIDEOS BAUEN (Tool 'story_video') ═══
+Fuer volle Videos (20-30 Sek) mit Story-Arc verkettest du mehrere Segmente zu EINEM Clip. Jedes Segment ist entweder ein Grundstil ODER eine deiner selbstgebauten custom-Komponenten (stil: "custom-NAME").
+
+Verfuegbare custom-Komponenten: {custom_komponenten_liste()}
+
+TEMPO & RHYTHMUS (WICHTIG — sonst wirkt es langsam/langweilig):
+- Grundstil-Segmente (wortpop/szenen/zahl/formen/kinetic): KURZ halten, 1.5-2.5 Sek pro Segment. Schneller Schnitt = dynamisch.
+- Reiche custom-Komponenten (problem-karten, erfolg-moment) sind LANG (7-8s Mini-Videos). Nutze sie SPARSAM als "Hero-Moment" (max 1-2 pro Video), NICHT als schnelle Schnittfolge.
+- Ein gutes 25-30s-Video: viele kurze Segmente + 1-2 reiche Hero-Momente.
+- UEBERGAENGE: Nutze fliessende Uebergaenge (slide-hoch/links, wipe, fade) fuer Dynamik — NICHT nur "cut". Mische sie. Ein "flash" am dramatischsten Moment.
+
+So baust du ein starkes Video:
+- HOOK (Segment 1): custom-Komponente oder wortpop — stark, stoppt den Scroll
+- PROBLEM: z.B. custom-problem-karten (reiche UI-Elemente)
+- LOESUNG/BEWEIS: custom-erfolg-moment, zahl, oder eine passende custom-Komponente
+- CTA (letztes Segment): kurz, klar
+Uebergaenge: "cut" (harter Schnitt, Standard), fliessende Motion-Uebergaenge "slide-links/rechts/hoch/runter", "wipe", "fade" (die reiche Szene gleitet/wischt rein!), "flash" (Limette-Blitz). Mische bewusst: nicht nur cuts — nutze slide/wipe fuer Dynamik zwischen den Szenen, flash am dramatischsten Moment. Dauer je Segment passend zur Komponente (bei custom >= deren dauerSek).
+
+WICHTIG: Wenn dir fuer ein Segment eine passende Komponente fehlt, BAU SIE ZUERST mit 'komponente_bauen' und nutze sie dann im story_video. So entstehen mit der Zeit immer bessere Videos.
 
 ═══ ECHTES PRODUKT-MATERIAL ═══
 Das echte Bueroflow-Dashboard/UI kommt als Aufnahme vom Recorder-Bot (nicht von dir). In deinem Konzept PLANST du, wo echtes UI-Material eingefuegt werden soll (z.B. "hier Dashboard-Clip zeigen"). Du generierst KEINE Fake-UIs.
@@ -337,6 +384,65 @@ TOOLS = [
             "required": ["name", "jsx_code"],
         },
     },
+    {
+        "name": "story_video",
+        "description": ("Rendert ein KOMPLETTES Story-Video aus mehreren Segmenten zu einem zusammenhaengenden Clip. "
+                        "Jedes Segment kann ein Grundstil (szenen/wortpop/zahl/formen/kinetic) ODER eine deiner "
+                        "custom-Komponenten (stil: 'custom-NAME') sein. So baust du volle 20-30-Sek-Videos mit Story-Arc."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "format": {"type": "string", "enum": ["tiktok", "linkedin", "quadrat"]},
+                "palette": {"type": "string", "enum": ["dunkel", "hell", "gruen", "limette"]},
+                "segmente": {
+                    "type": "array",
+                    "description": "Liste der Segmente in Reihenfolge. Jedes: {stil, props, dauer (Sek), surface (glas/card), uebergang (cut/dissolve/flash)}. Bei custom-Komponenten dauer >= deren dauerSek waehlen.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "stil": {"type": "string", "description": "Grundstil oder 'custom-NAME'"},
+                            "props": {"type": "object"},
+                            "dauer": {"type": "number", "description": "Sekunden"},
+                            "surface": {"type": "string", "enum": ["glas", "card"]},
+                            "uebergang": {"type": "string", "enum": ["cut", "fade", "slide-links", "slide-rechts", "slide-hoch", "slide-runter", "wipe", "flash"], "description": "cut=harter Schnitt, fade/slide/wipe=fliessende Motion-Uebergaenge, flash=Limette-Blitz"},
+                        },
+                        "required": ["stil", "dauer"],
+                    },
+                },
+                "sfx": {
+                    "type": "array",
+                    "description": "Optional: Sound-Effekte mit Timing. Jeder: {datei (Name ohne .mp3 oder 'sfx/name.mp3'), bei_sek (wann im Video), lautstaerke (0-1, Standard 0.7)}.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "datei": {"type": "string"},
+                            "bei_sek": {"type": "number"},
+                            "lautstaerke": {"type": "number"},
+                        },
+                        "required": ["datei", "bei_sek"],
+                    },
+                },
+                "beschreibung": {"type": "string"},
+            },
+            "required": ["segmente"],
+        },
+    },
+    {
+        "name": "sfx_generieren",
+        "description": ("Generiert einen Sound-Effekt (Whoosh, Pop, Impact, Chime, Ambience) via ElevenLabs aus einer "
+                        "Textbeschreibung und speichert ihn. Nutze das, um passende SFX fuer deine Videos zu erzeugen — "
+                        "z.B. ein Whoosh fuer Uebergaenge, ein Erfolgs-Chime beim Bezahlt-Moment."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Dateiname, kleinbuchstaben/zahlen/bindestrich (z.B. 'whoosh-up')"},
+                "beschreibung": {"type": "string", "description": "Was fuer ein Sound (englisch praeziser: 'short clean whoosh transition', 'success chime UI', 'deep impact hit')"},
+                "dauer_sek": {"type": "number", "description": "Optional, 0.5-30. Weglassen fuer auto."},
+                "loop": {"type": "boolean", "description": "true fuer Ambience/Beds die nahtlos loopen"},
+            },
+            "required": ["name", "beschreibung"],
+        },
+    },
 ]
 TOOLS_CACHED = [*TOOLS[:-1], {**TOOLS[-1], "cache_control": {"type": "ephemeral"}}]
 
@@ -395,6 +501,68 @@ def tool_vibe_clip(inp):
         return f"Clip-Generierung fehlgeschlagen: {type(e).__name__}: {e}"
 
 
+def tool_story_video(inp, r):
+    """Rendert ein komplettes Story-Video aus mehreren Segmenten (Grundstile ODER custom-Komponenten)."""
+    fmt = inp.get("format", "tiktok")
+    palette = inp.get("palette", "dunkel")
+    segmente = inp.get("segmente") or []
+    beschreibung = inp.get("beschreibung", "Story-Video")
+    if not segmente:
+        return "Keine Segmente uebergeben. Gib eine Liste von Segmenten mit stil/props/dauer/uebergang an."
+
+    # Segmente aufbereiten: custom-Stile beginnen mit 'custom-'
+    aufbereitet = []
+    for seg in segmente:
+        aufbereitet.append({
+            "stil": seg.get("stil", "szenen"),
+            "props": seg.get("props") or {},
+            "dauer": seg.get("dauer", 3),
+            "surface": seg.get("surface", "glas"),
+            "uebergang": seg.get("uebergang", "cut"),
+        })
+
+    # SFX aufbereiten: bei_sek -> Frame (60fps), Dateiname normalisieren
+    sfx_liste = []
+    for s_ in (inp.get("sfx") or []):
+        datei = s_.get("datei", "")
+        if not datei:
+            continue
+        if not datei.startswith("sfx/"):
+            datei = f"sfx/{datei}"
+        if not datei.endswith(".mp3"):
+            datei = datei + ".mp3"
+        sfx_liste.append({
+            "datei": datei,
+            "frame": int(round(float(s_.get("bei_sek", 0)) * 60)),
+            "lautstaerke": float(s_.get("lautstaerke", 0.7)),
+        })
+
+    props = {"palette": palette, "logo": True, "segmente": aufbereitet, "sfx": sfx_liste}
+    komposition = f"story-{fmt}"
+    rid = f"story-{uuid.uuid4().hex[:8]}"
+    auftrag = {"id": rid, "komposition": komposition, "props": props}
+    try:
+        r.rpush("bot:render:inbox", json.dumps(auftrag, ensure_ascii=False))
+    except Exception as e:
+        return f"Konnte Story-Auftrag nicht senden: {e}"
+    gesamt = sum(seg["dauer"] for seg in aufbereitet)
+    log(f"[render] Story {komposition} ({len(aufbereitet)} Segmente, ~{gesamt:.0f}s) gesendet ...")
+    reply_q = f"bot:render:reply:{rid}"
+    for _ in range(96):  # bis 8 Min (Story rendert laenger)
+        try:
+            res = r.blpop(reply_q, timeout=5)
+        except Exception:
+            time.sleep(2); continue
+        if res:
+            _, antwort = res
+            if antwort.startswith("FEHLER") or "fehlgeschlagen" in antwort.lower():
+                arbeit_log("Story fehlgeschlagen", beschreibung, antwort[:200])
+                return f"Story-Render FEHLGESCHLAGEN:\n{antwort[:600]}"
+            arbeit_log("Story-Video gerendert", beschreibung, antwort[:200])
+            return f"{beschreibung} ({len(aufbereitet)} Segmente, ~{gesamt:.0f}s)\n{antwort}"
+    return "Story-Render-Timeout — spaeter in vault/videos/ nachsehen."
+
+
 def tool_motion_video(inp, r):
     """Schickt einen Render-Auftrag an den Render-Server und wartet auf das fertige MP4."""
     stil = inp.get("stil", "szenen")
@@ -427,8 +595,6 @@ def tool_motion_video(inp, r):
     return "Render-Timeout — der Server braucht ungewoehnlich lange. Spaeter in vault/videos/ nachsehen."
 
 
-REFERENZ_DIR = os.getenv("REFERENZ_DIR", "/app/vault/referenzen")
-CUSTOM_DIR = os.getenv("CUSTOM_DIR", "/app/vault/custom")
 MAX_FRAMES = int(os.getenv("REF_MAX_FRAMES", "12"))
 
 def _video_dauer(pfad):
@@ -568,6 +734,52 @@ def tool_komponente_bauen(inp, r):
     return "Test-Render-Timeout — Status unklar. Spaeter pruefen."
 
 
+def tool_sfx_generieren(inp):
+    """Generiert einen Sound-Effekt via ElevenLabs Sound Effects API und speichert ihn nach vault/sfx/."""
+    beschreibung = inp.get("beschreibung", "").strip()
+    name = inp.get("name", "").strip().lower()
+    dauer = inp.get("dauer_sek")
+    loop = bool(inp.get("loop", False))
+    if not beschreibung or not name:
+        return "Bitte 'beschreibung' (was fuer ein Sound) und 'name' (Dateiname) angeben."
+    if not ELEVENLABS_KEY:
+        return "ELEVENLABS_API_KEY fehlt in der .env."
+    import re as _re
+    if not _re.fullmatch(r"[a-z0-9][a-z0-9\-]{1,40}", name):
+        return "Ungueltiger Name. Erlaubt: kleinbuchstaben, zahlen, bindestrich."
+
+    os.makedirs(SFX_DIR, exist_ok=True)
+    payload = {"text": beschreibung, "prompt_influence": inp.get("prompt_influence", 0.5)}
+    if dauer is not None:
+        try:
+            payload["duration_seconds"] = max(0.5, min(30.0, float(dauer)))
+        except Exception:
+            pass
+    if loop:
+        payload["loop"] = True
+
+    try:
+        resp = requests.post(
+            "https://api.elevenlabs.io/v1/sound-generation",
+            headers={"xi-api-key": ELEVENLABS_KEY, "Content-Type": "application/json"},
+            data=json.dumps(payload), timeout=120)
+    except Exception as e:
+        return f"ElevenLabs-Anfrage fehlgeschlagen: {e}"
+    if resp.status_code != 200:
+        return f"ElevenLabs-Fehler {resp.status_code}: {resp.text[:200]}"
+
+    pfad = os.path.join(SFX_DIR, f"{name}.mp3")
+    try:
+        with open(pfad, "wb") as f:
+            f.write(resp.content)
+    except Exception as e:
+        return f"Konnte SFX nicht speichern: {e}"
+    kb = len(resp.content) // 1024
+    arbeit_log("SFX generiert", name, beschreibung[:80])
+    log(f"[sfx] {name}.mp3 gespeichert ({kb} KB)")
+    return f"SFX '{name}' erstellt ({kb} KB). In Videos einsetzbar als sfx-Datei 'sfx/{name}.mp3'."
+
+
 def run_tool(name, inp, r=None):
     if name == "websuche":
         return tool_websuche(inp.get("query", ""))
@@ -575,12 +787,16 @@ def run_tool(name, inp, r=None):
         return tool_vibe_clip(inp)
     if name == "motion_video":
         return tool_motion_video(inp, r)
+    if name == "story_video":
+        return tool_story_video(inp, r)
     if name == "skill_lesen":
         return lade_skill(inp.get("name", ""))
     if name == "referenz_analysieren":
         return tool_referenz_analysieren(inp)
     if name == "komponente_bauen":
         return tool_komponente_bauen(inp, r)
+    if name == "sfx_generieren":
+        return tool_sfx_generieren(inp)
     return f"Unbekanntes Tool: {name}"
 
 
