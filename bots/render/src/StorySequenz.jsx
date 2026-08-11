@@ -1,6 +1,6 @@
 import React from "react";
 import {
-  AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate, staticFile, Img, Audio, Sequence,
+  AbsoluteFill, useCurrentFrame, useVideoConfig, interpolate, staticFile, Img, Audio, Sequence, OffthreadVideo,
 } from "remotion";
 import { TransitionSeries, springTiming, linearTiming } from "@remotion/transitions";
 import { fade } from "@remotion/transitions/fade";
@@ -124,10 +124,75 @@ const FehlendHinweis = ({ name, p }) => (
 
 const SegmentInhalt = ({ seg, p, istHoch, width, height, hell }) => {
   const { stil, props } = seg;
+  if (stil === "ui-clip") return <UiClipSeg props={{ ...props, __frames: seg.frames }} p={p} istHoch={istHoch} width={width} height={height} hell={hell} />;
   if (stil === "zahl")    return <ZahlSeg props={props} p={p} istHoch={istHoch} width={width} height={height} hell={hell} surface={seg.surface} />;
   if (stil === "wortpop") return <WortPopSeg props={props} p={p} istHoch={istHoch} width={width} height={height} hell={hell} surface={seg.surface} />;
   return <AussageSeg props={props} p={p} istHoch={istHoch} width={width} height={height} hell={hell} surface={seg.surface} />;
 };
+
+// ── UI-CLIP: echtes Buroflow-Material (Screenshot/Recording) schoen gerahmt + Ken-Burns ──
+// props: datei ("ui/dashboard.png" oder .mp4), rahmen ("browser"|"phone"|"plain"), label, bewegung ("zoom-in"|"pan-up"|"none")
+const UiClipSeg = ({ props, p, istHoch, width, height, hell }) => {
+  const frame = useCurrentFrame();
+  const { durationInFrames } = useVideoConfig();
+  const datei = props.datei || "";
+  const rahmen = props.rahmen || "browser";
+  const label = props.label || "";
+  const bewegung = props.bewegung || "zoom-in";
+  const istVideo = datei.toLowerCase().endsWith(".mp4") || datei.toLowerCase().endsWith(".webm") || datei.toLowerCase().endsWith(".mov");
+
+  // Einblendung
+  const op = interpolate(frame, [0, 10], [0, 1], { easing: EXPO, extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const einY = interpolate(frame, [0, 16], [24, 0], { easing: EXPO, extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+
+  // Ken-Burns (damit ein statischer Screenshot lebt)
+  const dur = Math.max(60, props.__frames || 150);
+  let kbScale = 1, kbX = 0, kbY = 0;
+  if (bewegung === "zoom-in") kbScale = interpolate(frame, [0, dur], [1.0, 1.03], { extrapolateRight: "clamp" });
+  else if (bewegung === "pan-up") kbY = interpolate(frame, [0, dur], [0, -6], { extrapolateRight: "clamp" });
+
+  // Rahmen: bei Hochformat schmaler, bei Querformat breit (Dashboard soll gross/scharf sein)
+  const rahmenBreite = istHoch ? width * 0.9 : width * 0.72;
+
+  // Frame-Styles
+  const browserBar = (
+    <div style={{ height: istHoch ? 34 : 30, background: "#1c1f26", display: "flex", alignItems: "center",
+      paddingLeft: 16, gap: 8, borderTopLeftRadius: 14, borderTopRightRadius: 14 }}>
+      {["#ff5f57", "#febc2e", "#28c840"].map((c, i) => (
+        <div key={i} style={{ width: 11, height: 11, borderRadius: "50%", background: c }} />
+      ))}
+      <div style={{ flex: 1, textAlign: "center", color: "rgba(255,255,255,0.4)", fontSize: 13,
+        marginRight: 40, fontFamily: BRAND.fonts.display }}>buroflow.de</div>
+    </div>
+  );
+
+  const medien = istVideo
+    ? <OffthreadVideo src={staticFile(datei)} style={{ width: "100%", display: "block" }} muted />
+    : <Img src={staticFile(datei)} style={{ width: "100%", display: "block" }} />;
+
+  return (
+    <AbsoluteFill style={{ justifyContent: "center", alignItems: "center" }}>
+      <div style={{ opacity: op, transform: `translateY(${einY}px)`, width: rahmenBreite,
+        display: "flex", flexDirection: "column", alignItems: "center", gap: istHoch ? 24 : 18 }}>
+        {label ? (
+          <div style={{ fontSize: istHoch ? width * 0.05 : height * 0.06, fontWeight: 700,
+            color: p.text, letterSpacing: "-0.02em", textAlign: "center", fontFamily: BRAND.fonts.display }}>
+            {label}
+          </div>
+        ) : null}
+        <div style={{ width: "100%", borderRadius: 16, overflow: "hidden",
+          boxShadow: `0 30px 80px rgba(0,0,0,0.45), 0 0 60px ${p.akzent}18`,
+          border: rahmen === "plain" ? `1px solid ${hell ? "rgba(0,0,0,0.1)" : "rgba(255,255,255,0.12)"}` : "none",
+          transform: `scale(${kbScale}) translate(${kbX}px, ${kbY}px)` }}>
+          {rahmen === "browser" ? browserBar : null}
+          <div style={{ overflow: "hidden", background: "#000" }}>{medien}</div>
+        </div>
+      </div>
+    </AbsoluteFill>
+  );
+};
+
+// ── ZAHL ──
 
 const AussageSeg = ({ props, p, istHoch, width, height, hell, surface }) => {
   const txt = (props.szenen && props.szenen[0]) || (props.zeilen && props.zeilen.join(" ")) || props.text || "Aussage";

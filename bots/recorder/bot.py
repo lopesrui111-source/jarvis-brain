@@ -42,10 +42,11 @@ SESSION_FILE = os.path.join(VAULT_DIR, "buroflow_session.json")
 
 # Aufnahme-Groesse: Full-HD, gut fuers Video
 VIEWPORT = {"width": 1920, "height": 1080}
+VIEWPORT_HOCH = {"width": 1080, "height": 1920}  # fuer TikTok/Reels
 # Desktop-Kontext erzwingen (sonst rendert die Seite mobil)
 DESKTOP_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-CTX_ARGS = dict(viewport=VIEWPORT, screen=VIEWPORT, device_scale_factor=2,
+CTX_ARGS = dict(viewport=VIEWPORT, screen=VIEWPORT, device_scale_factor=3,
                 is_mobile=False, has_touch=False, user_agent=DESKTOP_UA,
                 locale="de-DE")
 
@@ -379,7 +380,7 @@ def interpretiere(text):
 
 
 # ── Hauptverarbeitung eines Auftrags ─────────────────────────────
-def bearbeite(r, text, zahlen=None, welche_override=None, kacheln=None):
+def bearbeite(r, text, zahlen=None, welche_override=None, kacheln=None, fmt="desktop"):
     from playwright.sync_api import sync_playwright
     global AKTUELLE_ZAHLEN, AKTUELLE_KACHELN
     AKTUELLE_ZAHLEN = [str(z) for z in (zahlen or [])]
@@ -387,18 +388,23 @@ def bearbeite(r, text, zahlen=None, welche_override=None, kacheln=None):
     plan = interpretiere(text)
     modus = plan["modus"]
     welche = welche_override or plan["welche"]
-    log(f"[plan] modus={modus} welche={welche} zahlen={len(AKTUELLE_ZAHLEN)}")
+    # Viewport nach Format waehlen (hoch = TikTok/Reels)
+    vp = VIEWPORT_HOCH if fmt in ("hoch", "hochformat", "tiktok", "vertical") else VIEWPORT
+    ctx_args = dict(CTX_ARGS)
+    ctx_args["viewport"] = vp
+    ctx_args["screen"] = vp
+    log(f"[plan] modus={modus} welche={welche} zahlen={len(AKTUELLE_ZAHLEN)} format={fmt}")
 
     zusammenfassung = []
     with sync_playwright() as pw:
         browser = pw.chromium.launch(args=["--no-sandbox", "--disable-dev-shm-usage"])
 
         if modus == "recording":
-            _cargs = dict(CTX_ARGS)
+            _cargs = dict(ctx_args)
             if os.path.exists(SESSION_FILE):
                 _cargs["storage_state"] = SESSION_FILE
             context = browser.new_context(
-                record_video_dir=OUT_DIR, record_video_size=VIEWPORT, **_cargs)
+                record_video_dir=OUT_DIR, record_video_size=vp, **_cargs)
             page = context.new_page()
             if not _login(page):
                 context.close(); browser.close()
@@ -419,7 +425,7 @@ def bearbeite(r, text, zahlen=None, welche_override=None, kacheln=None):
             return "Recording lief, aber keine Video-Datei gefunden."
 
         # Screenshot-Modi
-        _cargs2 = dict(CTX_ARGS)
+        _cargs2 = dict(ctx_args)
         if os.path.exists(SESSION_FILE):
             _cargs2["storage_state"] = SESSION_FILE
         context = browser.new_context(**_cargs2)
@@ -488,13 +494,14 @@ def main():
             zahlen = msg.get("zahlen") or []   # optionale Wunsch-Betraege fuers Video
             welche = msg.get("welche") or None  # optional: nur bestimmte Seiten, z.B. ["uebersicht"]
             kacheln = msg.get("kacheln") or {}  # optional: Kennzahl-Kacheln nach Label
+            fmt = msg.get("format") or "desktop"  # "desktop" oder "hoch" (TikTok)
             reply_q = REPLY_KEY.format(id=req_id)
             if not text:
                 _antwort_senden(r, reply_q, "Leere Anfrage. Sag z.B. 'nimm dashboard auf'.")
                 continue
             log(f"Auftrag: {text[:80]}")
             try:
-                antwort = bearbeite(r, text, zahlen, welche, kacheln)
+                antwort = bearbeite(r, text, zahlen, welche, kacheln, fmt)
             except Exception as e:
                 antwort = f"Fehler bei der Aufnahme: {type(e).__name__}: {e}"
                 log(f"[bearbeite] {antwort}")

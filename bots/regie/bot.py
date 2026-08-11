@@ -198,6 +198,14 @@ TEMPO & RHYTHMUS (WICHTIG — sonst wirkt es langsam/langweilig):
 - Ein gutes 25-30s-Video: viele kurze Segmente + 1-2 reiche Hero-Momente.
 - UEBERGAENGE: Nutze fliessende Uebergaenge (slide-hoch/links, wipe, fade) fuer Dynamik — NICHT nur "cut". Mische sie. Ein "flash" am dramatischsten Moment.
 
+ECHTES BUEROFLOW-UI (Segment-Stil "ui-clip"):
+Du kannst echte Dashboard-Screenshots als Szene einbauen — das wirkt viel staerker als abstrakter Text! Segment: {stil: "ui-clip", props: {datei: "ui/dashboard.png", rahmen: "browser", label: "Dein Dashboard", bewegung: "zoom-in"}, dauer: 3.5, uebergang: "slide-hoch"}.
+- datei: verfuegbares Material in ui/ (z.B. "ui/dashboard.png")
+- rahmen: "browser" (Browser-Mockup mit buroflow.de-Leiste), "phone", oder "plain"
+- bewegung: "zoom-in" (langsamer Ken-Burns) oder "pan-up" — damit ein Screenshot lebt
+- label: optionaler Text ueber dem Clip
+Setze 1 ui-clip als "Beweis"-Moment ein (nach dem Problem, als Loesung: "so sieht's in Bueroflow aus"). Das echte UI ist der staerkste Vertrauensbeweis.
+
 So baust du ein starkes Video:
 - HOOK (Segment 1): custom-Komponente oder wortpop — stark, stoppt den Scroll
 - PROBLEM: z.B. custom-problem-karten (reiche UI-Elemente)
