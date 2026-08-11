@@ -22,6 +22,8 @@ const defsFormen  = { zeilen: ["Weniger Aufwand","mehr fürs Wesentliche"], pale
 
 const defsStory = {
   sfx: [],
+  musik: "",
+  musik_lautstaerke: 0.25,
   palette: "dunkel", logo: true,
   segmente: [
     { stil: "wortpop", props: { worte: ["SCHLUSS","MIT","PAPIERKRAM"], akzentWort: -1 }, dauer: 1.7, surface: "glas", uebergang: "cut" },

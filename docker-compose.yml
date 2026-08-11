@@ -172,6 +172,7 @@ services:
       - ./vault:/app/vault
       - ./vault/custom:/app/src/custom
       - ./vault/sfx:/app/public/sfx
+      - ./vault/musik:/app/public/musik
     depends_on:
       redis:
         condition: service_healthy

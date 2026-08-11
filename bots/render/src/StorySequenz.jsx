@@ -34,7 +34,7 @@ function presentation(uebergang, width, height) {
   return fade(); // Fallback fuer fliessende
 }
 
-export const StorySequenz = ({ segmente = [], palette = "dunkel", logo = true, sfx = [] }) => {
+export const StorySequenz = ({ segmente = [], palette = "dunkel", logo = true, sfx = [], musik = "", musik_lautstaerke = 0.25 }) => {
   const { width, height } = useVideoConfig();
   const istHoch = height > width;
   const p = BRAND.paletten[palette] || BRAND.paletten.dunkel;
@@ -42,6 +42,9 @@ export const StorySequenz = ({ segmente = [], palette = "dunkel", logo = true, s
 
   return (
     <AbsoluteFill style={{ background: p.hintergrund, fontFamily: BRAND.fonts.display, overflow: "hidden" }}>
+      {/* Hintergrund-Musik, durchgehend, leise */}
+      {musik ? <Audio src={staticFile(musik)} volume={musik_lautstaerke} /> : null}
+
       <TransitionSeries>
         {segs.map((seg, i) => {
           const el = [];

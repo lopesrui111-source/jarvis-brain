@@ -2,6 +2,11 @@
 
 Automatisch gepflegt von JARVIS aus den Commit-Messages. Nicht von Hand bearbeiten.
 
+## 2026-08-10
+- `2ff9685` Audio: SFX via ElevenLabs (on-demand, Pro-Prompts), Story mit fliessenden Uebergaengen + SFX-Timing, Tempo-Regeln geschaerft
+
+Automatisch gepflegt von JARVIS aus den Commit-Messages. Nicht von Hand bearbeiten.
+
 ## 2026-08-09
 - `9e04714` Studio: 4 Motion-Skills angebunden (Disney/easing/anti-slop), Grafik-Bausteine, custom-Segmente in Story, MAX_TOKENS 8000 fuer volle Komponenten
 - `7fba1f5` Studio: Motion-DNA aus Referenzen (easeOutExpo/Glas/Cuts), Referenz-Analyse-Tool, Komponenten-Schmiede (Bot baut eigene Komponenten)

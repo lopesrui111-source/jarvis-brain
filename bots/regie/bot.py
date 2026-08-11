@@ -59,6 +59,7 @@ MOTION_SKILLS_DIR = os.getenv("MOTION_SKILLS_DIR", "/app/motion-skills")
 REFERENZ_DIR = os.getenv("REFERENZ_DIR", "/app/vault/referenzen")
 CUSTOM_DIR = os.getenv("CUSTOM_DIR", "/app/vault/custom")
 SFX_DIR = os.getenv("SFX_DIR", "/app/vault/sfx")
+MUSIK_DIR = os.getenv("MUSIK_DIR", "/app/vault/musik")
 ELEVENLABS_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 # Kuratierte, video-relevante Skills (Name -> Ordner im skills-repo)
 VERFUEGBARE_SKILLS = {
@@ -182,6 +183,9 @@ Beschreibe SFX wie ein PROFESSIONELLER SOUND-DESIGNER — detailliert, mit Textu
 - Impact -> "deep cinematic impact hit with tight punch and short reverb tail, trailer-style"
 Nutze prompt_influence 0.6-0.8 fuer literalere Ergebnisse. Generiere jeden SFX EINMAL, dann wiederverwendbar.
 Im story_video gibst du die SFX mit Timing an: sfx: [{{datei: "whoosh-up", bei_sek: 2.0, lautstaerke: 0.6}}, ...]. bei_sek = wann im Video der Sound startet (z.B. genau am Uebergang). Setze SFX gezielt und sparsam — je nachdem was die Szene braucht, nicht wahllos.
+
+═══ HINTERGRUND-MUSIK (Tool 'musik_generieren') ═══
+Ein Musik-Track unter dem Video traegt den Rhythmus — das macht Motion-Videos erst "fertig". Generiere einen passenden Track (Stil/Mood auf Englisch, KEINE Band-/Kuenstlernamen) in Video-Laenge, dann gib ihn im story_video mit: musik: "name", musik_lautstaerke: 0.25 (leise unter den SFX). Fuer Bueroflow passt: modern, clean, upbeat-corporate, optimistisch, treibend, ohne Gesang. Generiere pro Vibe EINEN Track, dann wiederverwendbar.
 
 ═══ KOMPLETTE VIDEOS BAUEN (Tool 'story_video') ═══
 Fuer volle Videos (20-30 Sek) mit Story-Arc verkettest du mehrere Segmente zu EINEM Clip. Jedes Segment ist entweder ein Grundstil ODER eine deiner selbstgebauten custom-Komponenten (stil: "custom-NAME").
@@ -422,6 +426,8 @@ TOOLS = [
                         "required": ["datei", "bei_sek"],
                     },
                 },
+                "musik": {"type": "string", "description": "Optional: Name/Pfad des Hintergrund-Tracks (z.B. 'upbeat-clean' oder 'musik/upbeat-clean.mp3'). Laeuft leise durchgehend."},
+                "musik_lautstaerke": {"type": "number", "description": "Lautstaerke der Musik 0-1, Standard 0.25 (leise unter den SFX)."},
                 "beschreibung": {"type": "string"},
             },
             "required": ["segmente"],
@@ -441,6 +447,20 @@ TOOLS = [
                 "loop": {"type": "boolean", "description": "true fuer Ambience/Beds die nahtlos loopen"},
             },
             "required": ["name", "beschreibung"],
+        },
+    },
+    {
+        "name": "musik_generieren",
+        "description": ("Generiert einen Hintergrund-Musik-Track via ElevenLabs Music aus einer Stil-/Mood-Beschreibung. "
+                        "KEINE Band-/Kuenstlernamen (Copyright-Fehler). Der Track laeuft leise unter dem ganzen Video und traegt den Rhythmus."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Dateiname (z.B. 'upbeat-clean')"},
+                "beschreibung": {"type": "string", "description": "Stil/Mood auf Englisch (z.B. 'modern upbeat corporate electronic, clean driving beat, optimistic, minimal, no vocals')"},
+                "dauer_sek": {"type": "number", "description": "Laenge in Sekunden (passend zum Video, z.B. 25)"},
+            },
+            "required": ["name", "beschreibung", "dauer_sek"],
         },
     },
 ]
@@ -537,7 +557,17 @@ def tool_story_video(inp, r):
             "lautstaerke": float(s_.get("lautstaerke", 0.7)),
         })
 
-    props = {"palette": palette, "logo": True, "segmente": aufbereitet, "sfx": sfx_liste}
+    # Musik aufbereiten
+    musik = inp.get("musik", "")
+    if musik:
+        if not musik.startswith("musik/"):
+            musik = f"musik/{musik}"
+        if not musik.endswith(".mp3"):
+            musik = musik + ".mp3"
+    musik_vol = float(inp.get("musik_lautstaerke", 0.25))
+
+    props = {"palette": palette, "logo": True, "segmente": aufbereitet,
+             "sfx": sfx_liste, "musik": musik, "musik_lautstaerke": musik_vol}
     komposition = f"story-{fmt}"
     rid = f"story-{uuid.uuid4().hex[:8]}"
     auftrag = {"id": rid, "komposition": komposition, "props": props}
@@ -780,6 +810,48 @@ def tool_sfx_generieren(inp):
     return f"SFX '{name}' erstellt ({kb} KB). In Videos einsetzbar als sfx-Datei 'sfx/{name}.mp3'."
 
 
+def tool_musik_generieren(inp):
+    """Generiert einen Hintergrund-Track via ElevenLabs Music und speichert ihn nach vault/musik/."""
+    beschreibung = inp.get("beschreibung", "").strip()
+    name = inp.get("name", "").strip().lower()
+    dauer_sek = inp.get("dauer_sek", 20)
+    if not beschreibung or not name:
+        return "Bitte 'beschreibung' (Stil/Mood, KEINE Band-/Kuenstlernamen) und 'name' angeben."
+    if not ELEVENLABS_KEY:
+        return "ELEVENLABS_API_KEY fehlt in der .env."
+    import re as _re
+    if not _re.fullmatch(r"[a-z0-9][a-z0-9\-]{1,40}", name):
+        return "Ungueltiger Name. Erlaubt: kleinbuchstaben, zahlen, bindestrich."
+
+    os.makedirs(MUSIK_DIR, exist_ok=True)
+    try:
+        ms = int(max(3000, min(600000, float(dauer_sek) * 1000)))
+    except Exception:
+        ms = 20000
+    payload = {"prompt": beschreibung, "music_length_ms": ms, "model_id": "music_v2"}
+
+    try:
+        resp = requests.post(
+            "https://api.elevenlabs.io/v1/music",
+            headers={"xi-api-key": ELEVENLABS_KEY, "Content-Type": "application/json"},
+            data=json.dumps(payload), timeout=300)
+    except Exception as e:
+        return f"ElevenLabs-Music-Anfrage fehlgeschlagen: {e}"
+    if resp.status_code != 200:
+        return f"ElevenLabs-Music-Fehler {resp.status_code}: {resp.text[:250]}"
+
+    pfad = os.path.join(MUSIK_DIR, f"{name}.mp3")
+    try:
+        with open(pfad, "wb") as f:
+            f.write(resp.content)
+    except Exception as e:
+        return f"Konnte Musik nicht speichern: {e}"
+    kb = len(resp.content) // 1024
+    arbeit_log("Musik generiert", name, beschreibung[:80])
+    log(f"[musik] {name}.mp3 gespeichert ({kb} KB, {dauer_sek}s)")
+    return f"Musik '{name}' erstellt ({kb} KB, ~{dauer_sek}s). In Videos als musik-Datei 'musik/{name}.mp3'."
+
+
 def run_tool(name, inp, r=None):
     if name == "websuche":
         return tool_websuche(inp.get("query", ""))
@@ -797,6 +869,8 @@ def run_tool(name, inp, r=None):
         return tool_komponente_bauen(inp, r)
     if name == "sfx_generieren":
         return tool_sfx_generieren(inp)
+    if name == "musik_generieren":
+        return tool_musik_generieren(inp)
     return f"Unbekanntes Tool: {name}"
 
 

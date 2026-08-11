@@ -45,9 +45,14 @@ VIEWPORT = {"width": 1920, "height": 1080}
 # Desktop-Kontext erzwingen (sonst rendert die Seite mobil)
 DESKTOP_UA = ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
               "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36")
-CTX_ARGS = dict(viewport=VIEWPORT, screen=VIEWPORT, device_scale_factor=1,
+CTX_ARGS = dict(viewport=VIEWPORT, screen=VIEWPORT, device_scale_factor=2,
                 is_mobile=False, has_touch=False, user_agent=DESKTOP_UA,
                 locale="de-DE")
+
+# Wunsch-Betraege fuers aktuelle Video (leer = Zufallszahlen wie bisher)
+AKTUELLE_ZAHLEN = []
+# Kennzahl-Kacheln nach Label (z.B. {"bezahlt": 12, "kunden": 47})
+AKTUELLE_KACHELN = {}
 
 # ── Fake-Daten: echte Werte werden im DOM ueberschrieben ─────────
 # Namen (echte Kundennamen -> Fake). Wird als Textersetzung angewandt.
@@ -101,16 +106,27 @@ def arbeit_log(r, aktion, ergebnis, datei=""):
 def _fake_js():
     """Liefert JavaScript, das im Seiten-DOM echte Daten durch Fake ersetzt."""
     return """
-    (function(fakeNamen, fakeFirmen) {
+    (function(fakeNamen, fakeFirmen, fakeZahlen, fakeKacheln) {
       // Sammelt alle Textknoten und ersetzt sensible Muster.
       var reEmail = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\\.[a-zA-Z]{2,}/g;
       var reIban  = /DE\\d{2}[\\s\\d]{18,22}/g;
       var reTel   = /(?:\\+49|0)[\\s\\d\\/()-]{7,}/g;
       var reGeld  = /\\d{1,3}(?:\\.\\d{3})*(?:,\\d{2})?\\s?(?:€|EUR)/g;
 
-      var namenIdx = 0, firmenIdx = 0;
+      var namenIdx = 0, firmenIdx = 0, zahlIdx = 0;
       function naechsterName(){ var n = fakeNamen[namenIdx % fakeNamen.length]; namenIdx++; return n; }
       function naechsteFirma(){ var f = fakeFirmen[firmenIdx % fakeFirmen.length]; firmenIdx++; return f; }
+      function naechsterBetrag(){
+        if (fakeZahlen && fakeZahlen.length > 0) {
+          var z = fakeZahlen[zahlIdx % fakeZahlen.length]; zahlIdx++;
+          if (/\u20ac|EUR/.test(z)) return z;
+          var n = parseFloat(String(z).replace(/\\./g,'').replace(',','.'));
+          if (!isNaN(n)) return n.toLocaleString('de-DE', {minimumFractionDigits: 2}) + " \u20ac";
+          return z + " \u20ac";
+        }
+        var base = 1000 + Math.floor(Math.random()*8000);
+        return base.toLocaleString('de-DE') + ",00 \u20ac";
+      }
 
       // 1) Bekannte Namensfelder ueber data-Attribute / Klassen (heuristisch)
       var namensSel = '[class*="name"],[class*="kunde"],[class*="customer"],[class*="empfaenger"],[class*="client"],[data-name]';
@@ -123,6 +139,51 @@ def _fake_js():
         }
       });
 
+      // 1b) Begruessung mit Vornamen: "Guten Morgen/Tag/Abend, X" / "Hallo X" / "Willkommen X"
+      document.querySelectorAll('h1,h2,h3,p,span,div').forEach(function(el){
+        if (el.children.length !== 0) return;
+        var t = el.textContent;
+        if (!t) return;
+        var neu = t
+          .replace(/(Guten\\s+(?:Morgen|Tag|Abend),?\\s+)([A-ZÄÖÜ][\\wäöüß-]+)/,        "$1Max")
+          .replace(/(Hallo,?\\s+)([A-ZÄÖÜ][\\wäöüß-]+)/,                                  "$1Max")
+          .replace(/(Willkommen(?:\\s+zurück)?,?\\s+)([A-ZÄÖÜ][\\wäöüß-]+)/,             "$1Max")
+          .replace(/(Hi,?\\s+)([A-ZÄÖÜ][\\wäöüß-]+)/,                                     "$1Max");
+        if (neu !== t) el.textContent = neu;
+      });
+
+      // 1c) Kennzahl-Kacheln nach LABEL setzen: {labelteil: wert}
+      // HTML-Muster: <div>ZAHL</div> gefolgt von <div>Label</div> im selben Container.
+      if (fakeKacheln && Object.keys(fakeKacheln).length > 0) {
+        document.querySelectorAll('div,span,h1,h2,h3').forEach(function(el){
+          if (el.children.length !== 0) return;
+          var t = (el.textContent || '').trim();
+          // grosse, fette, reine Zahl?
+          if (!/^[€\s]*\d{1,3}(?:\.\d{3})*(?:,\d{1,2})?\s*€?$/.test(t)) return;
+          var st = window.getComputedStyle(el);
+          if ((parseFloat(st.fontSize)||0) < 24) return;
+          if ((parseInt(st.fontWeight)||0) < 600) return;
+          // Label = naechstes Geschwister-Element mit Text
+          var lbl = el.nextElementSibling;
+          var labelText = lbl ? (lbl.textContent || '').toLowerCase() : '';
+          if (!labelText) return;
+          // gegen die vorgegebenen Kachel-Keys matchen
+          for (var key in fakeKacheln) {
+            if (labelText.indexOf(key.toLowerCase()) !== -1) {
+              var wert = String(fakeKacheln[key]);
+              // €-Betrag? dann deutsch formatieren, sonst reine Zahl
+              if (/€|EUR/.test(t)) {
+                var n = parseFloat(wert.replace(/\./g,'').replace(',','.'));
+                el.textContent = isNaN(n) ? wert : n.toLocaleString('de-DE') + " \u20ac";
+              } else {
+                el.textContent = wert;
+              }
+              break;
+            }
+          }
+        });
+      }
+
       // 2) Alle Textknoten durchgehen und Muster ersetzen
       var walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, null, false);
       var nodes = [];
@@ -133,10 +194,9 @@ def _fake_js():
         t = t.replace(reEmail, "kontakt@beispiel.de");
         t = t.replace(reIban,  "DE00 0000 0000 0000 0000 00");
         t = t.replace(reTel,   "+49 000 0000000");
-        // Geldbetraege leicht verfremden (nicht 0, damit es echt aussieht)
+        // Geldbetraege: Wunsch-Zahlen (falls vorgegeben) oder Zufall
         t = t.replace(reGeld, function(m){
-          var base = 1000 + Math.floor(Math.random()*8000);
-          return base.toLocaleString('de-DE') + ",00 €";
+          return naechsterBetrag();
         });
         if (t !== node.nodeValue) node.nodeValue = t;
       });
@@ -153,9 +213,11 @@ def _fake_js():
 def _apply_fake(page):
     """Fuehrt das Fake-Skript auf der aktuellen Seite aus."""
     try:
+        # Argumente sauber uebergeben statt in den JS-String zu formatieren
+        # (der JS-Code enthaelt % und ] -> %-Formatting wuerde crashen).
         page.evaluate(
-            f"({_fake_js()})(%s, %s)" % (
-                json.dumps(FAKE_NAMEN), json.dumps(FAKE_FIRMEN)))
+            "(args) => (" + _fake_js() + ")(args[0], args[1], args[2], args[3])",
+            [FAKE_NAMEN, FAKE_FIRMEN, AKTUELLE_ZAHLEN, AKTUELLE_KACHELN])
         page.wait_for_timeout(300)
     except Exception as e:
         log(f"[fake] Warnung: {e}")
@@ -317,12 +379,15 @@ def interpretiere(text):
 
 
 # ── Hauptverarbeitung eines Auftrags ─────────────────────────────
-def bearbeite(r, text):
+def bearbeite(r, text, zahlen=None, welche_override=None, kacheln=None):
     from playwright.sync_api import sync_playwright
+    global AKTUELLE_ZAHLEN, AKTUELLE_KACHELN
+    AKTUELLE_ZAHLEN = [str(z) for z in (zahlen or [])]
+    AKTUELLE_KACHELN = dict(kacheln or {})
     plan = interpretiere(text)
     modus = plan["modus"]
-    welche = plan["welche"]
-    log(f"[plan] modus={modus} welche={welche}")
+    welche = welche_override or plan["welche"]
+    log(f"[plan] modus={modus} welche={welche} zahlen={len(AKTUELLE_ZAHLEN)}")
 
     zusammenfassung = []
     with sync_playwright() as pw:
@@ -420,13 +485,16 @@ def main():
                 continue
             req_id = msg.get("id", str(uuid.uuid4()))
             text = (msg.get("text") or "").strip()
+            zahlen = msg.get("zahlen") or []   # optionale Wunsch-Betraege fuers Video
+            welche = msg.get("welche") or None  # optional: nur bestimmte Seiten, z.B. ["uebersicht"]
+            kacheln = msg.get("kacheln") or {}  # optional: Kennzahl-Kacheln nach Label
             reply_q = REPLY_KEY.format(id=req_id)
             if not text:
                 _antwort_senden(r, reply_q, "Leere Anfrage. Sag z.B. 'nimm dashboard auf'.")
                 continue
             log(f"Auftrag: {text[:80]}")
             try:
-                antwort = bearbeite(r, text)
+                antwort = bearbeite(r, text, zahlen, welche, kacheln)
             except Exception as e:
                 antwort = f"Fehler bei der Aufnahme: {type(e).__name__}: {e}"
                 log(f"[bearbeite] {antwort}")
