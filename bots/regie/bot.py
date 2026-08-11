@@ -60,6 +60,11 @@ REFERENZ_DIR = os.getenv("REFERENZ_DIR", "/app/vault/referenzen")
 CUSTOM_DIR = os.getenv("CUSTOM_DIR", "/app/vault/custom")
 SFX_DIR = os.getenv("SFX_DIR", "/app/vault/sfx")
 MUSIK_DIR = os.getenv("MUSIK_DIR", "/app/vault/musik")
+# ── GITHUB (Bueroflow-Repo lesen, fuer 1:1-UI-Nachbau) ───────
+GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
+GITHUB_REPO = os.getenv("GITHUB_REPO", "lopesrui111-source/Buroflow")
+GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
+GITHUB_MAX_ZEICHEN = 60000
 ELEVENLABS_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 # Kuratierte, video-relevante Skills (Name -> Ordner im skills-repo)
 VERFUEGBARE_SKILLS = {
@@ -199,7 +204,7 @@ TEMPO & RHYTHMUS (WICHTIG — sonst wirkt es langsam/langweilig):
 - UEBERGAENGE: Nutze fliessende Uebergaenge (slide-hoch/links, wipe, fade) fuer Dynamik — NICHT nur "cut". Mische sie. Ein "flash" am dramatischsten Moment.
 
 ECHTES BUEROFLOW-UI (Segment-Stil "ui-clip"):
-Du kannst echte Dashboard-Screenshots als Szene einbauen — das wirkt viel staerker als abstrakter Text! Segment: {stil: "ui-clip", props: {datei: "ui/dashboard.png", rahmen: "browser", label: "Dein Dashboard", bewegung: "zoom-in"}, dauer: 3.5, uebergang: "slide-hoch"}.
+Du kannst echte Dashboard-Screenshots als Szene einbauen — das wirkt viel staerker als abstrakter Text! Segment: {{stil: "ui-clip", props: {{datei: "ui/dashboard.png", rahmen: "browser", label: "Dein Dashboard", bewegung: "zoom-in"}}, dauer: 3.5, uebergang: "slide-hoch"}}.
 - datei: verfuegbares Material in ui/ (z.B. "ui/dashboard.png")
 - rahmen: "browser" (Browser-Mockup mit buroflow.de-Leiste), "phone", oder "plain"
 - bewegung: "zoom-in" (langsamer Ken-Burns) oder "pan-up" — damit ein Screenshot lebt
@@ -215,8 +220,35 @@ Uebergaenge: "cut" (harter Schnitt, Standard), fliessende Motion-Uebergaenge "sl
 
 WICHTIG: Wenn dir fuer ein Segment eine passende Komponente fehlt, BAU SIE ZUERST mit 'komponente_bauen' und nutze sie dann im story_video. So entstehen mit der Zeit immer bessere Videos.
 
-═══ ECHTES PRODUKT-MATERIAL ═══
-Das echte Bueroflow-Dashboard/UI kommt als Aufnahme vom Recorder-Bot (nicht von dir). In deinem Konzept PLANST du, wo echtes UI-Material eingefuegt werden soll (z.B. "hier Dashboard-Clip zeigen"). Du generierst KEINE Fake-UIs.
+═══ ECHTES BUEROFLOW-UI 1:1 NACHBAUEN (Tool 'ui_aus_github') ═══
+Das staerkste Material sind nicht Screenshots, sondern das UI als CODE-NACHBAU: vektorscharf, in jedem Format, und vor allem ANIMIERBAR (Zahlen zaehlen hoch, Karten staffeln rein, Charts bauen sich auf, Donut fuellt sich). Genau so ist 'custom-dashboard-hero' entstanden.
+
+Mit 'ui_aus_github' liest du den echten Quellcode aus dem privaten Repo {GITHUB_REPO}. Vorgehen:
+1. Ordner listen, um dich zu orientieren (z.B. pfad "components/dashboard" oder "app/dashboard").
+2. Die 1-3 relevanten Dateien lesen (z.B. "components/dashboard/dash-sidebar.tsx").
+3. Mit 'komponente_bauen' als Remotion-Komponente nachbauen.
+
+UEBERSETZUNGS-REGELN Next.js -> Remotion (wichtig, sonst schlaegt der Render fehl):
+- useState/useEffect/Hover -> WEG. Alles frame-basiert ueber useCurrentFrame(), Hover-Zustaende statisch (nicht-gehoverte Variante).
+- CountUp/Timer -> Fortschritt aus dem Frame rechnen, Kurve easeOutExpo.
+- fetch/API-Daten -> plausible Fake-Daten als Props (DSGVO: NIE echte Kundendaten).
+- next/link, next/navigation, Clerk -> raus; Link wird ein div.
+- next/image -> <Img src={{staticFile("...")}} /> aus remotion.
+- Feste Design-Groesse definieren (z.B. 1600x1000) und per Math.min(width/DESIGN_W, height/DESIGN_H) in den Frame skalieren — dann laeuft es in allen Formaten.
+- Tailwind-Klassen -> inline styles (das Dashboard nutzt ohnehin fast nur inline styles).
+- Fonts: Bricolage Grotesque (Display) + DM Sans (Text) via @remotion/google-fonts laden, nicht raten.
+
+LAYOUT-REGELN (VERBINDLICH — hier ist beim ersten Versuch am meisten schiefgegangen):
+- Lege eine feste Design-Flaeche fest (UI-Nachbau: 1600x900) und skaliere sie per Math.min(width/DESIGN_W, height/DESIGN_H) in den Frame.
+- RECHNE die Hoehen aus, schaetze sie nicht: Kartenhoehe = Kopfbereich + Inhalt + Fussbereich, und dieser Wert MUSS exakt aufgehen. Schreib die Rechnung als Kommentar in den Code.
+- Pruefe vor dem Rendern: Rand + Zeilen*Hoehe + Gaps <= DESIGN_H minus mindestens 80px Sicherheitsrand. Nichts darf am Bildrand kleben.
+- Kein Element darf abgeschnitten werden — besonders Titel und Beschreibungstexte muessen VOLLSTAENDIG sichtbar sein. Wenn Text nicht passt: Schrift/Karte anpassen, nicht abschneiden.
+- Kein toter Raum: wenn unter dem Text grosse Leerflaechen bleiben, sind die Karten zu hoch — Hoehe reduzieren, nicht Text aufblaehen.
+- Typische Groessen, die funktionieren: Titel 21px, Beschreibung 13.5px (line-height 1.6), Tag/Mono 10-11px, Karten-Radius 16, Innenabstand 26px.
+- Motion ueber blosses Reinstaffeln hinaus: Elemente innerhalb der Karte gestaffelt (Icon-Pop, Tag, Titel, Text, Footer), danach EIN wanderndes Spotlight-Licht als Hover-Ersatz. Das macht den Unterschied zwischen "Standbild mit Einblendung" und lebendigem UI.
+
+
+Zusaetzlich liefert der Recorder-Bot echte Screenshots/Aufnahmen (Segment-Stil "ui-clip"). Faustregel: Fuer Hero-Momente den CODE-NACHBAU (schaerfer, animierbar), fuer schnelle Belege den Recorder-Screenshot. Erfinde nie UI, die es nicht gibt — bau immer nach dem echten Code aus dem Repo.
 
 ═══ HIGGSFIELD-HINTERGRUND (Nebenwerkzeug, Tool 'vibe_clip') ═══
 Fuer atmosphaerische, cineastische HINTERGRUND-Clips (fliessende Texturen, Stimmung) kannst du Higgsfield nutzen — NUR abstrakt, kein Produkt/Logo/Text. Das legt man spaeter HINTER das Motion-Design. Nutze das sparsam (kostet Credits), nur wenn ein cineastischer Hintergrund den Look hebt. Standardmaessig reicht Motion-Design allein.
@@ -377,6 +409,23 @@ TOOLS = [
                 "fokus": {"type": "string", "description": "Optional: worauf besonders achten (z.B. 'die Kamerabewegung')"},
             },
             "required": ["datei"],
+        },
+    },
+    {
+        "name": "ui_aus_github",
+        "description": ("Liest den ECHTEN Quellcode von Bueroflow aus dem privaten GitHub-Repo. "
+                        "Damit baust du eine Seite/Komponente 1:1 als Remotion-Komponente nach (vektorscharf + animierbar), "
+                        "statt sie zu raten oder unscharfe Screenshots zu nutzen. "
+                        "Gib einen ORDNER an, um den Inhalt zu listen (z.B. 'components/dashboard'), "
+                        "oder eine DATEI, um ihren Code zu lesen (z.B. 'components/dashboard/dash-sidebar.tsx'). "
+                        "Vorgehen: erst Ordner listen, dann die 1-3 relevanten Dateien lesen, dann mit 'komponente_bauen' nachbauen."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "pfad": {"type": "string", "description": "Pfad im Repo, ohne fuehrenden Slash (z.B. 'components/dashboard' oder 'app/dashboard/mahnflow/page.tsx')"},
+                "max_zeichen": {"type": "integer", "description": "Optional: Kuerzungslimit fuer Dateiinhalt (Standard 60000)"},
+            },
+            "required": ["pfad"],
         },
     },
     {
@@ -712,6 +761,81 @@ def tool_referenz_analysieren(inp):
 
 import re as _re
 
+def tool_ui_aus_github(inp):
+    """Liest Dateien/Ordner aus dem privaten Bueroflow-Repo (GitHub Contents API).
+    Ordner -> Liste der Eintraege. Datei -> Quellcode (gekuerzt)."""
+    pfad = (inp.get("pfad") or "").strip().lstrip("/")
+    limit = inp.get("max_zeichen") or GITHUB_MAX_ZEICHEN
+    try:
+        limit = max(2000, min(120000, int(limit)))
+    except Exception:
+        limit = GITHUB_MAX_ZEICHEN
+
+    if not GITHUB_TOKEN:
+        return "GITHUB_TOKEN fehlt in der .env — ohne Token kein Zugriff auf das private Repo."
+    if not pfad:
+        return "Bitte 'pfad' angeben (z.B. 'components/dashboard')."
+    if ".." in pfad:
+        return "Ungueltiger Pfad."
+
+    url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{pfad}"
+    headers = {
+        "Authorization": f"Bearer {GITHUB_TOKEN}",
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+    }
+    try:
+        resp = requests.get(url, headers=headers, params={"ref": GITHUB_BRANCH}, timeout=25)
+    except Exception as e:
+        return f"GitHub nicht erreichbar: {e}"
+
+    if resp.status_code == 404:
+        return (f"Nicht gefunden: '{pfad}' (Branch {GITHUB_BRANCH}). "
+                f"Tipp: erst einen Ordner listen, z.B. 'components/dashboard' oder 'app/dashboard'.")
+    if resp.status_code in (401, 403):
+        return f"Kein Zugriff ({resp.status_code}). Token pruefen (Repo-Scope) oder Rate-Limit abwarten."
+    if resp.status_code != 200:
+        return f"GitHub-Fehler {resp.status_code}: {resp.text[:200]}"
+
+    try:
+        daten = resp.json()
+    except Exception:
+        return "Antwort von GitHub konnte nicht gelesen werden."
+
+    # Ordner -> Liste
+    if isinstance(daten, list):
+        ordner = sorted(e["name"] for e in daten if e.get("type") == "dir")
+        dateien = sorted(f"{e['name']} ({e.get('size', 0)} B)" for e in daten if e.get("type") == "file")
+        zeilen = [f"Inhalt von '{pfad}' im Repo {GITHUB_REPO}:"]
+        if ordner:
+            zeilen.append("\nORDNER:\n" + "\n".join(f"  {o}/" for o in ordner))
+        if dateien:
+            zeilen.append("\nDATEIEN:\n" + "\n".join(f"  {d}" for d in dateien))
+        if not ordner and not dateien:
+            zeilen.append("(leer)")
+        arbeit_log("GitHub gelistet", pfad, f"{len(ordner)} Ordner, {len(dateien)} Dateien")
+        return "\n".join(zeilen)
+
+    # Datei -> Inhalt
+    if daten.get("type") != "file":
+        return f"'{pfad}' ist weder Datei noch Ordner (Typ: {daten.get('type')})."
+    if daten.get("encoding") != "base64" or not daten.get("content"):
+        groesse = daten.get("size", 0)
+        return f"Datei '{pfad}' konnte nicht dekodiert werden (Groesse {groesse} B, evtl. zu gross oder binaer)."
+    try:
+        code = base64.b64decode(daten["content"]).decode("utf-8", errors="replace")
+    except Exception as e:
+        return f"Datei '{pfad}' konnte nicht dekodiert werden: {e}"
+
+    gekuerzt = ""
+    if len(code) > limit:
+        code = code[:limit]
+        gekuerzt = f"\n\n[... gekuerzt bei {limit} Zeichen — bei Bedarf gezielt weitere Datei lesen ...]"
+    arbeit_log("GitHub gelesen", pfad, f"{len(code)} Zeichen")
+    log(f"[github] {pfad} gelesen ({len(code)} Zeichen)")
+    return f"Quellcode aus {GITHUB_REPO}/{pfad} (Branch {GITHUB_BRANCH}):\n\n```\n{code}\n```{gekuerzt}"
+
+
 def tool_komponente_bauen(inp, r):
     """Schreibt eine neue Motion-Komponente (JSX) nach vault/custom/ und test-rendert sie.
     Bei Render-Fehler wird die Datei wieder entfernt (Sicherheitsnetz)."""
@@ -873,6 +997,8 @@ def run_tool(name, inp, r=None):
         return lade_skill(inp.get("name", ""))
     if name == "referenz_analysieren":
         return tool_referenz_analysieren(inp)
+    if name == "ui_aus_github":
+        return tool_ui_aus_github(inp)
     if name == "komponente_bauen":
         return tool_komponente_bauen(inp, r)
     if name == "sfx_generieren":
