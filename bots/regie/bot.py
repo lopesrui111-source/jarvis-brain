@@ -191,7 +191,8 @@ Nutze prompt_influence 0.6-0.8 fuer literalere Ergebnisse. Generiere jeden SFX E
 Im story_video gibst du die SFX mit Timing an: sfx: [{{datei: "whoosh-up", bei_sek: 2.0, lautstaerke: 0.6}}, ...]. bei_sek = wann im Video der Sound startet (z.B. genau am Uebergang). Setze SFX gezielt und sparsam — je nachdem was die Szene braucht, nicht wahllos.
 
 ═══ HINTERGRUND-MUSIK (Tool 'musik_generieren') ═══
-Ein Musik-Track unter dem Video traegt den Rhythmus — das macht Motion-Videos erst "fertig". Generiere einen passenden Track (Stil/Mood auf Englisch, KEINE Band-/Kuenstlernamen) in Video-Laenge, dann gib ihn im story_video mit: musik: "name", musik_lautstaerke: 0.25 (leise unter den SFX). Fuer Büroflow passt: modern, clean, upbeat-corporate, optimistisch, treibend, ohne Gesang. Generiere pro Vibe EINEN Track, dann wiederverwendbar.
+Ein Musik-Track unter dem Video traegt den Rhythmus — das macht Motion-Videos erst "fertig". Generiere einen passenden Track (Stil/Mood auf Englisch) in Video-Laenge, dann gib ihn im story_video mit: musik: "name", musik_lautstaerke: 0.25 (leise unter den SFX). Fuer Büroflow passt: modern, clean, upbeat-corporate, optimistisch, treibend, ohne Gesang. Generiere pro Vibe EINEN Track, dann wiederverwendbar.
+LIZENZ-REGELN (ElevenLabs Music Terms, VERBINDLICH — sonst Lizenzbruch): Im Musik-Prompt NIEMALS verwenden: echte Kuenstler-/Bandnamen, Songwriter-Namen, Songtitel, Albumtitel, Plattenlabel- oder Musikverlag-Namen, oder erkennbare Songtext-Zeilen. Beschreibe NUR Genre, Stimmung, Tempo, Instrumente (z.B. "upbeat corporate, driving synth, optimistic, no vocals, 120bpm"). Formulierungen wie "im Stil von [Kuenstler]" oder "klingt wie [Song]" sind verboten. So bleibt der Track sauber kommerziell nutzbar.
 WICHTIG: Musik gehoert IMMER in den 'musik'-Parameter, NIE in die sfx-Liste. Sie laeuft automatisch ab Sekunde 0 durchgehend — gib ihr kein bei_sek. SFX sind kurze Einzeleffekte (Whoosh, Impact, Tick), Musik ist der durchgehende Track darunter.
 
 ═══ KOMPLETTE VIDEOS BAUEN (Tool 'story_video') ═══
@@ -554,7 +555,7 @@ TOOLS = [
     {
         "name": "musik_generieren",
         "description": ("Generiert einen Hintergrund-Musik-Track via ElevenLabs Music aus einer Stil-/Mood-Beschreibung. "
-                        "KEINE Band-/Kuenstlernamen (Copyright-Fehler). Der Track laeuft leise unter dem ganzen Video und traegt den Rhythmus."),
+                        "KEINE Kuenstler-/Band-/Songwriter-Namen, Songtitel, Albumtitel, Label- oder Verlagsnamen, keine Songtext-Zeilen (Lizenzbruch laut ElevenLabs Music Terms). Nur Genre/Stimmung/Tempo/Instrumente. Der Track laeuft leise unter dem ganzen Video und traegt den Rhythmus."),
         "input_schema": {
             "type": "object",
             "properties": {
