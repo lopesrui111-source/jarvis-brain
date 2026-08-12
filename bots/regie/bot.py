@@ -46,6 +46,7 @@ MAX_HISTORY = 8
 MAX_TOOL_ROUNDS = 14
 VAULT_DIR = "/app/vault"
 CLIP_DIR  = os.path.join(VAULT_DIR, "clips")   # hier landen Clip-Infos (JSON)
+VIDEOS_DIR = os.path.join(VAULT_DIR, "videos") # fertige Renders (fuer Selbst-Review)
 
 INBOX_KEY = "bot:regie:inbox"
 REPLY_KEY = "bot:regie:reply:{id}"
@@ -60,7 +61,7 @@ REFERENZ_DIR = os.getenv("REFERENZ_DIR", "/app/vault/referenzen")
 CUSTOM_DIR = os.getenv("CUSTOM_DIR", "/app/vault/custom")
 SFX_DIR = os.getenv("SFX_DIR", "/app/vault/sfx")
 MUSIK_DIR = os.getenv("MUSIK_DIR", "/app/vault/musik")
-# ── GITHUB (Bueroflow-Repo lesen, fuer 1:1-UI-Nachbau) ───────
+# ── GITHUB (Büroflow-Repo lesen, fuer 1:1-UI-Nachbau) ───────
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GITHUB_REPO = os.getenv("GITHUB_REPO", "lopesrui111-source/Buroflow")
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
@@ -144,11 +145,11 @@ def custom_komponenten_liste():
 def build_system():
     return f"""Du bist der REGIE-BOT im JARVIS Studio-Team von Rui. Heute ist {datetime.now():%d.%m.%Y}, Jahr {AKTUELLES_JAHR}.
 
-DEINE ROLLE: Du bist der kreative Kopf fuer Video-Content von Bueroflow (buroflow.de) — einem deutschen KI-SaaS mit vier Tools (Mahnflow, Mailflow, Angebotsflow, E-Rechnungsflow). Zielgruppe: Selbststaendige, Freelancer, kleine Unternehmen.
+DEINE ROLLE: Du bist der kreative Kopf fuer Video-Content von Büroflow (buroflow.de) — einem deutschen KI-SaaS mit vier Tools (Mahnflow, Mailflow, Angebotsflow, E-Rechnungsflow). Zielgruppe: Selbststaendige, Freelancer, kleine Unternehmen.
 
-DEIN HAUPTWERKZEUG: MOTION-DESIGN. Du erstellst hochwertige Motion-Graphics-Videos (animierter Text, Glasoptik, bewegte Formen, Kinetic Typography) ueber den Render-Server (Tool 'motion_video'). Das ist praezises, marken-konformes Motion-Design im Bueroflow-Look — KEIN fotorealistisches KI-Video.
+DEIN HAUPTWERKZEUG: MOTION-DESIGN. Du erstellst hochwertige Motion-Graphics-Videos (animierter Text, Glasoptik, bewegte Formen, Kinetic Typography) ueber den Render-Server (Tool 'motion_video'). Das ist praezises, marken-konformes Motion-Design im Büroflow-Look — KEIN fotorealistisches KI-Video.
 
-STIL: Modern, premium, mit Punch. Bueroflow-Brandkit ist fest eingebaut (Farben, Geist-Schrift, Logo). Standard-Look: dunkel mit Limette-Akzent (#C8FF47). Weitere Paletten je nach Stimmung verfuegbar.
+STIL: Modern, premium, mit Punch. Büroflow-Brandkit ist fest eingebaut (Farben, Geist-Schrift, Logo). Standard-Look: dunkel mit Limette-Akzent (#C8FF47). Weitere Paletten je nach Stimmung verfuegbar.
 
 PLATTFORMEN & FORMATE:
 - TikTok/Reels/Shorts -> Format "tiktok" (9:16, hochkant)
@@ -190,7 +191,8 @@ Nutze prompt_influence 0.6-0.8 fuer literalere Ergebnisse. Generiere jeden SFX E
 Im story_video gibst du die SFX mit Timing an: sfx: [{{datei: "whoosh-up", bei_sek: 2.0, lautstaerke: 0.6}}, ...]. bei_sek = wann im Video der Sound startet (z.B. genau am Uebergang). Setze SFX gezielt und sparsam — je nachdem was die Szene braucht, nicht wahllos.
 
 ═══ HINTERGRUND-MUSIK (Tool 'musik_generieren') ═══
-Ein Musik-Track unter dem Video traegt den Rhythmus — das macht Motion-Videos erst "fertig". Generiere einen passenden Track (Stil/Mood auf Englisch, KEINE Band-/Kuenstlernamen) in Video-Laenge, dann gib ihn im story_video mit: musik: "name", musik_lautstaerke: 0.25 (leise unter den SFX). Fuer Bueroflow passt: modern, clean, upbeat-corporate, optimistisch, treibend, ohne Gesang. Generiere pro Vibe EINEN Track, dann wiederverwendbar.
+Ein Musik-Track unter dem Video traegt den Rhythmus — das macht Motion-Videos erst "fertig". Generiere einen passenden Track (Stil/Mood auf Englisch, KEINE Band-/Kuenstlernamen) in Video-Laenge, dann gib ihn im story_video mit: musik: "name", musik_lautstaerke: 0.25 (leise unter den SFX). Fuer Büroflow passt: modern, clean, upbeat-corporate, optimistisch, treibend, ohne Gesang. Generiere pro Vibe EINEN Track, dann wiederverwendbar.
+WICHTIG: Musik gehoert IMMER in den 'musik'-Parameter, NIE in die sfx-Liste. Sie laeuft automatisch ab Sekunde 0 durchgehend — gib ihr kein bei_sek. SFX sind kurze Einzeleffekte (Whoosh, Impact, Tick), Musik ist der durchgehende Track darunter.
 
 ═══ KOMPLETTE VIDEOS BAUEN (Tool 'story_video') ═══
 Fuer volle Videos (20-30 Sek) mit Story-Arc verkettest du mehrere Segmente zu EINEM Clip. Jedes Segment ist entweder ein Grundstil ODER eine deiner selbstgebauten custom-Komponenten (stil: "custom-NAME").
@@ -209,7 +211,7 @@ Du kannst echte Dashboard-Screenshots als Szene einbauen — das wirkt viel stae
 - rahmen: "browser" (Browser-Mockup mit buroflow.de-Leiste), "phone", oder "plain"
 - bewegung: "zoom-in" (langsamer Ken-Burns) oder "pan-up" — damit ein Screenshot lebt
 - label: optionaler Text ueber dem Clip
-Setze 1 ui-clip als "Beweis"-Moment ein (nach dem Problem, als Loesung: "so sieht's in Bueroflow aus"). Das echte UI ist der staerkste Vertrauensbeweis.
+Setze 1 ui-clip als "Beweis"-Moment ein (nach dem Problem, als Loesung: "so sieht's in Büroflow aus"). Das echte UI ist der staerkste Vertrauensbeweis.
 
 So baust du ein starkes Video:
 - HOOK (Segment 1): custom-Komponente oder wortpop — stark, stoppt den Scroll
@@ -250,6 +252,27 @@ LAYOUT-REGELN (VERBINDLICH — hier ist beim ersten Versuch am meisten schiefgeg
 - Typische Groessen, die funktionieren: Titel 21px, Beschreibung 13.5px (line-height 1.6), Tag/Mono 10-11px, Karten-Radius 16, Innenabstand 26px.
 - Motion ueber blosses Reinstaffeln hinaus: Elemente innerhalb der Karte gestaffelt (Icon-Pop, Tag, Titel, Text, Footer), danach EIN wanderndes Spotlight-Licht als Hover-Ersatz. Das macht den Unterschied zwischen "Standbild mit Einblendung" und lebendigem UI.
 
+═══ MOTION-QUALITAET: AFTER-EFFECTS-DICHTE (das Wichtigste fuer gute Videos) ═══
+Der Unterschied zwischen "basic" und "professionell" ist DICHTE: mehrere Bewegungs-Ebenen laufen GLEICHZEITIG, nicht nur ein Element blendet ein und friert dann ein. Ein starkes Motion-Segment hat 4-5 Ebenen parallel:
+1. HINTERGRUND: driftende Partikel (10-30 kleine Punkte, deterministisch geseedet, NIE Math.random pro Frame) mit Parallax — ferne langsam, nahe schnell. Dazu 1-2 langsam wandernde Radial-Glows.
+2. MITTELGRUND: EIN durchlaufendes Element, das sich staendig bewegt — ein schraeger Licht-Balken, der zyklisch durchs Bild sweept, oder eine Linie/Form.
+3. VORDERGRUND: Text WORT FUER WORT (oder Zeile fuer Zeile) mit gestaffeltem Overshoot — spring() mit damping ~10-13, sichtbarer Y-Drop + leichte Rotation/Scale. NICHT alles gleichzeitig, NICHT zu frueh: Start ~Frame 8, Abstand 11-13 Frames pro Wort, damit man JEDES einzeln aufploppen sieht.
+4. AKZENT: das betonte Wort/Zahl bekommt SEKUNDAERBEWEGUNG waehrend der Haltezeit (Scale-Puls + Glow-Puls per Math.sin(leben/20)), plus optional Unterstrich/Ring/Rahmen.
+5. FEINSCHLIFF: HUD-Ecken-Ticks, Kamera-Push (langsamer Scale 1.0->1.05 ueber die Szene).
+Wichtig: nichts darf nach dem Eintritt EINFRIEREN. Immer laeuft etwas weiter (Partikel, Balken-Sweep, Puls). Timing-Regel: Eintritt ~erste Sekunde, danach traegt die Sekundaerbewegung. Bei weichem Uebergang (weich=true) die harten Eintritts-Bewegungen abschalten, nur kurzer Fade.
+
+FERTIGE REFERENZ-KOMPONENTEN (im Vault, nutze sie ODER lerne von ihrem Code): custom-kinetic-pro, custom-wortpop-pro, custom-zahl-pro, custom-formen-pro — das sind die alten Grundstile auf AE-Niveau. Bevorzuge sie gegenueber den alten kinetic/wortpop/zahl/formen. Wenn du etwas NEUES baust (mit komponente_bauen), orientiere dich an ihrem Aufbau: lies bei Bedarf ihren Code und uebertrage das Ebenen-Prinzip auf dein neues Motiv. Du bist NICHT auf diese Bausteine beschraenkt — du kannst jederzeit eigene Motion-Szenen erfinden. Das Ebenen-Prinzip ist der Massstab, nicht die konkrete Komponente.
+
+SCHREIBWEISE (KRITISCH, NIE falsch): Der Markenname ist IMMER "Büroflow" — mit ü, gross B. NIEMALS "Bueroflow", "bueroflow" oder "Buroflow" im sichtbaren Text/Video. (Die Domain buroflow.de bleibt klein; nur der Repo-Name im Code heisst 'Buroflow'.) Genauso korrekt: "Mahnflow", "Mailflow", "Angebotsflow", "E-Rechnungsflow". Umlaute (ä/ö/ü) gehoeren normal in den Text — der Renderer kann sie, hab keine Angst davor.
+
+KOMPOSITION (gilt auch fuer FREI gebaute Motion-Szenen, nicht nur UI-Nachbau): Der Inhalt muss zentriert und ausgewogen im Bild sitzen. Ein kleines Element oben-mittig mit Text unten-links und viel totem Raum rechts ist ein FEHLER. Fuelle die Flaeche: Hauptmotiv gross und mittig, Text darunter/darum zentriert, oberer und unterer Rand ungefaehr gleich. Nutze mindestens 70% der Bildbreite. Pruefe vor dem Rendern: wirkt das Bild leer oder unausgewogen, ist es noch nicht fertig.
+
+HALTEZEIT ZUERST PLANEN: Die laengste Phase eines Segments ist NICHT der Eintritt, sondern die Zeit DANACH. Ein 3-Sekunden-Segment hat ~0,8s Eintritt und ~2,2s Haltezeit. Wenn in der Haltezeit nichts passiert, wirkt das Video tot — genau der haeufigste Fehler. Regel: In JEDER Szene muessen nach dem Eintritt MINDESTENS 3 Dinge DURCHGEHEND in Bewegung sein (z.B. driftende Partikel + wanderndes Licht-Element + Puls/Atmen auf dem Hauptmotiv). Plane die Haltezeit-Bewegung, bevor du den Eintritt baust.
+
+SELBST-REVIEW (PFLICHT-ARBEITSSCHRITT): Nach JEDEM fertigen Render (story_video ODER komponente_bauen) rufst du 'video_pruefen' auf, BEVOR du Rui das Ergebnis meldest. Das Tool schaut dein Video mit Bild-KI an und findet tote Haltezeit, leere Komposition, falsche Marken-Schreibweise. Bei Urteil NACHBESSERN: setz die genannten Fixes um (Komponente/Segmente anpassen, neu rendern), dann pruefe erneut — wiederhole bis FREIGABE (max. 2-3 Runden, dann melde ehrlich den Restzustand). Erst bei FREIGABE meldest du Rui das fertige Video. So faengst du Fehler selbst, statt dass Rui sie findet.
+
+FORMAT BEWUSST WAEHLEN: Waehle das Format aktiv passend zum Zweck und NENNE es Rui, nimm nicht still den Default. tiktok (9:16) fuer Instagram Reels / TikTok / Shorts — Hochformat, mobil. linkedin (16:9) fuer LinkedIn, YouTube, Praesentation, und fuer UI-lastige Inhalte (Dashboards, breite Layouts). quadrat (1:1) fuer Feed-Posts. Im Zweifel bei Marketing-Kurzvideos tiktok, bei UI/Business-Inhalten linkedin. Wenn Rui ein Format nennt oder vorher eins genutzt wurde, dieses beibehalten.
+
 
 Zusaetzlich liefert der Recorder-Bot echte Screenshots/Aufnahmen (Segment-Stil "ui-clip"). Faustregel: Fuer Hero-Momente den CODE-NACHBAU (schaerfer, animierbar), fuer schnelle Belege den Recorder-Screenshot. Erfinde nie UI, die es nicht gibt — bau immer nach dem echten Code aus dem Repo.
 
@@ -266,6 +289,7 @@ REGELN fuer den JSX-Code:
 - Importiere Bausteine relativ: `import {{ EXPO, TextBlock, Surface, FlashOverlay, StoryHintergrund, useKameraPush }} from "../motion_helpers.jsx";` und `import {{ BRAND, logoFuer }} from "../brand.js";`
 - Nutze `useVideoConfig()` fuer width/height (damit es in allen Formaten laeuft) und `useCurrentFrame()`.
 - HALTE DICH AN DIE MOTION-DNA: easeOutExpo (EXPO) als Kurve, KEIN Bounce/Elastic. Text auf Surface (Glas/Card), nie nackt. Metronomisch. Max 2 Dekor-Elemente. Subtile Bewegung statt Zappeln.
+- EASING-FALLE (haeufiger Crash!): `easing:` in interpolate() MUSS eine FUNKTION sein. Richtig: `easing: EXPO` (importiert aus motion_helpers) oder `easing: Easing.out(Easing.exp)`. FALSCH und crasht mit "easing is not a function": `easing: Easing.exp` (ohne .out()), `easing: "expo"` (String), `easing: EXPO()` (aufgerufen). Wenn du Easing aus remotion direkt nutzt: `import {{ Easing }} from "remotion"` und dann `Easing.out(Easing.ease)` o.ae. Im Zweifel EXPO aus motion_helpers importieren und nur diesen nutzen.
 - Verfuegbare Bausteine: EXPO (Easing), TextBlock (Fade+Blur-Text), Surface (Glas/Card), FlashOverlay (Pivot-Blitz), StoryHintergrund (Blob-BG), useKameraPush (Scale-Push). BRAND.paletten.{{dunkel,hell,gruen,limette}} mit .hintergrund/.text/.akzent.
 
 GRAFIK-BAUSTEINE fuer visuellen Reichtum (import aus "../grafik.jsx"):
@@ -323,7 +347,7 @@ Faustregel: Bei einem neuen Video-Konzept lies 1-2 passende Skills (z.B. 'market
 Fertige Videos sollen eine echte Story haben, nicht nur 5 Sekunden:
 - TikTok/Reels: ca. 25-30 Sekunden, schneller Schnitt, starker Hook in den ersten 2 Sek.
 - LinkedIn: kann laenger, ruhiger, nutzenorientierter sein.
-Ein starkes Video hat einen Bogen: HOOK (Aufmerksamkeit) -> PROBLEM (Schmerzpunkt) -> LOESUNG (Bueroflow) -> BEWEIS/NUTZEN -> CTA.
+Ein starkes Video hat einen Bogen: HOOK (Aufmerksamkeit) -> PROBLEM (Schmerzpunkt) -> LOESUNG (Büroflow) -> BEWEIS/NUTZEN -> CTA.
 Plane die Story in mehreren Segmenten und nutze passende Stile pro Segment (z.B. wortpop fuer den Hook, szenen fuer Problem/Loesung, zahl fuer Beweis).
 
 ═══ ABLAUF ═══
@@ -369,7 +393,7 @@ TOOLS = [
     },
     {
         "name": "motion_video",
-        "description": ("Erstellt ein Motion-Design-Video ueber den Render-Server (Bueroflow-Brandkit, 60fps). "
+        "description": ("Erstellt ein Motion-Design-Video ueber den Render-Server (Büroflow-Brandkit, 60fps). "
                         "Waehle Stil, Palette, Format und liefere die Texte. Gibt den Dateipfad zurueck."),
         "input_schema": {
             "type": "object",
@@ -415,8 +439,26 @@ TOOLS = [
         },
     },
     {
+        "name": "video_pruefen",
+        "description": ("SELBST-REVIEW deines eigenen gerenderten Videos. Extrahiert gleichmaessig ueber die "
+                        "ganze Dauer verteilte Frames und prueft mit Bild-KI kritisch: Bewegt sich ueber die "
+                        "GESAMTE Dauer genug (oder steht es nach dem Eintritt still?), ist die Komposition "
+                        "zentriert/gefuellt, stimmt der Markenname 'Büroflow' und alle Texte, ist es dicht genug. "
+                        "Gibt ein Urteil (FREIGABE / NACHBESSERN) mit konkreten Fixes. "
+                        "WICHTIG: Rufe das nach JEDEM story_video und komponente_bauen auf, BEVOR du Rui das "
+                        "Ergebnis meldest. Bei 'NACHBESSERN' die Fixes umsetzen (Komponente/Segmente anpassen, neu "
+                        "rendern) und erneut pruefen — erst bei FREIGABE melden. So lieferst du nur gute Videos."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "datei": {"type": "string", "description": "Optional: Dateiname in vault/videos/. Ohne Angabe wird das ZULETZT gerenderte Video geprueft."},
+                "erwartung": {"type": "string", "description": "Optional: was das Video zeigen/sein sollte (hilft der Bewertung, z.B. 'Chaos wird zu Ordnung, Markenname Büroflow')."},
+            },
+        },
+    },
+    {
         "name": "ui_aus_github",
-        "description": ("Liest den ECHTEN Quellcode von Bueroflow aus dem privaten GitHub-Repo. "
+        "description": ("Liest den ECHTEN Quellcode von Büroflow aus dem privaten GitHub-Repo. "
                         "Damit baust du eine Seite/Komponente 1:1 als Remotion-Komponente nach (vektorscharf + animierbar), "
                         "statt sie zu raten oder unscharfe Screenshots zu nutzen. "
                         "Gib einen ORDNER an, um den Inhalt zu listen (z.B. 'components/dashboard'), "
@@ -601,24 +643,66 @@ def tool_story_video(inp, r):
             "uebergang": seg.get("uebergang", "cut"),
         })
 
-    # SFX aufbereiten: bei_sek -> Frame (60fps), Dateiname normalisieren
+    # ── Echte Zeitachse rechnen (fuer SFX-Timing-Korrektur) ──
+    # Der Bot plant SFX in "geplanten" Sekunden (Segmentgrenzen ohne
+    # Ueberlappung). Fliessende Uebergaenge ziehen aber je 13 Frames Overlap
+    # ab -> die reale Zeitachse verschiebt sich nach vorne, und die SFX
+    # kaemen sonst zu SPAET. Wir bauen eine Umrechnung geplant->real.
+    FPS = 60
+    UEBERGANG_FRAMES = 13
+    def _fliessend(u): return bool(u) and u not in ("cut", "flash")
+    # geplante und reale Startframes je Segment
+    geplant_start = []  # geplanter Startframe (ohne Overlap-Abzug)
+    real_start = []     # realer Startframe (mit Overlap-Abzug)
+    gp, rp = 0, 0
+    for idx, seg in enumerate(aufbereitet):
+        f = max(24, int(round(float(seg.get("dauer", 3)) * FPS)))
+        if idx > 0 and _fliessend(seg.get("uebergang")):
+            rp -= UEBERGANG_FRAMES  # Overlap: reales Segment startet frueher
+        geplant_start.append(gp)
+        real_start.append(rp)
+        gp += f
+        rp += f
+    def _geplant_zu_real(frame_geplant):
+        # finde das Segment, in dem der geplante Frame liegt, und verschiebe
+        # um denselben Versatz auf die reale Achse
+        versatz = 0
+        for i in range(len(geplant_start)):
+            if frame_geplant >= geplant_start[i]:
+                versatz = real_start[i] - geplant_start[i]
+            else:
+                break
+        return max(0, frame_geplant + versatz)
+
+    # SFX aufbereiten: bei_sek -> Frame (60fps) -> Overlap-Korrektur.
+    # Ausserdem: faelschlich als SFX eingetragene MUSIK erkennen und
+    # stattdessen als durchgehende Hintergrundmusik behandeln.
     sfx_liste = []
+    musik_aus_sfx = ""
     for s_ in (inp.get("sfx") or []):
         datei = s_.get("datei", "")
         if not datei:
+            continue
+        # Musik-Fehleintrag abfangen (liegt im musik-Ordner oder heisst so)
+        low = datei.lower()
+        if low.startswith("musik/") or "musik" in low or "music" in low or "track" in low:
+            musik_aus_sfx = datei
             continue
         if not datei.startswith("sfx/"):
             datei = f"sfx/{datei}"
         if not datei.endswith(".mp3"):
             datei = datei + ".mp3"
+        frame_geplant = int(round(float(s_.get("bei_sek", 0)) * FPS))
         sfx_liste.append({
             "datei": datei,
-            "frame": int(round(float(s_.get("bei_sek", 0)) * 60)),
+            "frame": _geplant_zu_real(frame_geplant),
             "lautstaerke": float(s_.get("lautstaerke", 0.7)),
         })
 
-    # Musik aufbereiten
-    musik = inp.get("musik", "")
+    # Musik aufbereiten (bevorzugt der explizite musik-Parameter, sonst der
+    # aus einem SFX-Fehleintrag geborgene Track). Musik laeuft IMMER ab
+    # Frame 0 durchgehend, nie mit Offset.
+    musik = inp.get("musik", "") or musik_aus_sfx
     if musik:
         if not musik.startswith("musik/"):
             musik = f"musik/{musik}"
@@ -764,8 +848,94 @@ def tool_referenz_analysieren(inp):
 
 import re as _re
 
+def _neuestes_video():
+    """Findet das zuletzt geaenderte .mp4 in vault/videos/."""
+    try:
+        mp4s = glob.glob(os.path.join(VIDEOS_DIR, "*.mp4"))
+        if not mp4s:
+            return ""
+        return max(mp4s, key=os.path.getmtime)
+    except Exception:
+        return ""
+
+def tool_video_pruefen(inp):
+    """SELBST-REVIEW: extrahiert gleichverteilte Frames aus einem fertigen Video
+    und laesst Claude Vision es ehrlich gegen die Qualitaetskriterien pruefen —
+    besonders 'passiert ueber die ganze Dauer genug' und 'Komposition/Marke'."""
+    datei = inp.get("datei", "")
+    erwartung = inp.get("erwartung", "")
+    if datei:
+        pfad = datei if os.path.isabs(datei) else os.path.join(VIDEOS_DIR, datei)
+    else:
+        pfad = _neuestes_video()  # ohne Angabe: das zuletzt gerenderte
+    if not pfad or not os.path.exists(pfad):
+        vorhanden = ", ".join(sorted(os.listdir(VIDEOS_DIR))[-8:]) if os.path.isdir(VIDEOS_DIR) else "(Ordner fehlt)"
+        return f"Video nicht gefunden. Zuletzt in vault/videos/: {vorhanden}"
+
+    dauer = _video_dauer(pfad)
+    if dauer <= 0:
+        return "Konnte Videodauer nicht lesen — gueltiges Video?"
+
+    # GLEICHMAESSIG ueber die ganze Dauer verteilte Frames — entscheidend, um
+    # 'ab Sekunde 2 passiert nichts' ueberhaupt sehen zu koennen.
+    n = 8
+    fps = max(0.3, min(4.0, n / dauer))
+    tmp = tempfile.mkdtemp(prefix="pruefframes_")
+    try:
+        subprocess.run(
+            ["ffmpeg", "-y", "-i", pfad, "-vf", f"fps={fps:.3f},scale=640:-1",
+             "-frames:v", str(n), os.path.join(tmp, "f_%03d.jpg")],
+            capture_output=True, text=True, timeout=120)
+        frames = sorted(glob.glob(os.path.join(tmp, "f_*.jpg")))[:n]
+        if not frames:
+            return "Konnte keine Frames extrahieren (ffmpeg-Problem)."
+
+        content = []
+        for i, fr in enumerate(frames):
+            with open(fr, "rb") as fh:
+                b64 = base64.standard_b64encode(fh.read()).decode()
+            t = (i / fps)
+            content.append({"type": "text", "text": f"Frame {i+1}/{len(frames)} (t~{t:.1f}s von {dauer:.1f}s):"})
+            content.append({"type": "image", "source": {"type": "base64",
+                            "media_type": "image/jpeg", "data": b64}})
+        anweisung = (
+            "Du bist ein strenger, ehrlicher Motion-Design-Reviewer und pruefst DEIN EIGENES gerendertes Video "
+            "(diese Frames sind zeitlich gleichmaessig ueber die gesamte Dauer verteilt). Sei kritisch, nicht nett — "
+            "das Ziel ist, Schwaechen zu finden, bevor Rui sie sieht. Pruefe konkret:\n"
+            "1. BEWEGUNG UEBER DIE ZEIT (wichtigster Punkt): Veraendert sich von Frame zu Frame genug, ODER "
+            "steht das Bild nach dem Eintritt still? Vergleiche spaete Frames miteinander — wenn Frame 4-8 fast "
+            "identisch aussehen, ist die Haltezeit TOT. Das ist ein schwerer Fehler.\n"
+            "2. KOMPOSITION: Ist der Inhalt zentriert und fuellt die Flaeche (mind. ~70% Breite), oder klebt etwas "
+            "in einer Ecke mit viel totem Raum? Oberer/unterer Rand ausgewogen?\n"
+            "3. MARKE/TEXT: Steht der Markenname KORREKT als 'Büroflow' (mit ü)? Falsche Schreibweisen "
+            "(Bueroflow/Buroflow) oder Tippfehler in sichtbarem Text? Toolnamen korrekt (Mahnflow/Mailflow/Angebotsflow/E-Rechnungsflow)?\n"
+            "4. LESBARKEIT: Text gross genug, guter Kontrast, nicht abgeschnitten?\n"
+            "5. DICHTE: Wirkt es 'basic' (nur ein Element blendet ein) oder reich (mehrere Ebenen: Partikel, "
+            "durchlaufendes Element, Sekundaerbewegung)?\n\n"
+            "Gib am Ende ein klares URTEIL: 'FREIGABE' wenn es gut genug ist, oder 'NACHBESSERN' mit einer "
+            "nummerierten Liste der konkreten Fixes (was genau, in welchem Zeitbereich). Antworte auf Deutsch, kurz und konkret."
+        )
+        if erwartung:
+            anweisung += f"\n\nWas das Video zeigen/sein sollte: {erwartung}"
+        content.append({"type": "text", "text": anweisung})
+
+        log(f"[pruefen] Selbst-Review {os.path.basename(pfad)} ({dauer:.1f}s, {len(frames)} Frames)")
+        resp = client.messages.create(model=MODEL, max_tokens=1400,
+                                      messages=[{"role": "user", "content": content}])
+        text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
+        arbeit_log("Video geprueft", os.path.basename(pfad), text[:200])
+        urteil = "NACHBESSERN" if "NACHBESSERN" in text.upper() else ("FREIGABE" if "FREIGABE" in text.upper() else "?")
+        return f"Selbst-Review von '{os.path.basename(pfad)}' ({dauer:.0f}s) — Urteil: {urteil}\n\n{text}"
+    finally:
+        for fr in glob.glob(os.path.join(tmp, "*")):
+            try: os.remove(fr)
+            except Exception: pass
+        try: os.rmdir(tmp)
+        except Exception: pass
+
+
 def tool_ui_aus_github(inp):
-    """Liest Dateien/Ordner aus dem privaten Bueroflow-Repo (GitHub Contents API).
+    """Liest Dateien/Ordner aus dem privaten Büroflow-Repo (GitHub Contents API).
     Ordner -> Liste der Eintraege. Datei -> Quellcode (gekuerzt)."""
     pfad = (inp.get("pfad") or "").strip().lstrip("/")
     limit = inp.get("max_zeichen") or GITHUB_MAX_ZEICHEN
@@ -1000,6 +1170,8 @@ def run_tool(name, inp, r=None):
         return lade_skill(inp.get("name", ""))
     if name == "referenz_analysieren":
         return tool_referenz_analysieren(inp)
+    if name == "video_pruefen":
+        return tool_video_pruefen(inp)
     if name == "ui_aus_github":
         return tool_ui_aus_github(inp)
     if name == "komponente_bauen":
@@ -1030,6 +1202,7 @@ def think(history, user_text, bilder=None, r=None):
 
     final_text = ""
     tool_benutzt = False
+    pruef_zaehler = {"n": 0}  # Notbremse gegen endlose Review-Schleifen
     for _ in range(MAX_TOOL_ROUNDS):
         resp = client.messages.create(model=MODEL, max_tokens=MAX_TOKENS,
                                       system=SYS_CACHED, tools=TOOLS_CACHED, messages=messages)
@@ -1047,6 +1220,19 @@ def think(history, user_text, bilder=None, r=None):
             elif block.type == "tool_use":
                 a_content.append({"type": "tool_use", "id": block.id,
                                   "name": block.name, "input": block.input})
+                # NOTBREMSE: video_pruefen hoechstens 3x pro Auftrag. Danach
+                # Zwangs-Freigabe, damit der Loop nicht endlos dreht und Code
+                # kaputt-iteriert (siehe easing-Crash in Runde 4+).
+                if block.name == "video_pruefen":
+                    pruef_zaehler["n"] += 1
+                    if pruef_zaehler["n"] > 3:
+                        result = ("STOPP: Du hast bereits 3 Review-Runden gemacht. Keine weitere "
+                                  "Nachbesserung — das Ergebnis ist gut genug. Melde Rui JETZT das "
+                                  "aktuelle Video mit einem kurzen ehrlichen Fazit (was gut ist, was "
+                                  "in einer spaeteren Runde noch besser werden koennte). Keine Tools mehr.")
+                        log(f"[notbremse] video_pruefen #{pruef_zaehler['n']} -> Zwangs-Freigabe")
+                        t_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
+                        continue
                 result = run_tool(block.name, block.input or {}, r)
                 log(f"[tool] {block.name} -> {str(result)[:80]}")
                 t_results.append({"type": "tool_result", "tool_use_id": block.id,
