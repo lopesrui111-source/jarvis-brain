@@ -1,55 +1,63 @@
-<!-- automatisch erzeugt am 11.08.2026 07:01 — nicht von Hand bearbeiten -->
+<!-- automatisch erzeugt am 12.08.2026 07:00 — nicht von Hand bearbeiten -->
 
 # STATUS
 
 ## Was das System ist
 
-Multi-Bot-System auf Hetzner CX23 (195.201.7.109), orchestriert durch JARVIS als zentralen Hub. Sieben spezialisierte Bots (CEO, Marketing, SEO, Immo, Telegram, Recorder, Render) führen Aufgaben parallel aus. PostgreSQL 16 mit pgvector als Gedächtnis, Redis für Queuing. Docker Compose, alle Services laufen in Containern.
+Multi-Bot-Orchestrator auf Hetzner. JARVIS (core.py) ist der zentrale Koordinator mit Gedächtnis (PostgreSQL + pgvector), Mail- und Kalender-Zugriff, Web-Recherche. Sechs spezialisierte Bots (CEO, Marketing, SEO, Immo, Telegram, Recorder, Regie) führen delegierte Aufgaben aus. Dashboard zeigt Echtzeit-Lagebild. Alle Services laufen in Docker Compose.
 
 ## Infrastruktur
 
-- **Server:** Hetzner CX23, Ubuntu, Docker Compose
-- **Repo-Wurzel:** `/opt/jarvis-brain/` (nicht `/opt/jarvis/`)
-- **Datenbank:** PostgreSQL 16 mit pgvector, DB `jarvis_brain`, User `jarvis`
-- **Laufende Services:** redis, postgres, adminer, watchtower, dashboard, jarvis-core, jarvis-ceo, jarvis-marketing, jarvis-recorder, jarvis-regie, jarvis-render, camofox, jarvis-immo, jarvis-seo, jarvis-telegram
-- **Externe Quellen:** Google iCal (read-only), IMAP auf IONOS und Gmail (lesend), MuAPI für Bildgenerierung, ElevenLabs für Audio
-- **Zeitzone:** Europe/Berlin in allen Bot-Dockerfiles
+- **Server**: Hetzner CX23, 195.201.7.109, Ubuntu, Docker Compose
+- **Repo**: `/opt/jarvis-brain/` (nicht `/opt/jarvis/`)
+- **Datenbank**: PostgreSQL 16 mit pgvector, DB `jarvis_brain`, User `jarvis`
+- **Backing-Services**: Redis, Adminer, Watchtower, pgAdmin
+- **Laufende Bots**: jarvis-core, jarvis-ceo, jarvis-marketing, jarvis-seo, jarvis-immo, jarvis-telegram, jarvis-recorder, jarvis-regie, camofox
+- **Zeitzone überall**: Europe/Berlin
 
 ## Aktueller Stand je Komponente
 
-| Datei | Zeilen | Funktion | Zuletzt |
-|-------|--------|----------|---------|
-| `orchestrator/core.py` | 3434 | Orchestrator, Gedächtnis (pgvector), Mail/Kalender-Lesen, Web-Recherche, GitHub-Lesen, Auftrags- und Aufgabenverwaltung, Morgen-Durchgang, Lagebild-Tool, Doku-System | Audio via ElevenLabs, Story-Übergänge |
-| `dashboard/dashboard.py` | 4123 | Web-UI für Aufgaben, Mails, Kalender, Vault, Logs, Echtzeit-Telemetrie | Audio via ElevenLabs |
-| `bots/ceo/bot.py` | 777 | Strategie, Entscheidungen für Büroflow, CEO-Review für Marketing-Entwürfe | Audio via ElevenLabs |
-| `bots/marketing/bot.py` | 1261 | 48 Marketing-Skills + 345 Anleitungen-Bibliothek, Creative-Texte, Post-Entwürfe, Bildgenerierung via MuAPI, legt ab (postet nicht selbst) | Audio via ElevenLabs |
-| `bots/seo/bot.py` | 1563 | Recherche auf gutefrage.net, Antwort-Entwürfe in Vault (postet NIE selbst), Quora abgeschaltet (Cloudflare-Schutz) | Audio via ElevenLabs |
-| `bots/immo/bot.py` | 1092 | Rendite-Analysen, Plausibilitätsprüfung, Telegram-Hinweise | Audio via ElevenLabs |
-| `bots/telegram/bridge.py` | 350 | Durchreiche-Schicht, kein eigenes Gedächtnis | Audio via ElevenLabs |
+| Komponente | Zeilen | Funktion | Stand |
+|---|---|---|---|
+| `orchestrator/core.py` | 3434 | Orchestrator, Gedächtnis (pgvector), Mail/Kalender-Zugriff, Web-Recherche, GitHub-Zugriff, Auftrags-System, Morgen-Durchgang (07:00), Lagebild-Tool, Doku-System | Produktiv |
+| `dashboard/dashboard.py` | 4123 | Echtzeit-Lagebild, Hero-Vollbild-Layout mit Original-Fonts und neuem Hintergrund | Aktualisiert |
+| `bots/ceo/bot.py` | 777 | Strategische Entscheidungen, CEO-Review für Marketing-Entwürfe | Produktiv |
+| `bots/marketing/bot.py` | 1261 | 48 Marketing-Skills + 345-Anleitungs-Bibliothek, Bildgenerierung via MuAPI, legt nur Dateien im Vault ab (postet nicht selbst) | Produktiv |
+| `bots/seo/bot.py` | 1563 | Recherche auf gutefrage.net, schreibt Antwort-Entwürfe in Vault, postet nichts selbst. Quora abgeschaltet (Cloudflare). Tagesrecherche nach SEO_DAILY_TIME | Produktiv, Quora pausiert |
+| `bots/immo/bot.py` | 1092 | Rendite-Analysen von Immobilien-Inseraten, Plausibilitätsprüfung, Telegram-Hinweise | Produktiv |
+| `bots/telegram/bridge.py` | 350 | Durchreiche-Schicht, kein Gedächtnis | Produktiv |
+| `bots/recorder/bot.py` | — | Clerk-Session-Login, Fake-Namen, Kachel-Werte per Label steuerbar, Seiten wählbar, 2x Schärfe | Fertig |
+| `bots/regie/bot.py` | — | UI-Nachbau-Layout-Regeln, Tool-Karten final | In Arbeit |
 
 ## Zuletzt gebaut
 
-**Audio-System (ElevenLabs):** On-demand SFX-Generierung über Pro-Prompts, fliessende Story-Übergänge mit SFX-Timing, Tempo-Regeln verschärft. Betrifft core.py, dashboard.py, CEO, Marketing, SEO, Immo, Telegram.
+- **Recorder komplett**: Clerk-Session-Login, Fake-Namen-Generator, Kachel-Werte labelgesteuert, Seiten auswählbar, 2x Schärfe-Filter
+- **Dashboard-Hero**: Vollbild-Layout, Original-Fonts, neuer Hintergrund
+- **Regie-Bot Layout**: UI-Nachbau-Regeln und Tool-Karten finalisiert
 
 ## Offene Punkte
 
-- Quora derzeit inaktiv (Cloudflare-Blockade) — Fallback auf gutefrage.net
-- SEO-Entwürfe: 0 wartend
-- Immo-Treffer ungeprueft: 1
-- Geplante automatisierte Laeufe: Morgen-Durchgang (07:00, Mails + Kalender), Gedächtnis-Konsolidierung (03:00), SEO-Tagesrecherche (Zeit aus `SEO_DAILY_TIME`)
+- Regie-Bot: JavaScript vor Auslieferung prüfen
+- SEO: Quora-Reintegration nach Cloudflare-Lösung
+- Systemlage: 10 offene Aufgaben, 1 ungepruefter Immo-Treffer
 
 ## Arbeitsweise mit Rui
 
-- **Lieferformat:** Komplette Ersetzungsdateien, nie Patches oder sed-Befehle
-- **Shell:** CMD statt PowerShell
-- **Sprache:** Deutsch, sachlich, kurz und direkt
-- **Deploy-Prozess:** Schritt für Schritt, nach jedem Deploy `wc -l` auf alle geänderten Dateien (sichert Vollständigkeit)
-- **Kontrolle vor Auslieferung:** Alle JavaScript-Dateien müssen reviewed sein, bevor sie live gehen
+1. **Dateien**: Komplette Ersetzungsdateien liefern, nicht Patches
+2. **Shell**: CMD (`cmd.exe`), nicht PowerShell
+3. **Sprache**: Deutsche Antworten, kurz und direkt
+4. **Deploy-Rhythmus**: Schritt für Schritt, nach jedem Deploy `wc -l` auf betroffene Dateien
+5. **Feedback**: Status und Probleme sofort ansprechen
+6. **.env**: NIEMALS anfassen
+7. **docker-compose.yml**: Fertige Service-Blöcke zum manuellen Einfügen statt automatische Skripte
 
 ## Kritische Regeln
 
-- **`.env` wird NIEMALS angefasst** — Umgebungsvariablen nur über Ruis Änderungen an Dockerfiles oder Compose
-- **`docker-compose.yml`:** Fertige Service-Blöcke zum manuellen Einfügen, keine Automatisierungs-Skripte
-- **Ausgeliefertes JavaScript:** Vor Deployment vollständig prüfen (Syntax, Abhängigkeiten, Sicherheit)
-- **Gedächtnis (pgvector):** Keine direkten SQL-Updates — über JARVIS-API oder orchestrator/core.py schreiben
-- **Externe APIs:** Mail/Kalender sind read-only; SEO und Immo schreiben NUR in Vault/Telegram, nicht direkt ins Web
+- `.env` ist heilig — bei Secrets nur über Umgebungsvariablen
+- Alle JavaScript-Auslieferungen **vor Commit** prüfen (Syntax, Linting, Tests)
+- `docker-compose.yml`-Änderungen: vollständige Service-Definition zum Copy-Paste, kein sed/awk
+- Mail ist read-only (IMAP auf IONOS und Gmail)
+- Kalender ist read-only (Google iCal)
+- SEO und Immo postet **nichts selbst** — Entwürfe nur in den Vault
+- Dashboard-Änderungen: nach Deploy Refresh und Screenshot kontrollieren
+- pgvector-Index regelmäßig `REINDEX` vor großen Insertierten-Läufen

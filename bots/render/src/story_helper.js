@@ -3,7 +3,10 @@
 
 export const FPS = 60;
 export const STANDARD_SEG_SEK = 2.5;
-export const UEBERGANG_FRAMES = 16;  // Dauer eines fliessenden Uebergangs
+export const UEBERGANG_FRAMES = 13;  // Dauer eines fliessenden Uebergangs
+// War 16 (267ms) mit linearTiming, dann 10 (167ms) zu hektisch -> wirkte trotz kurzer Dauer traege,
+// weil linear keine Beschleunigung hat. Jetzt 10 Frames (167ms) UND
+// springTiming (siehe StorySequenz.jsx) fuer Punch statt Schleichen.
 
 // Uebergangstyp -> ob er ueberlappt (cut = kein Overlap)
 export function istFliessend(uebergang) {

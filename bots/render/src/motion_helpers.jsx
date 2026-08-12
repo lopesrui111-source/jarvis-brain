@@ -8,16 +8,24 @@ import { BRAND } from "./brand.js";
 // - Text sitzt IMMER auf Surface (Glas oder Card), nie nackt
 // - metronomischer Takt, harte Cuts, 1 Pivot-Moment pro Video
 // - max. 2 Dekor-Elemente, subtiler Scale-Push als "Kamera"
+//
+// sofort-Modus (neu): wenn ein Segment durch einen FLIESSENDEN Uebergang
+// (slide/wipe/fade) hereinkommt, macht die TransitionSeries bereits die
+// komplette Eintritts-Bewegung. Die eigene Drift/Blur-Animation von
+// TextBlock/Surface wuerde sich DARUEBER legen -> doppelte, ruckelige
+// Bewegung. sofort=true schaltet Drift/Blur ab und laesst nur einen
+// kurzen Fade uebrig, der sich sauber mit dem Uebergang mischt.
 
 export const EXPO = Easing.out(Easing.exp);
 
 // Text-Block: erscheint mit Fade + Y-Drift + Blur-Aufloesung (easeOutExpo)
-export function TextBlock({ text, groesse, farbe, gewicht = 600, glow, delay = 0, blur = true }) {
+export function TextBlock({ text, groesse, farbe, gewicht = 600, glow, delay = 0, blur = true, sofort = false }) {
   const frame = useCurrentFrame();
   const f = frame - delay;
-  const op = interpolate(f, [0, 12], [0, 1], { easing: EXPO, extrapolateLeft: "clamp", extrapolateRight: "clamp" });
-  const y = interpolate(f, [0, 16], [10, 0], { easing: EXPO, extrapolateLeft: "clamp", extrapolateRight: "clamp" });
-  const b = blur ? interpolate(f, [0, 14], [8, 0], { easing: EXPO, extrapolateLeft: "clamp", extrapolateRight: "clamp" }) : 0;
+  const opDauer = sofort ? 5 : 12;
+  const op = interpolate(f, [0, opDauer], [0, 1], { easing: EXPO, extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const y = sofort ? 0 : interpolate(f, [0, 16], [10, 0], { easing: EXPO, extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const b = (blur && !sofort) ? interpolate(f, [0, 14], [8, 0], { easing: EXPO, extrapolateLeft: "clamp", extrapolateRight: "clamp" }) : 0;
   return (
     <div style={{
       opacity: op, transform: `translateY(${y}px)`, filter: b ? `blur(${b}px)` : "none",
@@ -30,12 +38,12 @@ export function TextBlock({ text, groesse, farbe, gewicht = 600, glow, delay = 0
 }
 
 // Surface: Glas ODER Material-Card (waehlbar) — Text sitzt immer darauf
-export function Surface({ children, art = "glas", akzent, hell, breite, padding }) {
+export function Surface({ children, art = "glas", akzent, hell, breite, padding, sofort = false }) {
   const frame = useCurrentFrame();
-  const { fps } = useVideoConfig();
   // Surface fadet leicht VOR dem Text ein (zweistufiges Staging)
-  const op = interpolate(frame, [0, 8], [0, 1], { easing: EXPO, extrapolateLeft: "clamp", extrapolateRight: "clamp" });
-  const y = interpolate(frame, [0, 12], [14, 0], { easing: EXPO, extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const opDauer = sofort ? 4 : 8;
+  const op = interpolate(frame, [0, opDauer], [0, 1], { easing: EXPO, extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const y = sofort ? 0 : interpolate(frame, [0, 12], [14, 0], { easing: EXPO, extrapolateLeft: "clamp", extrapolateRight: "clamp" });
 
   const glas = {
     background: hell ? "rgba(255,255,255,0.5)" : "rgba(255,255,255,0.06)",
@@ -65,10 +73,14 @@ export function Surface({ children, art = "glas", akzent, hell, breite, padding 
   );
 }
 
-// subtiler Scale-Push als "Kamera" (1.0 -> 1.03 ueber die Segmentdauer)
-export function useKameraPush(dauerFrames) {
+// subtiler Scale-Push als "Kamera" (1.0 -> 1.03 ueber die Segmentdauer).
+// weich=true: Segment kommt durch einen fliessenden Uebergang herein —
+// startet knapp ueber 1.0 statt hart bei 1.0, damit der Puls nicht bei
+// jedem Cut sichtbar abreisst/zurueckspringt.
+export function useKameraPush(dauerFrames, weich = false) {
   const frame = useCurrentFrame();
-  return interpolate(frame, [0, dauerFrames], [1.0, 1.03], { easing: Easing.out(Easing.ease), extrapolateRight: "clamp" });
+  const start = weich ? 1.008 : 1.0;
+  return interpolate(frame, [0, dauerFrames], [start, 1.03], { easing: Easing.out(Easing.ease), extrapolateRight: "clamp" });
 }
 
 // Pivot-Flash-Overlay (Luminance-Flash) — nur an dramatischen Momenten.
@@ -82,6 +94,9 @@ export function FlashOverlay({ farbe = "#FFFFFF", triggerFrame = 0 }) {
 }
 
 // globaler Hintergrund: 1 wandernder Blob + dezenter Radial (max 2 Dekor, clean)
+// WICHTIG: wird jetzt EINMAL global in StorySequenz gerendert (nicht mehr pro
+// Segment), damit der Blob ueber Schnitte hinweg WEITERWANDERT statt bei
+// jedem Cut an eine neue Zufallsposition zu springen.
 export function StoryHintergrund({ p }) {
   const frame = useCurrentFrame();
   const bx = interpolate(Math.sin(frame / 55), [-1, 1], [25, 70]);

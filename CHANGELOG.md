@@ -2,6 +2,13 @@
 
 Automatisch gepflegt von JARVIS aus den Commit-Messages. Nicht von Hand bearbeiten.
 
+## 2026-08-11
+- `9e8f45b` Regie-Bot: Layout-Regeln fuer UI-Nachbau; tool-karten final
+- `cc4918f` Dashboard-Hero: Vollbild-Layout, Original-Fonts, neuer Hintergrund
+- `931dd2d` Recorder komplett: Clerk-Session-Login, Fake-Namen, Kachel-Werte per Label steuerbar, Seiten waehlbar, 2x Schaerfe
+
+Automatisch gepflegt von JARVIS aus den Commit-Messages. Nicht von Hand bearbeiten.
+
 ## 2026-08-10
 - `2ff9685` Audio: SFX via ElevenLabs (on-demand, Pro-Prompts), Story mit fliessenden Uebergaengen + SFX-Timing, Tempo-Regeln geschaerft
 
