@@ -34,23 +34,32 @@ function presentation(uebergang, width, height) {
   return fade(); // Fallback fuer fliessende
 }
 
-export const StorySequenz = ({ segmente = [], palette = "dunkel", logo = true, sfx = [], musik = "", musik_lautstaerke = 0.25 }) => {
+export const StorySequenz = ({ segmente = [], palette = "dunkel", logo = true, sfx = [], musik = "", musik_lautstaerke = 0.25, hintergrund_video = "", hintergrund_dim = 0.55 }) => {
   const { width, height } = useVideoConfig();
   const istHoch = height > width;
   const p = BRAND.paletten[palette] || BRAND.paletten.dunkel;
   const segs = segmenteAufbereiten(segmente);
+  const hatBgVideo = !!hintergrund_video;
 
   return (
     <AbsoluteFill style={{ background: p.hintergrund, fontFamily: BRAND.fonts.display, overflow: "hidden" }}>
       {/* Hintergrund-Musik, durchgehend, leise */}
       {musik ? <Audio src={staticFile(musik)} volume={musik_lautstaerke} /> : null}
 
-      {/* GLOBALER Hintergrund-Blob — laeuft EINMAL fuer das gesamte Video,
-          nicht pro Segment. Dadurch wandert er kontinuierlich statt bei
-          jedem Cut an eine neue Zufallsposition zu springen. Einfache
-          Segmente lassen ihn durchscheinen (transparenter BG), custom-
-          Komponenten uebermalen ihn mit ihrem eigenen Look. */}
-      <StoryHintergrund p={p} />
+      {/* HIGGSFIELD-HINTERGRUNDLAYER (unterste Ebene): cineastischer Clip,
+          geloopt ueber die ganze Dauer, mit dunklem Overlay fuer Lesbarkeit.
+          Ersetzt den globalen Glow-Blob, wenn gesetzt. */}
+      {hatBgVideo ? (
+        <AbsoluteFill style={{ zIndex: 0 }}>
+          <BgVideoLoop src={hintergrund_video} />
+          {/* Overlay: dunkel + leichter Marken-Ton, damit Text sitzt */}
+          <AbsoluteFill style={{ background:
+            `linear-gradient(180deg, rgba(0,0,0,${Math.min(0.95, hintergrund_dim + 0.1)}) 0%, rgba(0,0,0,${hintergrund_dim}) 45%, rgba(0,0,0,${Math.min(0.95, hintergrund_dim + 0.15)}) 100%)` }} />
+          <AbsoluteFill style={{ background: `${p.hintergrund}22` }} />
+        </AbsoluteFill>
+      ) : (
+        <StoryHintergrund p={p} />
+      )}
 
       <TransitionSeries>
         {segs.map((seg, i) => {
@@ -527,4 +536,26 @@ const GlasPanelSeg = ({ txt, p, dauer, istAkzent, istHoch, width, height, nummer
       </div>
     </AbsoluteFill>
   );
+};
+
+// Hintergrund-Video geloopt ueber die gesamte Kompositionsdauer.
+// Higgsfield-Clips sind ~5s, das Video oft 20-30s -> wir kacheln den Clip
+// in aufeinanderfolgenden Sequences. Bewusst KEIN Abhaengen von OffthreadVideo's
+// loop-Prop (versionsabhaengig), sondern manuell gekachelt = laeuft ueberall.
+const BgVideoLoop = ({ src }) => {
+  const { durationInFrames, fps } = useVideoConfig();
+  // Clip-Laenge unbekannt -> konservativ 5s annehmen (Higgsfield-Standard).
+  // Etwas kuerzer kacheln (4.6s), damit kein schwarzer Rand am Clip-Ende sichtbar wird.
+  const clipFrames = Math.round(4.6 * fps);
+  const n = Math.max(1, Math.ceil(durationInFrames / clipFrames));
+  const kacheln = [];
+  for (let i = 0; i < n; i++) {
+    kacheln.push(
+      <Sequence key={i} from={i * clipFrames} durationInFrames={clipFrames + 2}>
+        <OffthreadVideo src={staticFile(src)} muted
+          style={{ width: "100%", height: "100%", objectFit: "cover" }} />
+      </Sequence>
+    );
+  }
+  return <AbsoluteFill>{kacheln}</AbsoluteFill>;
 };

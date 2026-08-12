@@ -47,6 +47,7 @@ MAX_TOOL_ROUNDS = 14
 VAULT_DIR = "/app/vault"
 CLIP_DIR  = os.path.join(VAULT_DIR, "clips")   # hier landen Clip-Infos (JSON)
 VIDEOS_DIR = os.path.join(VAULT_DIR, "videos") # fertige Renders (fuer Selbst-Review)
+HF_DIR    = os.path.join(VAULT_DIR, "higgsfield")  # heruntergeladene Higgsfield-Clips
 
 INBOX_KEY = "bot:regie:inbox"
 REPLY_KEY = "bot:regie:reply:{id}"
@@ -277,8 +278,10 @@ FORMAT BEWUSST WAEHLEN: Waehle das Format aktiv passend zum Zweck und NENNE es R
 
 Zusaetzlich liefert der Recorder-Bot echte Screenshots/Aufnahmen (Segment-Stil "ui-clip"). Faustregel: Fuer Hero-Momente den CODE-NACHBAU (schaerfer, animierbar), fuer schnelle Belege den Recorder-Screenshot. Erfinde nie UI, die es nicht gibt — bau immer nach dem echten Code aus dem Repo.
 
-═══ HIGGSFIELD-HINTERGRUND (Nebenwerkzeug, Tool 'vibe_clip') ═══
-Fuer atmosphaerische, cineastische HINTERGRUND-Clips (fliessende Texturen, Stimmung) kannst du Higgsfield nutzen — NUR abstrakt, kein Produkt/Logo/Text. Das legt man spaeter HINTER das Motion-Design. Nutze das sparsam (kostet Credits), nur wenn ein cineastischer Hintergrund den Look hebt. Standardmaessig reicht Motion-Design allein.
+═══ HIGGSFIELD-HINTERGRUND (Tool 'vibe_clip' + story_video hintergrund_video) ═══
+Fuer atmosphaerische, cineastische HINTERGRUND-Clips (fliessende Texturen, Licht, Stimmung) kannst du Higgsfield nutzen — NUR abstrakt, kein Produkt/Logo/Text/Menschen. Der Clip liegt HINTER dem Motion-Design.
+ABLAUF (End-zu-End): 1) 'vibe_clip' generiert den Clip UND laedt ihn nach vault/higgsfield/ — es gibt dir den lokalen Pfad zurueck (z.B. 'higgsfield/hf_...mp4'). 2) Diesen Pfad gibst du im 'story_video' als 'hintergrund_video' an. Dann laeuft der Clip geloopt unter ALLEN Segmenten, automatisch mit dunklem Overlay (hintergrund_dim, Standard 0.55) fuer Text-Lesbarkeit. Der sonst uebliche Glow-Blob wird dadurch ersetzt.
+WANN: Sparsam einsetzen (kostet Credits), nur wenn ein cineastischer Hintergrund den Look wirklich hebt — z.B. fuer ein Hero/Marken-Video. Standardmaessig reicht das Motion-Design allein. Bild-/Motion-Prompt abstrakt halten (z.B. bild_prompt "dark abstract flowing liquid, subtle lime green light, premium, minimal", motion_prompt "slow drifting, gentle waves"). Ein Clip ist ~5s und wird automatisch geloopt.
 
 ═══ EIGENE KOMPONENTEN BAUEN (Komponenten-Schmiede) ═══
 Du bist nicht auf die festen Stile beschraenkt. Mit dem Tool 'komponente_bauen' kannst du EIGENE Motion-Komponenten in Remotion (JSX) schreiben — fuer Effekte, die es noch nicht gibt. So wird das Studio mit der Zeit besser: du kombinierst Vorhandenes und erfindest Neues.
@@ -531,6 +534,8 @@ TOOLS = [
                 },
                 "musik": {"type": "string", "description": "Optional: Name/Pfad des Hintergrund-Tracks (z.B. 'upbeat-clean' oder 'musik/upbeat-clean.mp3'). Laeuft leise durchgehend."},
                 "musik_lautstaerke": {"type": "number", "description": "Lautstaerke der Musik 0-1, Standard 0.25 (leise unter den SFX)."},
+                "hintergrund_video": {"type": "string", "description": "Optional: Higgsfield-Clip als cineastischer Hintergrund HINTER dem Motion-Design (z.B. 'higgsfield/hf_20260812-201500.mp4' oder nur der Dateiname). Zuerst mit vibe_clip erzeugen — der gibt den Pfad zurueck. Laeuft geloopt unter allen Segmenten mit dunklem Overlay fuer Text-Lesbarkeit."},
+                "hintergrund_dim": {"type": "number", "description": "Verdunkelung des Hintergrundvideos 0-1 (Standard 0.55). Hoeher = dunkler = besser lesbar, aber Clip weniger sichtbar."},
                 "beschreibung": {"type": "string"},
             },
             "required": ["segmente"],
@@ -588,8 +593,25 @@ def tool_websuche(query):
         return f"Websuche fehlgeschlagen: {e}"
 
 
+def _hf_download(url, ziel_pfad, timeout=120):
+    """Laedt ein Higgsfield-Video von der URL nach ziel_pfad. Gibt True/False."""
+    try:
+        with requests.get(url, stream=True, timeout=timeout) as r:
+            r.raise_for_status()
+            with open(ziel_pfad, "wb") as f:
+                for chunk in r.iter_content(chunk_size=1 << 16):
+                    if chunk:
+                        f.write(chunk)
+        return os.path.getsize(ziel_pfad) > 1024
+    except Exception as e:
+        log(f"[higgsfield] Download-Fehler: {e}")
+        return False
+
+
 def tool_vibe_clip(inp):
-    """Generiert einen Clip ueber Higgsfield. Speichert Clip-Info als JSON, gibt URL-Text zurueck."""
+    """Generiert einen Clip ueber Higgsfield, LAEDT ihn nach vault/higgsfield/ und
+    gibt lokalen Pfad + URL zurueck. Der lokale Pfad ist als Story-Hintergrund
+    nutzbar (hintergrund_video in story_video)."""
     if CLIP_ZAEHLER["n"] >= MAX_CLIPS_PRO_LAUF:
         return (f"Clip-Limit ({MAX_CLIPS_PRO_LAUF}) fuer diese Anfrage erreicht — "
                 "Credit-Schutz. Fasse zusammen, was du hast.")
@@ -607,19 +629,28 @@ def tool_vibe_clip(inp):
         res = hf.clip_aus_prompt(bild_prompt, motion_prompt,
                                  aspect_ratio=aspect, duration=duration)
         CLIP_ZAEHLER["n"] += 1
-        # Clip-Info speichern (nur Text/URLs, kein Medien-Download)
         os.makedirs(CLIP_DIR, exist_ok=True)
+        os.makedirs(HF_DIR, exist_ok=True)
         ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+        # Video herunterladen (fuer Nutzung als Hintergrundlayer)
+        datei_name = f"hf_{ts}.mp4"
+        lokal = os.path.join(HF_DIR, datei_name)
+        geladen = _hf_download(res["video_url"], lokal)
+        rel_pfad = f"higgsfield/{datei_name}" if geladen else ""
         info = {"beschreibung": beschreibung, "aspect_ratio": aspect,
                 "duration": duration, "bild_prompt": bild_prompt,
                 "motion_prompt": motion_prompt, "bild_url": res["bild_url"],
-                "video_url": res["video_url"], "erstellt": ts}
+                "video_url": res["video_url"], "lokal": rel_pfad, "erstellt": ts}
         pfad = os.path.join(CLIP_DIR, f"{ts}_clip.json")
         with open(pfad, "w", encoding="utf-8") as f:
             json.dump(info, f, ensure_ascii=False, indent=2)
-        arbeit_log("Vibe-Clip generiert", beschreibung, f"clips/{ts}_clip.json")
-        return (f"Clip fertig ({CLIP_ZAEHLER['n']}/{MAX_CLIPS_PRO_LAUF}): {beschreibung}\n"
-                f"Video: {res['video_url']}\n(gespeichert: vault/clips/{ts}_clip.json)")
+        arbeit_log("Vibe-Clip generiert", beschreibung, f"higgsfield/{datei_name}")
+        if geladen:
+            return (f"Clip fertig ({CLIP_ZAEHLER['n']}/{MAX_CLIPS_PRO_LAUF}): {beschreibung}\n"
+                    f"Lokal gespeichert als: {rel_pfad}\n"
+                    f"NUTZUNG: Gib diesen Pfad im story_video als 'hintergrund_video' an, dann liegt der "
+                    f"cineastische Clip HINTER dem Motion-Design (mit dunklem Overlay fuer Lesbarkeit).")
+        return (f"Clip generiert, aber Download fehlgeschlagen. Nur als URL verfuegbar: {res['video_url']}")
     except Exception as e:
         return f"Clip-Generierung fehlgeschlagen: {type(e).__name__}: {e}"
 
@@ -711,8 +742,20 @@ def tool_story_video(inp, r):
             musik = musik + ".mp3"
     musik_vol = float(inp.get("musik_lautstaerke", 0.25))
 
+    # Higgsfield-Hintergrundvideo (optional). Pfad relativ zu public/ oder vault.
+    # Der Render nutzt public-dir, daher muss der Clip fuer OffthreadVideo per
+    # staticFile erreichbar sein -> wir referenzieren ihn ueber den vault-Pfad,
+    # den der Render-Container ebenfalls gemountet hat.
+    hg_video = (inp.get("hintergrund_video") or "").strip()
+    if hg_video:
+        # normalisieren: nackten Namen -> higgsfield/<name>
+        if not hg_video.startswith("higgsfield/") and "/" not in hg_video:
+            hg_video = f"higgsfield/{hg_video}"
+    hg_dim = float(inp.get("hintergrund_dim", 0.55))  # 0=hell .. 1=ganz dunkel
+
     props = {"palette": palette, "logo": True, "segmente": aufbereitet,
-             "sfx": sfx_liste, "musik": musik, "musik_lautstaerke": musik_vol}
+             "sfx": sfx_liste, "musik": musik, "musik_lautstaerke": musik_vol,
+             "hintergrund_video": hg_video, "hintergrund_dim": hg_dim}
     komposition = f"story-{fmt}"
     rid = f"story-{uuid.uuid4().hex[:8]}"
     auftrag = {"id": rid, "komposition": komposition, "props": props}
