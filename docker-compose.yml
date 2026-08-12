@@ -131,6 +131,7 @@ services:
 
   jarvis-recorder:
     build: ./bots/recorder
+    profiles: ["disabled"]
     container_name: jarvis-recorder
     restart: unless-stopped
     env_file: .env

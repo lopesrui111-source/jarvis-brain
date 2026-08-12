@@ -5,8 +5,8 @@ REGIE-BOT — Kopf des JARVIS Studio-Teams
 - Entwickelt Video-Konzepte im Vibe-Motion-Stil (Hook, Story-Arc, Plattform)
 - Wertet Trends aus (Websuche), schlaegt Hooks vor
 - Generiert die Vibe-Motion-Clips SELBST ueber die Higgsfield-API
-- WICHTIG: KI-Clips zeigen NIE echtes Produkt/Logo/UI (das kommt vom Recorder).
-  KI macht nur atmosphaerische Vibe-Teile (Motion, Uebergaenge, Stimmung).
+- WICHTIG: KI-Clips (Higgsfield) zeigen NIE echtes Produkt/Logo/UI — nur atmosphaerische Vibe-Teile (Motion, Textur, Stimmung).
+  Echtes Büroflow-UI baust du als CODE-NACHBAU nach (ui_aus_github + komponente_bauen), NICHT als Screenshot.
 
 Ablauf eines Clips: Text -> Bild (Higgsfield) -> Bild animieren -> Video-URL.
 Video-URLs werden nur als Text gespeichert, nie ins Kontextfenster geladen.
@@ -48,6 +48,7 @@ VAULT_DIR = "/app/vault"
 CLIP_DIR  = os.path.join(VAULT_DIR, "clips")   # hier landen Clip-Infos (JSON)
 VIDEOS_DIR = os.path.join(VAULT_DIR, "videos") # fertige Renders (fuer Selbst-Review)
 HF_DIR    = os.path.join(VAULT_DIR, "higgsfield")  # heruntergeladene Higgsfield-Clips
+POSTS_DIR = os.path.join(VAULT_DIR, "posts")   # Publishing-Entwuerfe (Markdown)
 
 INBOX_KEY = "bot:regie:inbox"
 REPLY_KEY = "bot:regie:reply:{id}"
@@ -207,13 +208,9 @@ TEMPO & RHYTHMUS (WICHTIG — sonst wirkt es langsam/langweilig):
 - Ein gutes 25-30s-Video: viele kurze Segmente + 1-2 reiche Hero-Momente.
 - UEBERGAENGE: Nutze fliessende Uebergaenge (slide-hoch/links, wipe, fade) fuer Dynamik — NICHT nur "cut". Mische sie. Ein "flash" am dramatischsten Moment.
 
-ECHTES BUEROFLOW-UI (Segment-Stil "ui-clip"):
-Du kannst echte Dashboard-Screenshots als Szene einbauen — das wirkt viel staerker als abstrakter Text! Segment: {{stil: "ui-clip", props: {{datei: "ui/dashboard.png", rahmen: "browser", label: "Dein Dashboard", bewegung: "zoom-in"}}, dauer: 3.5, uebergang: "slide-hoch"}}.
-- datei: verfuegbares Material in ui/ (z.B. "ui/dashboard.png")
-- rahmen: "browser" (Browser-Mockup mit buroflow.de-Leiste), "phone", oder "plain"
-- bewegung: "zoom-in" (langsamer Ken-Burns) oder "pan-up" — damit ein Screenshot lebt
-- label: optionaler Text ueber dem Clip
-Setze 1 ui-clip als "Beweis"-Moment ein (nach dem Problem, als Loesung: "so sieht's in Büroflow aus"). Das echte UI ist der staerkste Vertrauensbeweis.
+ECHTES BUEROFLOW-UI (immer als CODE-NACHBAU, nicht als Screenshot):
+Als "Beweis"-Moment (nach dem Problem, als Loesung: "so sieht's in Büroflow aus") ist echtes UI der staerkste Vertrauensbeweis. Baue es IMMER als Code-Nachbau ein — nutze eine fertige custom-Komponente (custom-dashboard-hero, custom-tool-karten) oder baue mit ui_aus_github + komponente_bauen eine neue nach dem echten Repo-Code. Das ist vektorscharf, animierbar (Zahlen zaehlen hoch, Karten staffeln rein) und laeuft in jedem Format — einem statischen Screenshot in jeder Hinsicht ueberlegen.
+(Der alte Segment-Stil "ui-clip" fuer statische Screenshots existiert technisch noch, wird aber NICHT mehr genutzt — echtes UI kommt als Code-Nachbau.)
 
 So baust du ein starkes Video:
 - HOOK (Segment 1): custom-Komponente oder wortpop — stark, stoppt den Scroll
@@ -273,15 +270,18 @@ HALTEZEIT ZUERST PLANEN: Die laengste Phase eines Segments ist NICHT der Eintrit
 
 SELBST-REVIEW (PFLICHT-ARBEITSSCHRITT): Nach JEDEM fertigen Render (story_video ODER komponente_bauen) rufst du 'video_pruefen' auf, BEVOR du Rui das Ergebnis meldest. Das Tool schaut dein Video mit Bild-KI an und findet tote Haltezeit, leere Komposition, falsche Marken-Schreibweise. Bei Urteil NACHBESSERN: setz die genannten Fixes um (Komponente/Segmente anpassen, neu rendern), dann pruefe erneut — wiederhole bis FREIGABE (max. 2-3 Runden, dann melde ehrlich den Restzustand). Erst bei FREIGABE meldest du Rui das fertige Video. So faengst du Fehler selbst, statt dass Rui sie findet.
 
+PUBLISHING-ENTWURF: Wenn Rui ein Video zum Posten/Veroeffentlichen will (oder du ein komplettes Video als fertiges Paket lieferst), rufe nach der FREIGABE 'post_entwurf' auf. Das schreibt fertige, plattformspezifische Captions (LinkedIn/Instagram/TikTok) + Hashtags + Format-Empfehlung nach vault/posts/. Es POSTET NICHT — Rui gibt frei und veroeffentlicht selbst. Nenne ihm den Pfad zum Entwurf.
+
 FORMAT BEWUSST WAEHLEN: Waehle das Format aktiv passend zum Zweck und NENNE es Rui, nimm nicht still den Default. tiktok (9:16) fuer Instagram Reels / TikTok / Shorts — Hochformat, mobil. linkedin (16:9) fuer LinkedIn, YouTube, Praesentation, und fuer UI-lastige Inhalte (Dashboards, breite Layouts). quadrat (1:1) fuer Feed-Posts. Im Zweifel bei Marketing-Kurzvideos tiktok, bei UI/Business-Inhalten linkedin. Wenn Rui ein Format nennt oder vorher eins genutzt wurde, dieses beibehalten.
 
 
-Zusaetzlich liefert der Recorder-Bot echte Screenshots/Aufnahmen (Segment-Stil "ui-clip"). Faustregel: Fuer Hero-Momente den CODE-NACHBAU (schaerfer, animierbar), fuer schnelle Belege den Recorder-Screenshot. Erfinde nie UI, die es nicht gibt — bau immer nach dem echten Code aus dem Repo.
+Erfinde nie UI, die es nicht gibt — bau echtes Büroflow-UI immer nach dem echten Code aus dem Repo (ui_aus_github + komponente_bauen), nie geraten oder als Screenshot.
 
 ═══ HIGGSFIELD-HINTERGRUND (Tool 'vibe_clip' + story_video hintergrund_video) ═══
 Fuer atmosphaerische, cineastische HINTERGRUND-Clips (fliessende Texturen, Licht, Stimmung) kannst du Higgsfield nutzen — NUR abstrakt, kein Produkt/Logo/Text/Menschen. Der Clip liegt HINTER dem Motion-Design.
 ABLAUF (End-zu-End): 1) 'vibe_clip' generiert den Clip UND laedt ihn nach vault/higgsfield/ — es gibt dir den lokalen Pfad zurueck (z.B. 'higgsfield/hf_...mp4'). 2) Diesen Pfad gibst du im 'story_video' als 'hintergrund_video' an. Dann laeuft der Clip geloopt unter ALLEN Segmenten, automatisch mit dunklem Overlay (hintergrund_dim, Standard 0.55) fuer Text-Lesbarkeit. Der sonst uebliche Glow-Blob wird dadurch ersetzt.
-WANN: Sparsam einsetzen (kostet Credits), nur wenn ein cineastischer Hintergrund den Look wirklich hebt — z.B. fuer ein Hero/Marken-Video. Standardmaessig reicht das Motion-Design allein. Bild-/Motion-Prompt abstrakt halten (z.B. bild_prompt "dark abstract flowing liquid, subtle lime green light, premium, minimal", motion_prompt "slow drifting, gentle waves"). Ein Clip ist ~5s und wird automatisch geloopt.
+WANN: Sparsam einsetzen (kostet Credits), nur wenn ein cineastischer Hintergrund den Look wirklich hebt — z.B. fuer ein Hero/Marken-Video. Standardmaessig reicht das Motion-Design allein. Bild-/Motion-Prompt abstrakt halten (z.B. bild_prompt "dark abstract flowing liquid, subtle lime green light, premium, minimal", motion_prompt "slow drifting, gentle waves"). Ein Clip ist ~5s und wird automatisch geloopt. Fuer mehr/anderen Bewegungscharakter den motion_prompt anpassen (z.B. "swirling", "turbulent", "rotating flow" statt "gentle").
+WICHTIG — nur mit EINFACHEN Segmenten kombinieren: Der Higgsfield-Hintergrund wirkt NUR hinter den transparenten Grundstil-Segmenten (szenen/wortpop/zahl/formen/kinetic und den -pro-Varianten). custom-Komponenten (Dashboard, tool-karten, eigene Motion-Szenen) bringen IMMER ihren eigenen deckenden Hintergrund mit und VERDECKEN den Higgsfield-Clip komplett — das ist gewollt, kein Fehler. Wenn video_pruefen bei einem Segment mit custom-Komponente ueber Higgsfield "Hintergrund nicht sichtbar / keine Bewegung vom Hintergrund" meldet, ist das ERWARTET — baue NICHT die Komponente um, um den Clip durchscheinen zu lassen. Fuer einen sichtbaren Higgsfield-Hintergrund nutze einfache Segmente.
 
 ═══ EIGENE KOMPONENTEN BAUEN (Komponenten-Schmiede) ═══
 Du bist nicht auf die festen Stile beschraenkt. Mit dem Tool 'komponente_bauen' kannst du EIGENE Motion-Komponenten in Remotion (JSX) schreiben — fuer Effekte, die es noch nicht gibt. So wird das Studio mit der Zeit besser: du kombinierst Vorhandenes und erfindest Neues.
@@ -457,6 +457,25 @@ TOOLS = [
             "properties": {
                 "datei": {"type": "string", "description": "Optional: Dateiname in vault/videos/. Ohne Angabe wird das ZULETZT gerenderte Video geprueft."},
                 "erwartung": {"type": "string", "description": "Optional: was das Video zeigen/sein sollte (hilft der Bewertung, z.B. 'Chaos wird zu Ordnung, Markenname Büroflow')."},
+            },
+        },
+    },
+    {
+        "name": "post_entwurf",
+        "description": ("Erstellt einen PUBLISHING-ENTWURF (Markdown) fuer ein fertiges, freigegebenes Video. "
+                        "Schreibt plattformspezifische Post-Captions (LinkedIn foermlich/Business, Instagram "
+                        "lockerer, TikTok sehr direkt) + passende Hashtags + Format-Empfehlung nach vault/posts/. "
+                        "Postet NICHT automatisch — Rui gibt frei und postet selbst. "
+                        "Rufe das NACH FREIGABE (video_pruefen) auf, wenn Rui einen Post-Entwurf will, oder am Ende "
+                        "eines kompletten Video-Auftrags als fertiges Paket."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "datei": {"type": "string", "description": "Optional: Video in vault/videos/. Ohne Angabe das zuletzt gerenderte."},
+                "thema": {"type": "string", "description": "Worum geht's im Video (z.B. 'Mahnungen automatisieren mit Mahnflow')."},
+                "kernbotschaft": {"type": "string", "description": "Die eine Kernaussage/der Nutzen, den der Post transportieren soll."},
+                "plattformen": {"type": "array", "items": {"type": "string", "enum": ["linkedin", "instagram", "tiktok"]},
+                                "description": "Fuer welche Plattformen Captions erzeugt werden (Standard: alle drei)."},
             },
         },
     },
@@ -1108,8 +1127,13 @@ def tool_komponente_bauen(inp, r):
                 arbeit_log("Komponente fehlgeschlagen", name, antwort[:200])
                 return f"Test-Render FEHLGESCHLAGEN {hinweis}. Fehler:\n{antwort[:600]}\n\nKorrigiere den Code und versuch es erneut."
             arbeit_log("Komponente gebaut", name, antwort[:200])
+            # E-17-Fix: aktuelle custom-Liste mitgeben, damit der Bot die frisch
+            # gebaute Komponente SOFORT kennt (der System-Prompt wird erst bei
+            # Bot-Neustart neu gerendert — diese Liste ueberbrueckt das).
+            liste = ", ".join(custom_komponenten_liste())
             return (f"Komponente '{name}' gebaut & getestet. Verfuegbar als Stil 'custom-{name}' "
-                    f"in allen Formaten. Test-Video: {antwort}")
+                    f"in allen Formaten. Test-Video: {antwort}\n"
+                    f"Aktuell verfuegbare custom-Komponenten (nutze sie direkt, ohne Neustart): {liste}")
     return "Test-Render-Timeout — Status unklar. Spaeter pruefen."
 
 
@@ -1201,6 +1225,70 @@ def tool_musik_generieren(inp):
     return f"Musik '{name}' erstellt ({kb} KB, ~{dauer_sek}s). In Videos als musik-Datei 'musik/{name}.mp3'."
 
 
+def tool_post_entwurf(inp):
+    """Erstellt einen Publishing-Entwurf (Markdown) fuer ein fertiges Video:
+    plattformspezifische Captions (LinkedIn foermlicher, Insta/TikTok lockerer),
+    Hashtags, Format-Empfehlung. Postet NICHT — legt nur den Entwurf in vault/posts/ ab."""
+    datei = inp.get("datei", "")
+    thema = inp.get("thema", "")
+    kern = inp.get("kernbotschaft", "")
+    plattformen = inp.get("plattformen") or ["linkedin", "instagram", "tiktok"]
+    if datei:
+        pfad = datei if os.path.isabs(datei) else os.path.join(VIDEOS_DIR, datei)
+    else:
+        pfad = _neuestes_video()
+    if not pfad or not os.path.exists(pfad):
+        return "Kein Video gefunden. Gib 'datei' an oder rendere zuerst ein Video."
+    video_name = os.path.basename(pfad)
+
+    # Claude schreibt die plattformspezifischen Texte
+    anweisung = (
+        "Du bist Social-Media-Redakteur fuer Büroflow (deutsches KI-SaaS fuer Buerokram-Automatisierung: "
+        "Mahnflow, Mailflow, Angebotsflow, E-Rechnungsflow; Zielgruppe Selbststaendige, Freelancer, kleine "
+        "Unternehmen; Marken-CTA: buroflow.de). Schreibe fertige Post-Captions fuer ein Marketing-Video.\n"
+        f"Video-Thema: {thema or '(aus Kernbotschaft ableiten)'}\n"
+        f"Kernbotschaft: {kern or '(nicht angegeben — allgemein Büroflow-Nutzen)'}\n"
+        f"Plattformen: {', '.join(plattformen)}\n\n"
+        "Regeln:\n"
+        "- Markenname IMMER 'Büroflow' (mit ü). Deutsch.\n"
+        "- LinkedIn: professionell, Mehrwert-orientiert, 3-5 Saetze, ein konkreter Business-Nutzen, dezente "
+        "Hashtags (3-5, branchig: #Buchhaltung #Selbststaendigkeit #KI etc.).\n"
+        "- Instagram: lockerer, emotional, kurze Zeilen, Emojis sparsam ok, CTA klar, 8-12 Hashtags (Mix "
+        "Reichweite + Nische).\n"
+        "- TikTok: sehr direkt, Hook in Zeile 1, jung/frisch, kurz, 4-6 Hashtags (#fyp + thematisch).\n"
+        "- Jede Caption endet mit klarem CTA zu buroflow.de.\n"
+        "- KEINE erfundenen Features — nur die 4 echten Tools.\n\n"
+        "Gib fuer JEDE gewuenschte Plattform aus:\n"
+        "### <Plattform>\n<Caption-Text>\n\nHashtags: <hashtags durch Leerzeichen>\n\n"
+        "Danach eine Zeile: 'Format-Empfehlung: <tiktok 9:16 / linkedin 16:9 / quadrat 1:1> — <kurzer Grund>'."
+    )
+    try:
+        resp = client.messages.create(model=MODEL, max_tokens=1600,
+                                      messages=[{"role": "user", "content": anweisung}])
+        text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+    except Exception as e:
+        return f"Caption-Generierung fehlgeschlagen: {type(e).__name__}: {e}"
+
+    os.makedirs(POSTS_DIR, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    md_name = f"{ts}_post.md"
+    md_pfad = os.path.join(POSTS_DIR, md_name)
+    kopf = (f"# Publishing-Entwurf — {thema or video_name}\n\n"
+            f"**Video:** `vault/videos/{video_name}`\n"
+            f"**Erstellt:** {ts}\n"
+            f"**Status:** ENTWURF (noch nicht gepostet)\n\n---\n\n")
+    try:
+        with open(md_pfad, "w", encoding="utf-8") as f:
+            f.write(kopf + text + "\n")
+    except Exception as e:
+        return f"Konnte Entwurf nicht speichern: {e}"
+    arbeit_log("Post-Entwurf erstellt", thema or video_name, f"posts/{md_name}")
+    log(f"[post] Entwurf gespeichert: posts/{md_name}")
+    return (f"Publishing-Entwurf erstellt: vault/posts/{md_name}\n"
+            f"Enthaelt plattformspezifische Captions ({', '.join(plattformen)}) + Hashtags + Format-Empfehlung.\n"
+            f"NICHT gepostet — Rui gibt frei und postet selbst.\n\n{text[:600]}...")
+
+
 def run_tool(name, inp, r=None):
     if name == "websuche":
         return tool_websuche(inp.get("query", ""))
@@ -1216,6 +1304,8 @@ def run_tool(name, inp, r=None):
         return tool_referenz_analysieren(inp)
     if name == "video_pruefen":
         return tool_video_pruefen(inp)
+    if name == "post_entwurf":
+        return tool_post_entwurf(inp)
     if name == "ui_aus_github":
         return tool_ui_aus_github(inp)
     if name == "komponente_bauen":
