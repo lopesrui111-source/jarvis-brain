@@ -139,6 +139,7 @@ const SegmentInhalt = ({ seg, p, istHoch, width, height, hell, weich }) => {
   if (stil === "wortpop") return <WortPopSeg props={props} p={p} istHoch={istHoch} width={width} height={height} hell={hell} weich={weich} />;
   if (stil === "formen")  return <FormenSeg props={props} p={p} istHoch={istHoch} width={width} height={height} weich={weich} />;
   if (stil === "kinetic") return <KineticSeg props={props} p={p} istHoch={istHoch} width={width} height={height} weich={weich} />;
+  if (stil === "szenen")  return <SzenenSeg props={{ ...props, __frames: seg.frames }} p={p} istHoch={istHoch} width={width} height={height} weich={weich} />;
   return <AussageSeg props={props} p={p} istHoch={istHoch} width={width} height={height} hell={hell} surface={seg.surface} weich={weich} />;
 };
 
@@ -205,17 +206,22 @@ const UiClipSeg = ({ props, p, istHoch, width, height, hell }) => {
 };
 
 const AussageSeg = ({ props, p, istHoch, width, height, hell, surface, weich }) => {
+  const frame = useCurrentFrame();
   const txt = (props.szenen && props.szenen[0]) || (props.zeilen && props.zeilen.join(" ")) || props.text || "Aussage";
   const istAkzent = !!props.akzent;
   const groesse = istHoch ? width * 0.06 : height * 0.075;
   const breite = istHoch ? "82%" : "62%";
   const padding = istHoch ? "9% 7%" : "6% 6%";
+  // Nur die Akzent-Variante bekommt einen durchgehenden Glow-Puls — neutrale
+  // Aussagen (z.B. Bridge-Saetze) sollen ruhig bleiben, nicht jeder Text.
+  const lebenPhase = Math.max(0, frame - 20);
+  const glowPuls = istAkzent ? (0.5 + Math.sin(lebenPhase / 24) * 0.35) : 1;
   return (
     <Surface art={surface} akzent={p.akzent} hell={hell} breite={breite} padding={padding} sofort={weich}>
       <TextBlock text={txt} groesse={groesse} delay={weich ? 0 : 4} sofort={weich}
         farbe={istAkzent ? p.akzent : p.text}
         gewicht={istAkzent ? 800 : 600}
-        glow={istAkzent ? `${p.akzent}44` : null} />
+        glow={istAkzent ? `${p.akzent}${Math.round(glowPuls * 68).toString(16).padStart(2, "0")}` : null} />
     </Surface>
   );
 };
@@ -232,12 +238,18 @@ const ZahlSeg = ({ props, p, istHoch, width, height, hell, surface, weich }) => 
   const tg = istHoch ? width * 0.05 : height * 0.06;
   const breite = istHoch ? "80%" : "58%";
   const padding = istHoch ? "10% 6%" : "7% 6%";
+  // Durchgehendes Leben NACH dem Hochzaehlen: die fertige Zahl pulsiert
+  // spuerbar weiter (Skalierung + Glow), statt nach Frame 40 einzufrieren.
+  const lebenPhase = Math.max(0, frame - 44);
+  const zahlPuls = 1 + Math.sin(lebenPhase / 24) * 0.04;
+  const zahlGlow = 0.55 + Math.sin(lebenPhase / 24) * 0.4;
   return (
     <Surface art={surface} akzent={p.akzent} hell={hell} breite={breite} padding={padding} sofort={weich}>
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 12 }}>
         {vor ? <TextBlock text={vor} groesse={tg} farbe={p.text} delay={weich ? 0 : 4} blur={false} sofort={weich} /> : null}
         <div style={{ fontSize: zg, fontWeight: 800, color: p.akzent, lineHeight: 1,
-          letterSpacing: "-0.03em", textShadow: `0 0 50px ${p.akzent}55`, fontFamily: BRAND.fonts.display }}>
+          letterSpacing: "-0.03em", textShadow: `0 0 ${50 * zahlGlow}px ${p.akzent}`,
+          fontFamily: BRAND.fonts.display, transform: `scale(${zahlPuls})` }}>
           {zahl}{suffix}
         </div>
         {nach ? <TextBlock text={nach} groesse={tg} farbe={p.text} delay={40} blur={false} /> : null}
@@ -409,5 +421,110 @@ const KineticSeg = ({ props, p, istHoch, width, height, weich }) => {
         })}
       </div>
     </>
+  );
+};
+
+// ── SZENEN (jetzt ECHT angeschlossen, statt AussageSeg-Attrappe) ──
+// Nachgebaut aus dem "GlasPanel" in SzenenSequenz.jsx: knackiger
+// Spring-Eintritt mit leichtem Kippen, Fortschritts-Punkte bei mehreren
+// Zeilen, UND ein durchgehendes Schweben (schweben = sin(frame/18)*3) —
+// genau das ist der Grund, warum "szenen" schon immer lebendiger wirkte
+// als die anderen Stile: es friert nach dem Einblenden nie ein.
+// props: szenen: ["Ein Satz"] ODER mehrere ["Satz 1","Satz 2",...] fuer
+// einen Mini-Zyklus INNERHALB des Segments; akzent (letzte Zeile betont).
+// Die aufwendige Mehrfach-Glow/Lichtstreif/Grain-Ebene der Original-
+// Standalone-Komposition bleibt bewusst aussen vor — der gemeinsame
+// globale StoryHintergrund deckt das ab, damit sich nichts doppelt.
+const SzenenSeg = ({ props, p, istHoch, width, height, weich }) => {
+  const zeilen = props.szenen && props.szenen.length ? props.szenen
+    : props.zeilen && props.zeilen.length ? props.zeilen
+    : [props.text || "Aussage"];
+  const gesamtFrames = props.__frames || 150;
+  const proSzene = Math.max(24, Math.floor(gesamtFrames / zeilen.length));
+
+  if (zeilen.length === 1) {
+    return (
+      <GlasPanelSeg txt={zeilen[0]} p={p} dauer={gesamtFrames} istAkzent={true}
+        istHoch={istHoch} width={width} height={height} nummer={1} gesamt={1} weich={weich} />
+    );
+  }
+
+  // Mehrere Zeilen: intern nacheinander, wie im Original-Zyklus.
+  return (
+    <>
+      {zeilen.map((txt, i) => (
+        <Sequence key={i} from={i * proSzene} durationInFrames={proSzene + 8}>
+          <GlasPanelSeg txt={txt} p={p} dauer={proSzene} istAkzent={i === zeilen.length - 1}
+            istHoch={istHoch} width={width} height={height} nummer={i + 1} gesamt={zeilen.length}
+            weich={weich && i === 0} />
+        </Sequence>
+      ))}
+    </>
+  );
+};
+
+const GlasPanelSeg = ({ txt, p, dauer, istAkzent, istHoch, width, height, nummer, gesamt, weich }) => {
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+
+  // Bei weichem Einstieg macht die Transition schon die Bewegung — hier
+  // nur ein kurzer Fade statt des vollen Spring-Overshoots.
+  let y = 0, panelScale = 1, kippen = 0;
+  const opacity = interpolate(frame, [0, 5], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  if (!weich) {
+    const ein = spring({ frame, fps, config: { damping: 11, stiffness: 240, mass: 0.6 } });
+    y = interpolate(ein, [0, 1], [istHoch ? 70 : 45, 0]);
+    panelScale = interpolate(ein, [0, 1], [0.9, 1]);
+    kippen = interpolate(ein, [0, 1], [3, 0]);
+  }
+  // Durchgehendes Schweben — laeuft IMMER, auch bei weich, das ist das
+  // Herzstueck des lebendigen Looks.
+  const schweben = Math.sin(frame / 18) * 3;
+
+  const textOp = interpolate(frame, [4, 11], [0, 1], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const textBlur = weich ? 0 : interpolate(frame, [4, 12], [8, 0], { extrapolateLeft: "clamp", extrapolateRight: "clamp" });
+  const textY = weich ? 0 : interpolate(spring({ frame: frame - 4, fps, config: { damping: 16, stiffness: 160 } }), [0, 1], [12, 0]);
+
+  const textGroesse = istHoch ? width * 0.062 : height * 0.078;
+  const panelBreite = istHoch ? "82%" : "64%";
+  const hell = p.text !== "#FFFFFF";
+
+  return (
+    <AbsoluteFill style={{ justifyContent: "center", alignItems: "center" }}>
+      <div style={{
+        transform: `translateY(${y + schweben}px) scale(${panelScale}) rotate(${kippen}deg)`,
+        opacity,
+        width: panelBreite,
+        padding: istHoch ? "8% 6%" : "5% 5%",
+        borderRadius: 28,
+        background: hell ? "rgba(255,255,255,0.5)" : "rgba(255,255,255,0.06)",
+        border: `1px solid ${hell ? "rgba(255,255,255,0.7)" : "rgba(255,255,255,0.14)"}`,
+        backdropFilter: "blur(24px)", WebkitBackdropFilter: "blur(24px)",
+        boxShadow: `0 20px 60px rgba(0,0,0,0.35), inset 0 1px 1px ${hell ? "rgba(255,255,255,0.9)" : "rgba(255,255,255,0.15)"}, 0 0 50px ${p.akzent}22`,
+        position: "relative",
+      }}>
+        <div style={{
+          position: "absolute", top: 0, left: "12%", right: "12%", height: 1,
+          background: `linear-gradient(90deg, transparent, ${p.akzent}, transparent)`, opacity: 0.7,
+        }} />
+        {gesamt > 1 && (
+          <div style={{ display: "flex", gap: 8, justifyContent: "center", marginBottom: istHoch ? 22 : 16 }}>
+            {Array.from({ length: gesamt }).map((_, k) => (
+              <div key={k} style={{
+                width: k === nummer - 1 ? 22 : 6, height: 6, borderRadius: 3,
+                background: k === nummer - 1 ? p.akzent : `${p.text}33`,
+              }} />
+            ))}
+          </div>
+        )}
+        <div style={{
+          transform: `translateY(${textY}px)`, opacity: textOp, filter: `blur(${textBlur}px)`,
+          fontSize: textGroesse, fontWeight: istAkzent ? 800 : 600,
+          color: istAkzent ? p.akzent : p.text,
+          textShadow: istAkzent ? `0 0 30px ${p.akzent}44` : "none",
+          textAlign: "center", lineHeight: 1.15, letterSpacing: "-0.02em", fontFamily: BRAND.fonts.display,
+        }}>{txt}</div>
+      </div>
+    </AbsoluteFill>
   );
 };
