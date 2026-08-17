@@ -20,6 +20,7 @@ import base64
 import subprocess
 import glob
 import tempfile
+import threading
 from datetime import datetime, date
 
 import redis
@@ -41,9 +42,12 @@ PG_PASS = os.getenv("POSTGRES_PASSWORD", "")
 PG_DB   = os.getenv("POSTGRES_DB", "jarvis_brain")
 
 MODEL      = os.getenv("ORCHESTRATOR_MODEL", "claude-sonnet-4-6")
-MAX_TOKENS = 8000
+# 8000 reichten fuer grosse Komponenten (echtes UI + mehrere Motion-Techniken)
+# nicht aus — die Antwort wurde mitten im Code abgeschnitten und es kam kein
+# gueltiger Tool-Aufruf zustande. 16000 gibt genug Luft fuer ~1000 Zeilen JSX.
+MAX_TOKENS = 16000
 MAX_HISTORY = 8
-MAX_TOOL_ROUNDS = 14
+MAX_TOOL_ROUNDS = 40
 VAULT_DIR = "/app/vault"
 CLIP_DIR  = os.path.join(VAULT_DIR, "clips")   # hier landen Clip-Infos (JSON)
 VIDEOS_DIR = os.path.join(VAULT_DIR, "videos") # fertige Renders (fuer Selbst-Review)
@@ -67,7 +71,11 @@ MUSIK_DIR = os.getenv("MUSIK_DIR", "/app/vault/musik")
 GITHUB_TOKEN = os.getenv("GITHUB_TOKEN", "")
 GITHUB_REPO = os.getenv("GITHUB_REPO", "lopesrui111-source/Buroflow")
 GITHUB_BRANCH = os.getenv("GITHUB_BRANCH", "main")
-GITHUB_MAX_ZEICHEN = 60000
+# Leselimit pro GitHub-Datei. Frueher 60000 — damit konnte der Bot in zwei
+# Aufrufen seinen halben Kontext fuellen (flow-view.tsx allein 18000 Zeichen)
+# und kam danach nicht mehr zum Bauen. 9000 reichen, um Aufbau, Klassen und
+# Struktur einer Komponente zu verstehen; den Rest braucht er nicht auswendig.
+GITHUB_MAX_ZEICHEN = 9000
 ELEVENLABS_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 # Kuratierte, video-relevante Skills (Name -> Ordner im skills-repo)
 VERFUEGBARE_SKILLS = {
@@ -134,6 +142,51 @@ def arbeit_log(aktion, ergebnis, datei=""):
         pass
 
 
+# ── KOSTEN-ERFASSUNG ─────────────────────────────────────────
+# Der Regie-Bot hat seine Kosten bisher NICHT protokolliert — dadurch stand er
+# im Dashboard dauerhaft bei 0,00 € und tauchte in der Aktivitaets-Liste nicht
+# auf, obwohl er (Planung, Komponentenbau, Vision-Reviews) spuerbar Guthaben
+# verbraucht. Gleiches Schema wie im Marketing-Bot.
+PRICING = {
+    "claude-haiku-4-5-20251001": {"in": 1.00, "out": 5.00},
+    "claude-sonnet-4-5":         {"in": 3.00, "out": 15.00},
+    "claude-sonnet-4-6":         {"in": 3.00, "out": 15.00},
+    "claude-opus-4-8":           {"in": 15.00, "out": 75.00},
+}
+DEFAULT_PRICE = {"in": 3.00, "out": 15.00}
+
+def track_cost(model, tok_in, tok_out, cache_read=0, cache_write=0):
+    def _work():
+        try:
+            p = PRICING.get(model, DEFAULT_PRICE)
+            cost = (tok_in * p["in"] + tok_out * p["out"]
+                    + cache_read * p["in"] * 0.1 + cache_write * p["in"] * 1.25) / 1_000_000
+            conn = pg()
+            with conn, conn.cursor() as cur:
+                cur.execute("INSERT INTO cost_ledger (bot, model, tokens_in, tokens_out, cost_usd) "
+                            "VALUES (%s, %s, %s, %s, %s)",
+                            (BOT_NAME, model, tok_in, tok_out, round(cost, 6)))
+            conn.close()
+        except Exception as e:
+            log(f"  [cost] {e}")
+    threading.Thread(target=_work, daemon=True).start()
+
+
+def _erfasse(resp, model=None):
+    """Liest die Token-Nutzung aus einer Anthropic-Antwort und bucht die Kosten."""
+    try:
+        u = getattr(resp, "usage", None)
+        if not u:
+            return
+        track_cost(model or MODEL,
+                   getattr(u, "input_tokens", 0) or 0,
+                   getattr(u, "output_tokens", 0) or 0,
+                   getattr(u, "cache_read_input_tokens", 0) or 0,
+                   getattr(u, "cache_creation_input_tokens", 0) or 0)
+    except Exception:
+        pass
+
+
 # ── SYSTEM-PROMPT ────────────────────────────────────────────
 def custom_komponenten_liste():
     """Listet die aktuell verfuegbaren custom-Komponenten (Dateinamen ohne .jsx)."""
@@ -191,6 +244,7 @@ Beschreibe SFX wie ein PROFESSIONELLER SOUND-DESIGNER — detailliert, mit Textu
 - Impact -> "deep cinematic impact hit with tight punch and short reverb tail, trailer-style"
 Nutze prompt_influence 0.6-0.8 fuer literalere Ergebnisse. Generiere jeden SFX EINMAL, dann wiederverwendbar.
 Im story_video gibst du die SFX mit Timing an: sfx: [{{datei: "whoosh-up", bei_sek: 2.0, lautstaerke: 0.6}}, ...]. bei_sek = wann im Video der Sound startet (z.B. genau am Uebergang). Setze SFX gezielt und sparsam — je nachdem was die Szene braucht, nicht wahllos.
+SFX SIND PFLICHT, NICHT OPTIONAL: Ein Video nur mit Hintergrundmusik wirkt flach und unfertig — das ist zuletzt mehrfach passiert. Regel: An JEDEN Segment-Uebergang gehoert ein SFX (whoosh/swoosh), an jeden Pointe-Moment ein Impact, an Zahlen/Erfolgs-Momente ein Tick oder Chime. Bei 7 Segmenten also mindestens 6-8 SFX-Eintraege. Pruefe ZUERST mit den vorhandenen Dateien im Vault (sfx/) — dort liegen bereits whoosh-transition, impact-flash, success-chime, ui-tick und weitere. Nur wenn wirklich nichts passt, neue generieren. Die bei_sek-Zeiten an den ECHTEN Segmentgrenzen ausrichten (die Overlap-Korrektur passiert automatisch).
 
 ═══ HINTERGRUND-MUSIK (Tool 'musik_generieren') ═══
 Ein Musik-Track unter dem Video traegt den Rhythmus — das macht Motion-Videos erst "fertig". Generiere einen passenden Track (Stil/Mood auf Englisch) in Video-Laenge, dann gib ihn im story_video mit: musik: "name", musik_lautstaerke: 0.25 (leise unter den SFX). Fuer Büroflow passt: modern, clean, upbeat-corporate, optimistisch, treibend, ohne Gesang. Generiere pro Vibe EINEN Track, dann wiederverwendbar.
@@ -262,17 +316,130 @@ Wichtig: nichts darf nach dem Eintritt EINFRIEREN. Immer laeuft etwas weiter (Pa
 
 FERTIGE REFERENZ-KOMPONENTEN (im Vault, nutze sie ODER lerne von ihrem Code): custom-kinetic-pro, custom-wortpop-pro, custom-zahl-pro, custom-formen-pro — das sind die alten Grundstile auf AE-Niveau. Bevorzuge sie gegenueber den alten kinetic/wortpop/zahl/formen. Wenn du etwas NEUES baust (mit komponente_bauen), orientiere dich an ihrem Aufbau: lies bei Bedarf ihren Code und uebertrage das Ebenen-Prinzip auf dein neues Motiv. Du bist NICHT auf diese Bausteine beschraenkt — du kannst jederzeit eigene Motion-Szenen erfinden. Das Ebenen-Prinzip ist der Massstab, nicht die konkrete Komponente.
 
+★★★ ECHTES BÜROFLOW-UI IST PFLICHT — NIEMALS ERFINDEN ★★★
+Das ist Ruis wichtigste Regel. Wenn in einem Video Bueroflow-Oberflaeche vorkommt (Dashboard, Mahnflow, Mailflow, Angebotsflow, E-Rechnungsflow), MUSS sie dem echten Produkt entsprechen. Ein erfundenes oder "aehnliches" UI ist ein FEHLSCHLAG — auch wenn es huebsch aussieht. Kunden sehen sonst etwas, das es nicht gibt.
+SO GEHST DU VOR:
+  1. Gibt es schon eine fertige Komponente? Dann NUTZE SIE: custom-reveal (Dashboard), custom-dashboard-hero (Dashboard-Vollbild), custom-mahnflow-motion (Mahnflow). Das ist immer der beste Weg.
+  2. Gibt es keine? Dann hole den ECHTEN Code mit ui_aus_github (components/dashboard/flow-view.tsx fuer alle vier Flow-Tools, components/dashboard/ fuer das Dashboard) und baue exakt danach: dieselben Feldbezeichnungen, dieselben Farben, dieselben Abstaende, dieselbe Anordnung.
+  3. NIEMALS aus dem Gedaechtnis oder "sinngemaess" nachbauen. Lieber ein Segment weglassen als falsches UI zeigen.
+WICHTIG bei fertigen Komponenten: Stecke sie NICHT in transformierte Wrapper mit eigener Skalierung — sie skalieren sich selbst auf die Kompositionsgroesse. Eine zusaetzliche Transformation laesst sie aus dem Bild laufen (abgeschnittene Raender). Kamerafahrten gehoeren auf einen AEUSSEREN Wrapper mit voller Bildflaeche.
+
+
+★★★ DIE REFERENZ-BIBLIOTHEK — LERNMATERIAL, KEIN BAUKASTEN ★★★
+Diese Komponenten sind von Rui freigegeben und zeigen das Zielniveau. Lies ihren Code mit 'komponente_lesen', wenn du etwas Aehnliches baust — uebertrage die TECHNIK auf dein eigenes Motiv, statt sie stumpf zu kopieren. Du sollst eigenstaendig Neues bauen; die Referenzen zeigen dir nur, WIE gut es aussehen muss.
+  • custom-motion-referenz — Kamerafahrt ueber mehrere Stationen, Parallax-Ebenen, Morph-Uebergaenge. Vorbild fuer laengere Sequenzen.
+  • custom-marken-intro — Logo rast mit geschwindigkeitsgekoppeltem Motion Blur herein, Text legt sich per Maske frei. Vorbild fuer Intros.
+  • custom-logo-outro — dieselbe Bewegung als Outro mit ruhigem Ausklang. Vorbild fuer Video-Enden.
+  • custom-infografik-pro — vier Techniken fuer Zahlen: hochzaehlende Zahl mit Ankunfts-Puls, gestaffelt wachsende Balken, Vergleich vorher/nachher mit zeichnendem Pfeil, sich fuellender Ring. Vorbild fuer ALLE Zahlen-/Daten-Segmente.
+  • custom-aussage-pro — Hook und CTA (modus: "hook" | "cta"). Von Rui freigegeben, nachgebaut aus einer echten Referenz-Werbung. Der Satz steht als EINE Zeile, die kontinuierlich nach links faehrt; die Woerter erscheinen nacheinander, waehrend sie durch eine Schaerfezone wandern. Vorbild fuer JEDEN Video-Einstieg und -Abschluss.
+  • custom-reveal — echtes Bueroflow-Dashboard mit Kamerafahrt. Vorbild fuer UI-Momente.
+  • custom-mahnflow-motion — echtes Mahnflow (Dokumentliste, Formular, A4-Vorschau) mit UI-Interaktion: Cursor faehrt zu Elementen und klickt (Ripple exakt am Zeiger), Dropdown oeffnet, Felder tippen sich, Knopf durchlaeuft Hover-Klick-Laden-Fertig, und das neue Dokument klappt in der Liste auf und schiebt die anderen Karten sichtbar nach unten. Vorbild fuer ALLE Produkt-Demos ("so fuehlt sich das Tool an").
+  • custom-kinetic-pro / wortpop-pro / zahl-pro / formen-pro — Grundstile auf AE-Niveau.
+Nutze eine Referenz DIREKT als Segment, wenn sie genau passt (z.B. custom-marken-intro als Einstieg). Baue etwas EIGENES nach ihrem Vorbild, wenn dein Motiv anders ist. Falsch waere nur, flach zu bauen.
+
+★ AUSSAGEN-MECHANIK (aus custom-aussage-pro — das Prinzip, das Rui wollte):
+Woerter werden NICHT zeitgesteuert ein- und ausgeblendet. Das wirkt immer abrupt, egal wie man die Kurven tunt. Stattdessen:
+  1. Der Satz steht als EINE Zeile, alle Woerter an fester Position zueinander. Nichts fliegt einzeln ein.
+  2. Die Zeile faehrt KONTINUIERLICH nach links — gleichmaessig, ohne Halt. Jede Pause in der Fahrt laesst ein Wort in der Halbschatten-Zone haengen und danach abrupt scharf werden.
+  3. Sichtbarkeit und Schaerfe jedes Wortes haengen NICHT von der Zeit ab, sondern von seiner POSITION IM BILD:
+       weit rechts  -> transparent + ~19px unscharf
+       Bildmitte    -> halb sichtbar, weich
+       links        -> voll deckend + scharf
+     Umsetzung: anteil = (zeileX + wortLinks + wortBreite/2) / bildBreite, daraus per interpolate Deckung und Blur ableiten.
+  4. Weil die Zeile faehrt, wandert jedes Wort durch diese Zone und wird dabei scharf. Es "erscheint" nacheinander — aber als fliessender Prozess.
+  5. Die UEBERGANGSZONE muss BREIT sein (z.B. anteil 0.26 bis 0.86 mit Ease-in-out). Enge Zonen wirken wie ein Schalter, der umspringt.
+  6. Die Zeile muss BREITER als das Bild sein (Schrift gross genug), sonst sind von Anfang an alle Woerter sichtbar und es erscheint nichts nacheinander.
+  7. Text steht LINKS im Bild, nicht mittig. Die Pointe (letztes Wort) bleibt etwas zurueckhaltender (~78% Deckung) — das wirkt hochwertiger als volle Helligkeit.
+Dazu: Fokus-Effekt am Anfang (Bild startet ~13px unscharf und stellt scharf), organischer Hintergrund aus mehreren weichen Blobs, die langsam wandern, sanfter Push-In ueber die ganze Dauer. Ein Hook dauert 3 Sekunden, nicht mehr.
+
+UI-INTERAKTION — DIE TECHNIKEN AUS custom-mahnflow-motion (uebertragbar auf Mailflow, Angebotsflow, E-Rechnungsflow):  • CURSOR: faehrt mit smoothstep zwischen Zielpunkten (nie linear — das wirkt robotisch), beim Klick kurzer Scale-Dip auf 0.8. Der Ripple-Ring wird an der AKTUELLEN Cursorposition gezeichnet, nicht an gespeicherten Klickkoordinaten — sonst schweben Ringe im Bild, wo kein Zeiger ist.
+  • KLICKZIELE: Cursor-Ziele MUESSEN aus denselben Werten berechnet werden wie das Layout. Getrennt gesetzte Koordinaten fuehren zu Klicks daneben, und das faellt sofort auf.
+  • TIPPEN: Zeichen fuer Zeichen per interpolate auf die Textlaenge, dazu ein blinkender Cursor (Math.floor(frame/16) % 2) und ein Fokus-Ring am Feld.
+  • ZUSTANDSKETTE am Knopf: Ruhe -> Hover (angehoben, Glow staerker) -> Klick (gedrueckt) -> Laden (rotierender Spinner) -> Fertig (Haken zeichnet sich per strokeDashoffset).
+  • LISTEN-VERDRAENGUNG (der beste Effekt): Ein neuer Eintrag waechst in der HOEHE (maxHeight von 0 auf volle Kartenhoehe) — dadurch schiebt Flex die bestehenden Eintraege automatisch nach unten. Das ist echte Bewegung, kein blosses Einblenden.
+  • CURSOR AUSBLENDEN nach der entscheidenden Aktion, statt ihn wegwandern zu lassen — das Auge soll beim Ergebnis sein.
+  • LAYOUT IMMER MIT FLEX bauen, nicht mit absoluten Pixelpositionen. Sobald Text umbricht oder ein Element mehr Platz braucht, ueberlappen absolut positionierte Elemente. Flex mit gap loest das strukturell.
+
+Die drei Prinzipien aus custom-motion-referenz im Detail:
+1) DURCHGEHENDE KAMERAFAHRT statt Segment-Stueckwerk: Statt 8 einzelne Segmente hart aneinanderzuschneiden, liegt der gesamte Inhalt auf EINER grossen virtuellen Flaeche (mehrere Bildbreiten), ueber die eine "Kamera" faehrt. Umgesetzt als Wrapper mit translate/scale, der ueber Stationen fuehrt: faehrt weich hin, haelt kurz, faehrt weiter. Waehrend des Haltens laufen Parallax und Zoom weiter — es steht NIE still. Nutze dafuer eine station()-Funktion mit [frame, wert]-Punkten und smoothstep dazwischen.
+2) PARALLAX-EBENEN: Vier Ebenen mit UNTERSCHIEDLICHER Bewegungsgeschwindigkeit (Hintergrund 0.25x, Mittelgrund 0.6x, Inhalt 1.0x, Vordergrund 1.5x). Jede Ebene bekommt `translate(-camX * tiefe, -camY * tiefe) scale(1 + (camScale-1) * tiefe)`. Das erzeugt echte Raumtiefe, obwohl alles flach ist — der wichtigste Trick fuer "sieht teuer aus".
+3) MORPHS statt Schnitte: Die Uebergaenge entstehen durch Verwandlung, nicht durch Blenden. Eine Dokument-Karte wird beim Weiterfahren zum Dashboard-Rahmen (Groesse/Radius/Rotation/Inhalt interpolieren gleichzeitig). Ein Balken wird zum kreisrunden Ring. Ein Wort bleibt stehen, waehrend das andere tauscht. Dazu laufen Licht-Wischer genau waehrend der Fahrten durchs Bild und kaschieren die Wechsel.
+WICHTIG bei Morphs: Breite und Hoehe muessen auf DENSELBEN Zielwert zulaufen, wenn etwas kreisrund werden soll — sonst entsteht ein verzogenes Oval. Und morphende Formen brauchen INHALT (angedeutete Zeilen/Kacheln), sonst wirken sie wie nackte Umrisse.
+Wenn Rui ein hochwertiges Video will, ist diese durchgehende Bauweise der Zielzustand — nicht die Aneinanderreihung einzelner Segmente.
+
 SCHREIBWEISE (KRITISCH, NIE falsch): Der Markenname ist IMMER "Büroflow" — mit ü, gross B. NIEMALS "Bueroflow", "bueroflow" oder "Buroflow" im sichtbaren Text/Video. (Die Domain buroflow.de bleibt klein; nur der Repo-Name im Code heisst 'Buroflow'.) Genauso korrekt: "Mahnflow", "Mailflow", "Angebotsflow", "E-Rechnungsflow". Umlaute (ä/ö/ü) gehoeren normal in den Text — der Renderer kann sie, hab keine Angst davor.
+
+TYPOGRAFIE — SANS/SERIF-MISCHUNG (macht sofort den Unterschied):
+Setze Kernaussagen NIE komplett in einer Schrift. Das Prinzip: kraeftige Sans fuer den Hauptteil, ELEGANTE KURSIVE SERIF fuer das betonte Wort — in der Akzentfarbe.
+  Beispiel: "Schluss mit dem" (Sans, weiss) + "Papierkram." (Serif kursiv, Limette)
+Technisch: BRAND.fonts.display = Bricolage Grotesque (Sans, fontWeight 700, letterSpacing -0.03em).
+BRAND.fonts.akzent = Instrument Serif — IMMER mit fontStyle "italic" setzen, fontWeight 400, und die Schriftgroesse ca. 6% GROESSER als die Sans (Serifen wirken optisch kleiner).
+Es gibt den fertigen Helfer mischSatz({{text, akzentText, groesse, p}}) in brand.js, der die passenden Styles zurueckgibt — nutze ihn oder baue die Kombination von Hand nach demselben Muster.
+Diese Mischung ist der schnellste Weg von "wirkt selbstgebaut" zu "wirkt professionell". Nutze sie bei JEDER Hauptaussage: Hook, Kernbotschaft, CTA.
 
 KOMPOSITION (gilt auch fuer FREI gebaute Motion-Szenen, nicht nur UI-Nachbau): Der Inhalt muss zentriert und ausgewogen im Bild sitzen. Ein kleines Element oben-mittig mit Text unten-links und viel totem Raum rechts ist ein FEHLER. Fuelle die Flaeche: Hauptmotiv gross und mittig, Text darunter/darum zentriert, oberer und unterer Rand ungefaehr gleich. Nutze mindestens 70% der Bildbreite. Pruefe vor dem Rendern: wirkt das Bild leer oder unausgewogen, ist es noch nicht fertig.
 
 HALTEZEIT ZUERST PLANEN: Die laengste Phase eines Segments ist NICHT der Eintritt, sondern die Zeit DANACH. Ein 3-Sekunden-Segment hat ~0,8s Eintritt und ~2,2s Haltezeit. Wenn in der Haltezeit nichts passiert, wirkt das Video tot — genau der haeufigste Fehler. Regel: In JEDER Szene muessen nach dem Eintritt MINDESTENS 3 Dinge DURCHGEHEND in Bewegung sein (z.B. driftende Partikel + wanderndes Licht-Element + Puls/Atmen auf dem Hauptmotiv). Plane die Haltezeit-Bewegung, bevor du den Eintritt baust.
 
+ZEIT GLEICHMAESSIG VERTEILEN (rechne das nach, bevor du baust!): Der haeufigste Timing-Fehler ist, alle Ereignisse in die erste Haelfte zu packen und den Rest leer zu lassen. Konkret passiert: bei einem 12-Sekunden-Video (720 Frames) lagen alle Morphs zwischen Frame 55 und 420 — die letzten 5 Sekunden waren tot.
+SO RECHNEST DU RICHTIG: Nimm die Gesamtdauer in Frames (Sekunden x 60). Verteile deine Haupt-Ereignisse gleichmaessig darueber, das LETZTE Ereignis soll bei ca. 90-95% der Gesamtdauer liegen. Beispiel 12s = 720 Frames, 5 Stationen: Station 1 bei Frame 0-140, St2 bei 140-280, St3 bei 280-420, St4 bei 420-560, St5 bei 560-690. Die Kamerafahrt muss ebenfalls bis ~690 laufen, nicht bei 420 enden.
+PRUEFE VOR DEM RENDERN: Was ist der GROESSTE Frame-Wert in deinem Code? Liegt er deutlich unter (Dauer x 60 x 0,9), hast du eine tote Endphase gebaut — dann strecke ALLE Timings proportional, statt hinten etwas anzuhaengen.
+
 SELBST-REVIEW (PFLICHT-ARBEITSSCHRITT): Nach JEDEM fertigen Render (story_video ODER komponente_bauen) rufst du 'video_pruefen' auf, BEVOR du Rui das Ergebnis meldest. Das Tool schaut dein Video mit Bild-KI an und findet tote Haltezeit, leere Komposition, falsche Marken-Schreibweise. Bei Urteil NACHBESSERN: setz die genannten Fixes um (Komponente/Segmente anpassen, neu rendern), dann pruefe erneut — wiederhole bis FREIGABE (max. 2-3 Runden, dann melde ehrlich den Restzustand). Erst bei FREIGABE meldest du Rui das fertige Video. So faengst du Fehler selbst, statt dass Rui sie findet.
+
+VORSCHAU-RENDERS NUTZEN (spart enorm Zeit): Ein Voll-Render eines 30-Sekunden-Videos dauert 10-13 Minuten — viel zu lang, um mehrfach zu iterieren. Deshalb: Setze bei story_video 'vorschau: true' fuer ALLE Review-Runden. Das rendert in 40% Aufloesung und ist ~4x schneller. Bewegung, Timing und Komposition sind darin voll beurteilbar (nur die Bildschaerfe ist geringer — bewerte sie also NICHT). Ablauf: vorschau-Render -> video_pruefen -> nachbessern -> vorschau-Render -> ... bis FREIGABE. DANN erst denselben Auftrag ein letztes Mal OHNE vorschau senden, fuer die finale Qualitaet, und diesen Pfad an Rui melden. So iterierst du oft und schnell statt selten und blind.
+
+ERST DAS GANZE VIDEO, DANN FEINSCHLIFF (WICHTIG — haeufigster Fehler): Wenn Rui ein komplettes Video will, baue ZUERST alle Segmente und setze sie mit story_video zu einem GANZEN Video zusammen. Verliere dich NICHT darin, die erste Einzelkomponente immer weiter zu perfektionieren — eine Komponente pro Testrender EINMAL pruefen und dann WEITERBAUEN reicht. Erst wenn das komplette Video steht, gehst du in die Review-Schleife fuer das Gesamtergebnis. Ein 4-Sekunden-Fragment aus einem einzigen perfektionierten Segment ist ein FEHLSCHLAG, auch wenn dieses Segment gut aussieht. Merke: Rui bewertet das fertige Video, nicht einzelne Bausteine.
+
+NICHT ANKUENDIGEN — TUN: Schreibe waehrend der Arbeit KEINE Zwischentexte wie "Ich baue jetzt die Komponente..." oder "Als naechstes erstelle ich...". Solche Ankuendigungen beenden deinen Arbeitslauf vorzeitig, und der Auftrag bleibt unfertig liegen. Rufe stattdessen direkt das naechste Tool auf. Text schreibst du NUR EINMAL: ganz am Ende, wenn das Video fertig gerendert ist und du den Pfad nennen kannst.
+
+ARBEITSBUDGET EINTEILEN: Du hast pro Auftrag eine begrenzte Zahl an Arbeitsschritten. Verbrauche sie nicht fuer Vorbereitung, sonst endet der Auftrag ohne fertiges Video. Faustregeln: Referenzen hoechstens EINMAL analysieren (nicht jede einzeln, wenn eine reicht). GitHub nur fuer die Komponenten lesen, die du wirklich baust — nicht das halbe Repo. SFX/Musik: pruefe ZUERST, ob im Vault schon passende Dateien liegen (sfx/, musik/) und nutze diese, statt neue zu generieren. Halte immer genug Schritte frei fuer: Segmente definieren -> story_video -> video_pruefen -> Meldung an Rui. Im Zweifel lieber weniger Recherche und ein FERTIGES Video.
+
+TEMPO — APPLE-KEYNOTE-STIL (VERBINDLICH): Schnitte sind KURZ. Standarddauer eines Segments ist 2 Sekunden, nicht 3-4. Nur echte Hero-Momente (Dashboard, komplexe UI) duerfen 3-4s bekommen, Text-/Motion-Segmente liegen bei 1,5-2,5s. Ein 30-Sekunden-Video hat also eher 12-15 Segmente als 7-8. Das Ergebnis muss sich schnell, fluessig und dicht anfuehlen — nicht wie eine Diashow mit langen Standzeiten. Wenn du unsicher bist: lieber KUERZER schneiden und dafuer mehr Segmente.
+
+DU BIST DESIGNER, KEIN ZUSAMMENSTECKER (das Wichtigste): Rui will, dass du Motion SELBST CODEST — so wie ein Motion-Designer, der eine Szene von Grund auf baut. Nutze 'komponente_bauen' aktiv und schreibe EIGENE Remotion-Komponenten mit eigener Kamerafahrt, eigenen Uebergaengen, eigener Choreografie. Vorhandene Komponenten sind Referenz und Notnagel, NICHT der Normalfall. Ein Video, das nur bestehende Bausteine aneinanderreiht, ist ein FEHLSCHLAG — auch wenn es technisch funktioniert. Fuer JEDES wichtige Segment gilt: erst ueberlegen welche Bewegung die Aussage traegt, dann diese Bewegung als Code bauen. Kamerafahrten (scale/translate ueber die Segmentdauer), Elemente die sich verfolgen/aufloesen/morphen, Text der sich aufbaut statt nur einzublenden — das ist dein Handwerk. Zeig es.
+
+ZEITACHSE PRO SEGMENT PLANEN (gegen den "es pulsiert nur"-Fehler): Bevor du eine Komponente codest, schreibe dir die Choreografie ueber die volle Segmentdauer auf — was passiert wann. Beispiel fuer 2 Sekunden:
+  0,0-0,7s: Woerter kommen gestaffelt mit Overshoot, Kamera startet leicht herausgezoomt
+  0,7-1,3s: Kamera zieht langsam an (scale 1.0 -> 1.04), Subline schiebt sich von unten nach, Partikel driften
+  1,3-2,0s: Licht-Sweep laeuft schraeg durch, Akzentwort bekommt einen kurzen Glow-Peak, Unterstrich faehrt aus
+Der TEXT darf dabei ruhig stehen bleiben (Lesbarkeit geht vor!) — aber DRUMHERUM muss zu jedem Zeitpunkt etwas Neues passieren. Ein Segment, in dem nach dem Eintritt nur noch ein Element pulsiert, ist ZU WENIG. Pulsieren ist Fuellmaterial, keine Choreografie: es darf begleiten, aber niemals die einzige Bewegung sein. Plane mindestens 3 zeitlich VERSETZTE Ereignisse pro Segment — nacheinander, nicht alle gleichzeitig.
+
+SAUBERES HANDWERK (diese Fehler sind zuletzt passiert — vermeide sie):
+- WORTABSTAENDE: Wenn du Text in einzelne <span> pro Wort zerlegst (fuer gestaffelte Animation), gehen die Leerzeichen verloren — es steht dann "Büroflowmachtdas automatisch". Fix: den Container auf display:flex mit gap setzen ODER jedem span ein marginRight geben ODER "&nbsp;" zwischen die Woerter. IMMER pruefen, dass zwischen allen Woertern Luft ist.
+- ZAHLEN/TEXT IN KACHELN: Werte gehoeren INS Layout der Kachel (padding, flex, definierte Position), nicht an den Rand geklebt. Eine Kachel mit viel Leerraum in der Mitte und einer Zahl unten links ist falsch aufgebaut — nutze flexDirection column + justifyContent space-between oder positioniere bewusst.
+- UEBERLAPPUNGEN: Elemente duerfen sich nicht gegenseitig verdecken (z.B. eine Karte, die in den Ueberschriftentext ragt). Plane Zonen: Kopfbereich fuer Text, Hauptbereich fuer Inhalt, und halte Abstand dazwischen.
+- Vor dem Rendern gedanklich pruefen: Passt alles in den sichtbaren Bereich? Ueberlappt nichts? Sind alle Texte lesbar und korrekt getrennt?
+
+
+MORPHING — DER APPLE-KEYNOTE-EFFEKT (nutze das aktiv, es hebt das Niveau enorm):
+1) LAYOUT-MORPH ("Magic Move", der wichtigste): Ein Element STIRBT NICHT am Schnitt, sondern WANDERT SICHTBAR weiter. Beispiel: Im Segment "Problem" liegt eine Dokument-Karte mittig gross — im naechsten Segment wandert dieselbe Karte nach oben links und schrumpft, waehrend daneben das Dashboard aufgeht.
+SO WIRD ES RICHTIG GEBAUT (haeufigster Fehler: die Karte SPRINGT nur, statt zu wandern): Segment B startet mit dem Element in EXAKT der Position/Groesse, die es am Ende von Segment A hatte — und animiert es dann in den ersten ~0,4-0,6 Sekunden von Segment B an seinen neuen Platz. Der Morph passiert also INNERHALB von Segment B, nicht "zwischen" den Segmenten. Konkret in Segment B:
+  const morph = interpolate(frame, [0, 30], [0, 1], {{easing: EXPO, extrapolateRight: "clamp"}});
+  const x = interpolate(morph, [0, 1], [START_X_AUS_SEGMENT_A, ZIEL_X]);
+  const groesse = interpolate(morph, [0, 1], [GROSS_WIE_IN_A, KLEIN]);
+Die uebrigen Elemente von Segment B (Dashboard, Text) blenden waehrenddessen ein — am besten leicht verzoegert (ab Frame ~15), damit das Auge der wandernden Karte folgen kann. Wenn das Element in Segment B von Frame 0 an schon am Zielort sitzt, ist es KEIN Morph, sondern ein Sprung — das ist der Fehlschlag, den es zu vermeiden gilt.
+2) TEXT-MORPH: Zwei Aussagen teilen sich Woerter. "Weniger Chaos" -> "Weniger Aufwand": das Wort "Weniger" BLEIBT stehen (gleiche Position, gleiche Groesse), nur das zweite Wort tauscht mit Blur+Y-Versatz. Wirkt wie eine Verwandlung statt wie ein Schnitt.
+3) FORM-MORPH: Geometrie wandelt sich. Am einfachsten ueber interpolierbare CSS-Werte: borderRadius (Rechteck -> Kreis), width/height, rotate, clipPath-Prozentwerte. Beispiel: ein Papier-Rechteck wird zum runden Check-Kreis, ein Chaos-Kringel richtet sich zur geraden Linie. Fuer echte SVG-Pfad-Morphs zwei Pfade mit GLEICHER Punktzahl bauen und die Koordinaten paarweise interpolieren.
+Nutze pro Video mindestens EINEN echten Morph-Moment — bevorzugt einen Layout-Morph am wichtigsten Uebergang (z.B. Problem -> Loesung). Das ist der Unterschied zwischen "Diashow" und "Motion Design".
+WICHTIG zum Uebergang bei Layout-Morph: Setze bei einem Morph-Schnitt den uebergang auf "cut". Ein fade/slide/wipe blendet beide Segmente gegeneinander und zerstoert genau die Illusion, dass EIN Element weiterwandert — das Element waere dann doppelt und halbtransparent zu sehen. Nur bei hartem Cut wirkt der Morph wie eine echte Verwandlung.
+
+★ MORPH-KETTE — SO SOLL EIN GANZES VIDEO AUFGEBAUT SEIN (Ruis ausdruecklicher Wunsch):
+Nicht: Szene 1 → Schnitt → Szene 2 → Schnitt → Szene 3 (das wirkt aneinandergeklebt).
+Sondern: Szene 1 VERWANDELT SICH in Szene 2, die verwandelt sich in Szene 3 — eine durchgehende Kette.
+Praktisch heisst das: Jedes Segment endet mit einem Element, das im naechsten Segment WEITERLEBT und sich dort in etwas Neues verwandelt. Beispiel-Kette:
+  Hook: Wort "Papierkram" gross → am Ende schrumpft es zu einem Dokument-Rechteck
+  Problem: dieses Rechteck ist da, vervielfacht sich zu einem Stapel → Stapel kippt zusammen zu EINER Linie
+  Loesung: die Linie zieht sich auseinander und wird zum Dashboard-Rahmen
+  Nutzen: aus dem Rahmen loest sich eine Zahl heraus, die hochzaehlt
+  CTA: die Zahl schrumpft zum Punkt hinter "buroflow.de"
+Jedes dieser Elemente wird in BEIDEN angrenzenden Segmenten gerendert — am Ende von A in seiner Endposition, am Anfang von B in genau dieser Position, und dort dann weiteranimiert (siehe LAYOUT-MORPH oben). Uebergang jeweils "cut".
+Wenn dir das fuer alle Segmente zu aufwendig ist: mach mindestens 2-3 solcher Verwandlungen an den wichtigsten Stellen. Aber ein Video ganz ohne Morph-Kette ist NICHT das Zielniveau.
 
 PUBLISHING-ENTWURF: Wenn Rui ein Video zum Posten/Veroeffentlichen will (oder du ein komplettes Video als fertiges Paket lieferst), rufe nach der FREIGABE 'post_entwurf' auf. Das schreibt fertige, plattformspezifische Captions (LinkedIn/Instagram/TikTok) + Hashtags + Format-Empfehlung nach vault/posts/. Es POSTET NICHT — Rui gibt frei und veroeffentlicht selbst. Nenne ihm den Pfad zum Entwurf.
 
 FORMAT BEWUSST WAEHLEN: Waehle das Format aktiv passend zum Zweck und NENNE es Rui, nimm nicht still den Default. tiktok (9:16) fuer Instagram Reels / TikTok / Shorts — Hochformat, mobil. linkedin (16:9) fuer LinkedIn, YouTube, Praesentation, und fuer UI-lastige Inhalte (Dashboards, breite Layouts). quadrat (1:1) fuer Feed-Posts. Im Zweifel bei Marketing-Kurzvideos tiktok, bei UI/Business-Inhalten linkedin. Wenn Rui ein Format nennt oder vorher eins genutzt wurde, dieses beibehalten.
+AUCH BEIM TESTRENDER: Gib bei 'komponente_bauen' IMMER das format mit, das zum Zielvideo passt. Baust du fuer ein LinkedIn-Video (16:9), muss der Testrender auch linkedin sein — sonst wird ein 16:9-Layout im Hochformat gerendert und rechts abgeschnitten, und du bewertest ein Bild, das so nie vorkommt.
 
 
 Erfinde nie UI, die es nicht gibt — bau echtes Büroflow-UI immer nach dem echten Code aus dem Repo (ui_aus_github + komponente_bauen), nie geraten oder als Screenshot.
@@ -491,9 +658,24 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "pfad": {"type": "string", "description": "Pfad im Repo, ohne fuehrenden Slash (z.B. 'components/dashboard' oder 'app/dashboard/mahnflow/page.tsx')"},
-                "max_zeichen": {"type": "integer", "description": "Optional: Kuerzungslimit fuer Dateiinhalt (Standard 60000)"},
+                "max_zeichen": {"type": "integer", "description": "Optional: Kuerzungslimit fuer Dateiinhalt. Maximal 9000 (hart begrenzt) — mehr Code lesen bringt nichts und blockiert dich beim Bauen."},
             },
             "required": ["pfad"],
+        },
+    },
+    {
+        "name": "komponente_lesen",
+        "description": ("Liest den Quellcode einer vorhandenen custom-Komponente. Nutze das, um von "
+                        "guten Komponenten zu LERNEN, bevor du eine neue baust — besonders von "
+                        "'motion-referenz' (die von Rui freigegebene Massstab-Komponente fuer "
+                        "Kamerafahrt, Parallax-Ebenen und Morph-Uebergaenge) und den -pro-Stilen. "
+                        "Uebertrage die Technik auf dein eigenes Motiv, kopiere sie nicht blind."),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Name der Komponente, z.B. 'motion-referenz' oder 'kinetic-pro' (ohne custom- und ohne .jsx)."},
+            },
+            "required": ["name"],
         },
     },
     {
@@ -555,6 +737,7 @@ TOOLS = [
                 "musik_lautstaerke": {"type": "number", "description": "Lautstaerke der Musik 0-1, Standard 0.25 (leise unter den SFX)."},
                 "hintergrund_video": {"type": "string", "description": "Optional: Higgsfield-Clip als cineastischer Hintergrund HINTER dem Motion-Design (z.B. 'higgsfield/hf_20260812-201500.mp4' oder nur der Dateiname). Zuerst mit vibe_clip erzeugen — der gibt den Pfad zurueck. Laeuft geloopt unter allen Segmenten mit dunklem Overlay fuer Text-Lesbarkeit."},
                 "hintergrund_dim": {"type": "number", "description": "Verdunkelung des Hintergrundvideos 0-1 (Standard 0.55). Hoeher = dunkler = besser lesbar, aber Clip weniger sichtbar."},
+                "vorschau": {"type": "boolean", "description": "true = schneller GROB-Render (40% Aufloesung, ~4x schneller) zum Selbstpruefen. Nutze das fuer die Review-Runden! Erst wenn video_pruefen FREIGABE gibt, denselben Auftrag OHNE vorschau nochmal senden fuer die finale Qualitaet."},
                 "beschreibung": {"type": "string"},
             },
             "required": ["segmente"],
@@ -689,7 +872,7 @@ def tool_story_video(inp, r):
         aufbereitet.append({
             "stil": seg.get("stil", "szenen"),
             "props": seg.get("props") or {},
-            "dauer": seg.get("dauer", 3),
+            "dauer": seg.get("dauer", 2),
             "surface": seg.get("surface", "glas"),
             "uebergang": seg.get("uebergang", "cut"),
         })
@@ -707,7 +890,7 @@ def tool_story_video(inp, r):
     real_start = []     # realer Startframe (mit Overlap-Abzug)
     gp, rp = 0, 0
     for idx, seg in enumerate(aufbereitet):
-        f = max(24, int(round(float(seg.get("dauer", 3)) * FPS)))
+        f = max(24, int(round(float(seg.get("dauer", 2)) * FPS)))
         if idx > 0 and _fliessend(seg.get("uebergang")):
             rp -= UEBERGANG_FRAMES  # Overlap: reales Segment startet frueher
         geplant_start.append(gp)
@@ -777,15 +960,25 @@ def tool_story_video(inp, r):
              "hintergrund_video": hg_video, "hintergrund_dim": hg_dim}
     komposition = f"story-{fmt}"
     rid = f"story-{uuid.uuid4().hex[:8]}"
-    auftrag = {"id": rid, "komposition": komposition, "props": props}
+    # Vorschau-Modus: schneller Grob-Render zum Selbstpruefen. Der Bot kann
+    # dadurch mehrfach iterieren, statt nach jedem Blindflug 10+ Minuten auf
+    # einen Voll-Render zu warten.
+    vorschau = bool(inp.get("vorschau"))
+    auftrag = {"id": rid, "komposition": komposition, "props": props, "vorschau": vorschau}
     try:
         r.rpush("bot:render:inbox", json.dumps(auftrag, ensure_ascii=False))
     except Exception as e:
         return f"Konnte Story-Auftrag nicht senden: {e}"
     gesamt = sum(seg["dauer"] for seg in aufbereitet)
-    log(f"[render] Story {komposition} ({len(aufbereitet)} Segmente, ~{gesamt:.0f}s) gesendet ...")
+    log(f"[render] Story {komposition} ({len(aufbereitet)} Segmente, ~{gesamt:.0f}s"
+        f"{', VORSCHAU' if vorschau else ''}) gesendet ...")
     reply_q = f"bot:render:reply:{rid}"
-    for _ in range(96):  # bis 8 Min (Story rendert laenger)
+    # 25 Minuten warten: ein 30-Sekunden-Story-Video mit custom-Komponenten
+    # braucht auf der CX23 real 10-13 Minuten. Mit den frueheren 8 Minuten lief
+    # der Bot IMMER in den Timeout, hielt den Render faelschlich fuer
+    # gescheitert, prueft dann ein ALTES Video, bekam "NACHBESSERN" und
+    # renderte erneut — eine Endlosschleife, die nie ein Ergebnis lieferte.
+    for _ in range(300):  # 300 x 5s = 25 Min
         try:
             res = r.blpop(reply_q, timeout=5)
         except Exception:
@@ -797,7 +990,10 @@ def tool_story_video(inp, r):
                 return f"Story-Render FEHLGESCHLAGEN:\n{antwort[:600]}"
             arbeit_log("Story-Video gerendert", beschreibung, antwort[:200])
             return f"{beschreibung} ({len(aufbereitet)} Segmente, ~{gesamt:.0f}s)\n{antwort}"
-    return "Story-Render-Timeout — spaeter in vault/videos/ nachsehen."
+    return ("Story-Render-Timeout nach 25 Minuten. WICHTIG: Der Render laeuft im Hintergrund "
+            "moeglicherweise noch weiter und wird fertig. Rendere NICHT erneut und pruefe KEIN "
+            "aelteres Video — melde Rui stattdessen, dass das Video in vault/videos/ erscheinen "
+            "wird, sobald der Render durch ist.")
 
 
 def tool_motion_video(inp, r):
@@ -820,7 +1016,7 @@ def tool_motion_video(inp, r):
     log(f"[render] Auftrag {komposition} gesendet, warte auf Ergebnis ...")
     # auf Antwort warten (Render dauert; grosszuegig pollen, bis ~6 Min)
     reply_q = f"bot:render:reply:{rid}"
-    for _ in range(72):  # 72 x 5s = 6 Min
+    for _ in range(180):  # 180 x 5s = 15 Min
         try:
             res = r.blpop(reply_q, timeout=5)
         except Exception:
@@ -829,7 +1025,8 @@ def tool_motion_video(inp, r):
             _, antwort = res
             arbeit_log("Motion-Video gerendert", beschreibung, antwort[:200])
             return f"{beschreibung}\n{antwort}"
-    return "Render-Timeout — der Server braucht ungewoehnlich lange. Spaeter in vault/videos/ nachsehen."
+    return ("Render-Timeout nach 15 Minuten. Der Render laeuft moeglicherweise noch. Rendere NICHT "
+            "erneut und pruefe KEIN aelteres Video — melde Rui den Stand.")
 
 
 MAX_FRAMES = int(os.getenv("REF_MAX_FRAMES", "12"))
@@ -898,6 +1095,7 @@ def tool_referenz_analysieren(inp):
         log(f"[referenz] analysiere {len(frames)} Frames aus {datei} (Dauer {dauer:.1f}s)")
         resp = client.messages.create(model=MODEL, max_tokens=1800,
                                       messages=[{"role": "user", "content": content}])
+        _erfasse(resp)
         text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
         arbeit_log("Referenz analysiert", datei, text[:200])
         return f"Motion-Analyse von '{datei}' ({dauer:.0f}s, {len(frames)} Frames):\n\n{text}"
@@ -921,6 +1119,27 @@ def _neuestes_video():
     except Exception:
         return ""
 
+VIDEO_STATUS_DATEI = os.path.join(VIDEOS_DIR, "_status.json")
+
+def _video_status_setzen(dateiname, urteil):
+    """Markiert ein Video mit seinem Selbst-Review-Urteil in vault/videos/_status.json.
+    Das Dashboard nutzt das, um nur FREIGABE-Videos ('fertige Versionen') zu
+    zeigen statt jeder Test-/Nachbesserungsrunde."""
+    try:
+        os.makedirs(VIDEOS_DIR, exist_ok=True)
+        status = {}
+        if os.path.exists(VIDEO_STATUS_DATEI):
+            try:
+                with open(VIDEO_STATUS_DATEI, "r", encoding="utf-8") as f:
+                    status = json.load(f)
+            except Exception:
+                status = {}
+        status[dateiname] = {"urteil": urteil, "zeit": datetime.now().isoformat()}
+        with open(VIDEO_STATUS_DATEI, "w", encoding="utf-8") as f:
+            json.dump(status, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log(f"[pruefen] Status-Markierung fehlgeschlagen: {e}")
+
 def tool_video_pruefen(inp):
     """SELBST-REVIEW: extrahiert gleichverteilte Frames aus einem fertigen Video
     und laesst Claude Vision es ehrlich gegen die Qualitaetskriterien pruefen —
@@ -931,6 +1150,19 @@ def tool_video_pruefen(inp):
         pfad = datei if os.path.isabs(datei) else os.path.join(VIDEOS_DIR, datei)
     else:
         pfad = _neuestes_video()  # ohne Angabe: das zuletzt gerenderte
+        # Schutz gegen die Timeout-Falle: liegt das neueste Video schon laenger
+        # zurueck, ist es NICHT das eben gerenderte — dann darf nicht einfach
+        # ein altes Video geprueft und "nachgebessert" werden (das erzeugte
+        # frueher eine Endlosschleife aus Render -> Timeout -> altes Video
+        # pruefen -> NACHBESSERN -> neu rendern).
+        try:
+            if pfad and (time.time() - os.path.getmtime(pfad)) > 900:
+                return ("Das neueste Video in vault/videos/ ist ueber 15 Minuten alt, stammt also "
+                        "NICHT aus deinem aktuellen Render. Wahrscheinlich laeuft dein Render noch. "
+                        "Pruefe jetzt NICHTS und rendere NICHT erneut — melde Rui, dass das Video "
+                        "gleich fertig ist und in vault/videos/ erscheint.")
+        except Exception:
+            pass
     if not pfad or not os.path.exists(pfad):
         vorhanden = ", ".join(sorted(os.listdir(VIDEOS_DIR))[-8:]) if os.path.isdir(VIDEOS_DIR) else "(Ordner fehlt)"
         return f"Video nicht gefunden. Zuletzt in vault/videos/: {vorhanden}"
@@ -939,39 +1171,80 @@ def tool_video_pruefen(inp):
     if dauer <= 0:
         return "Konnte Videodauer nicht lesen — gueltiges Video?"
 
-    # GLEICHMAESSIG ueber die ganze Dauer verteilte Frames — entscheidend, um
-    # 'ab Sekunde 2 passiert nichts' ueberhaupt sehen zu koennen.
-    n = 8
-    fps = max(0.3, min(4.0, n / dauer))
+    # BEWEGUNGSPRUEFUNG statt Standbildpruefung:
+    # Frueher wurden 8 weit verteilte Einzelframes gezogen. Daran sieht man
+    # zwar, OB sich etwas veraendert — aber nicht, WIE. Ob eine Karte
+    # "hochklappt" oder "aus der Tiefe hereinfliegt", ist in weit
+    # auseinanderliegenden Einzelbildern nicht erkennbar.
+    # Jetzt: 5 Zeitpunkte, an jedem ein PAAR eng benachbarter Frames
+    # (0,15s Abstand). Innerhalb eines Paares sieht die Bild-KI die
+    # tatsaechliche Bewegung und kann ihren Charakter beurteilen.
+    zeitpunkte = [dauer * f for f in (0.06, 0.28, 0.5, 0.72, 0.93)]
+    paar_abstand = 0.15
     tmp = tempfile.mkdtemp(prefix="pruefframes_")
     try:
-        subprocess.run(
-            ["ffmpeg", "-y", "-i", pfad, "-vf", f"fps={fps:.3f},scale=640:-1",
-             "-frames:v", str(n), os.path.join(tmp, "f_%03d.jpg")],
-            capture_output=True, text=True, timeout=120)
-        frames = sorted(glob.glob(os.path.join(tmp, "f_*.jpg")))[:n]
+        frames = []   # (pfad, zeit, paar_index, ist_zweiter)
+        for pi, t0 in enumerate(zeitpunkte):
+            for zi, t in enumerate((t0, min(dauer - 0.05, t0 + paar_abstand))):
+                ziel = os.path.join(tmp, f"p{pi}_{zi}.jpg")
+                subprocess.run(
+                    ["ffmpeg", "-y", "-ss", f"{max(0, t):.3f}", "-i", pfad,
+                     "-vframes", "1", "-vf", "scale=640:-1", ziel],
+                    capture_output=True, text=True, timeout=60)
+                if os.path.exists(ziel):
+                    frames.append((ziel, t, pi, zi))
         if not frames:
             return "Konnte keine Frames extrahieren (ffmpeg-Problem)."
 
         content = []
-        for i, fr in enumerate(frames):
-            with open(fr, "rb") as fh:
+        for pfad_fr, t, pi, zi in frames:
+            with open(pfad_fr, "rb") as fh:
                 b64 = base64.standard_b64encode(fh.read()).decode()
-            t = (i / fps)
-            content.append({"type": "text", "text": f"Frame {i+1}/{len(frames)} (t~{t:.1f}s von {dauer:.1f}s):"})
+            label = (f"PAAR {pi+1} — Bild {'A' if zi == 0 else 'B'} (t={t:.2f}s"
+                     f"{', 0,15s spaeter' if zi == 1 else ''}):")
+            content.append({"type": "text", "text": label})
             content.append({"type": "image", "source": {"type": "base64",
                             "media_type": "image/jpeg", "data": b64}})
         anweisung = (
-            "Du bist ein strenger, ehrlicher Motion-Design-Reviewer und pruefst DEIN EIGENES gerendertes Video "
-            "(diese Frames sind zeitlich gleichmaessig ueber die gesamte Dauer verteilt). Sei kritisch, nicht nett — "
-            "das Ziel ist, Schwaechen zu finden, bevor Rui sie sieht. Pruefe konkret:\n"
-            "1. BEWEGUNG UEBER DIE ZEIT (wichtigster Punkt): Veraendert sich von Frame zu Frame genug, ODER "
-            "steht das Bild nach dem Eintritt still? Vergleiche spaete Frames miteinander — wenn Frame 4-8 fast "
-            "identisch aussehen, ist die Haltezeit TOT. Das ist ein schwerer Fehler.\n"
+            "Du bist ein strenger, ehrlicher Motion-Design-Reviewer und pruefst DEIN EIGENES gerendertes Video. "
+            "Sei kritisch, nicht nett — das Ziel ist, Schwaechen zu finden, bevor Rui sie sieht.\n\n"
+            "SO SIND DIE BILDER AUFGEBAUT: Du bekommst 5 PAARE. Innerhalb eines Paares liegen nur 0,15 Sekunden "
+            "zwischen Bild A und Bild B — daran erkennst du die BEWEGUNG SELBST (was bewegt sich wohin, wie "
+            "schnell, mit welchem Charakter). Zwischen den Paaren liegen groessere Abstaende — daran erkennst "
+            "du den Verlauf ueber die Gesamtdauer.\n\n"
+            "Pruefe konkret:\n"
+            "1. BEWEGUNG INNERHALB DER PAARE (wichtigster Punkt): Veraendert sich zwischen A und B ueberhaupt "
+            "etwas? Bei mehreren Paaren fast identische A/B-Bilder bedeuten: das Video steht praktisch still. "
+            "Das ist ein schwerer Fehler.\n"
+            "1b. BEWEGUNGS-CHARAKTER: Beschreibe, WIE sich Dinge bewegen. Klappt etwas nur von unten hoch und "
+            "wird sichtbar (billig), oder kommt es aus der Tiefe mit Groessenaenderung, leichter Rotation und "
+            "Unschaerfe (hochwertig)? Reines Ein-/Ausblenden und simples Hochschieben sind ZU WENIG — als "
+            "NACHBESSERN werten.\n"
+            "1c. CHOREOGRAFIE statt Dauerpulsieren: Passieren ueber die Dauer VERSCHIEDENE Dinge nacheinander "
+            "(Kamera zieht an, ein Element kommt nach, ein Sweep laeuft durch), oder veraendert sich zwischen "
+            "den spaeten Paaren im Grunde nur Helligkeit/Groesse EINES Elements? Blosses Pulsieren ist ZU WENIG.\n"
+            "1d. TOTE ENDPHASE (haeufiger Fehler): Schau dir gezielt PAAR 4 und PAAR 5 an (also die letzten "
+            "~30% des Videos). Ist dort noch echte Veraenderung, oder steht das Bild? Wenn die letzten Paare "
+            "praktisch still stehen, wurden alle Ereignisse in die erste Haelfte gepackt — das ist ein "
+            "schwerer Fehler. Sag dann klar: 'Ereignisse ungleichmaessig verteilt, letzte X Sekunden tot, "
+            "alle Timings proportional strecken.'\n"
             "2. KOMPOSITION: Ist der Inhalt zentriert und fuellt die Flaeche (mind. ~70% Breite), oder klebt etwas "
             "in einer Ecke mit viel totem Raum? Oberer/unterer Rand ausgewogen?\n"
             "3. MARKE/TEXT: Steht der Markenname KORREKT als 'Büroflow' (mit ü)? Falsche Schreibweisen "
-            "(Bueroflow/Buroflow) oder Tippfehler in sichtbarem Text? Toolnamen korrekt (Mahnflow/Mailflow/Angebotsflow/E-Rechnungsflow)?\n"
+            "(Bueroflow/Buroflow) oder Tippfehler in sichtbarem Text? Toolnamen korrekt (Mahnflow/Mailflow/Angebotsflow/E-Rechnungsflow)? "
+            "WORTABSTAENDE pruefen: Kleben Woerter aneinander ('Büroflowmachtdas')? Das ist ein schwerer Fehler.\n"
+            "3b. UEBERLAPPUNGEN/LAYOUT: Verdecken sich Elemente gegenseitig? Kleben Zahlen oder Texte an "
+            "Kachelraendern statt sauber im Layout zu sitzen? Ragt etwas aus dem Bild? Haben Formularfelder "
+            "und Listeneintraege genug Abstand zueinander, oder kleben sie aneinander?\n"
+            "3c. ECHTES UI (Ruis wichtigste Regel): Falls Bueroflow-Oberflaeche zu sehen ist — wirkt sie wie "
+            "das ECHTE Produkt oder wie ein generischer Nachbau? Warnzeichen fuer erfundenes UI: runde "
+            "Platzhalter-Kreise, namenlose graue Balken, erfundene Kachel-Layouts, Felder ohne die echten "
+            "Bezeichnungen. Das echte Mahnflow hat z.B. links eine Dokumentliste mit Filterchips, in der "
+            "Mitte Vorlage-Tabs und Felder wie 'Empfänger / Kunde', 'Bezug: Rechnungsnummer', 'Offener "
+            "Betrag (€)', rechts eine A4-Vorschau. Erfundenes UI ist ein schwerer Fehler -> NACHBESSERN.\n"
+            "3c. MORPH (falls einer geplant war): Wandert das Element sichtbar von seiner alten an die neue "
+            "Position, oder ist es zwischen zwei Frames einfach woanders (= Sprung statt Morph)? Ein Sprung "
+            "ist NACHBESSERN.\n"
             "4. LESBARKEIT: Text gross genug, guter Kontrast, nicht abgeschnitten?\n"
             "5. DICHTE: Wirkt es 'basic' (nur ein Element blendet ein) oder reich (mehrere Ebenen: Partikel, "
             "durchlaufendes Element, Sekundaerbewegung)?\n\n"
@@ -985,9 +1258,11 @@ def tool_video_pruefen(inp):
         log(f"[pruefen] Selbst-Review {os.path.basename(pfad)} ({dauer:.1f}s, {len(frames)} Frames)")
         resp = client.messages.create(model=MODEL, max_tokens=1400,
                                       messages=[{"role": "user", "content": content}])
+        _erfasse(resp)
         text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text")
         arbeit_log("Video geprueft", os.path.basename(pfad), text[:200])
         urteil = "NACHBESSERN" if "NACHBESSERN" in text.upper() else ("FREIGABE" if "FREIGABE" in text.upper() else "?")
+        _video_status_setzen(os.path.basename(pfad), urteil)
         return f"Selbst-Review von '{os.path.basename(pfad)}' ({dauer:.0f}s) — Urteil: {urteil}\n\n{text}"
     finally:
         for fr in glob.glob(os.path.join(tmp, "*")):
@@ -1001,9 +1276,13 @@ def tool_ui_aus_github(inp):
     """Liest Dateien/Ordner aus dem privaten Büroflow-Repo (GitHub Contents API).
     Ordner -> Liste der Eintraege. Datei -> Quellcode (gekuerzt)."""
     pfad = (inp.get("pfad") or "").strip().lstrip("/")
+    # HARTE Obergrenze: der Bot darf max_zeichen zwar mitgeben, aber nicht
+    # ueber GITHUB_MAX_ZEICHEN hinaus. Er hatte sich sonst 55000 Zeichen aus
+    # einer einzigen Datei geholt, damit den Kontext gefuellt und kam
+    # anschliessend nicht mehr zum Bauen.
     limit = inp.get("max_zeichen") or GITHUB_MAX_ZEICHEN
     try:
-        limit = max(2000, min(120000, int(limit)))
+        limit = max(2000, min(GITHUB_MAX_ZEICHEN, int(limit)))
     except Exception:
         limit = GITHUB_MAX_ZEICHEN
 
@@ -1069,7 +1348,41 @@ def tool_ui_aus_github(inp):
         gekuerzt = f"\n\n[... gekuerzt bei {limit} Zeichen — bei Bedarf gezielt weitere Datei lesen ...]"
     arbeit_log("GitHub gelesen", pfad, f"{len(code)} Zeichen")
     log(f"[github] {pfad} gelesen ({len(code)} Zeichen)")
-    return f"Quellcode aus {GITHUB_REPO}/{pfad} (Branch {GITHUB_BRANCH}):\n\n```\n{code}\n```{gekuerzt}"
+    return (f"Quellcode aus {GITHUB_REPO}/{pfad} (Branch {GITHUB_BRANCH}):\n\n```\n{code}\n```{gekuerzt}\n\n"
+            "HINWEIS: Lies nicht noch mehr Dateien, wenn du den Aufbau verstanden hast — "
+            "Farben, Abstaende, Struktur und Klassennamen reichen. Zu viel gelesener Code "
+            "blockiert dich beim eigentlichen Bauen. BAU JETZT mit dem, was du hast.")
+
+
+def tool_komponente_lesen(inp):
+    """Liest den Quellcode einer vorhandenen custom-Komponente, damit der Bot
+    von ihr lernen kann (z.B. von der Massstab-Komponente motion-referenz)."""
+    name = (inp.get("name") or "").strip()
+    if not name:
+        vorhanden = ", ".join(custom_komponenten_liste())
+        return f"Bitte 'name' angeben. Verfuegbar: {vorhanden}"
+    name = name.replace("custom-", "").replace(".jsx", "")
+    pfad = os.path.join(CUSTOM_DIR, f"{name}.jsx")
+    if not os.path.exists(pfad):
+        vorhanden = ", ".join(custom_komponenten_liste())
+        return f"Komponente '{name}' nicht gefunden. Verfuegbar: {vorhanden}"
+    try:
+        with open(pfad, "r", encoding="utf-8") as f:
+            code = f.read()
+    except Exception as e:
+        return f"Konnte nicht lesen: {e}"
+    if len(code) > 12000:
+        # Kontext schonen: sehr lange Komponenten gekuerzt zurueckgeben.
+        # Der Bot hat zuletzt 32.000+ Zeichen Referenzcode gelesen und kam
+        # danach nicht mehr zum Bauen. Kopf + Anfang reichen, um Technik und
+        # Aufbau zu verstehen.
+        code = code[:12000] + (
+            "\n\n/* ... gekuerzt. Du hast jetzt genug gesehen, um die Technik zu "
+            "verstehen (Kamerafahrt per station(), Parallax-Ebenen mit tiefe-Faktor, "
+            "Morphs per interpolate). BAU JETZT deine eigene Komponente damit — "
+            "lies keine weiteren Referenzen. */")
+    log(f"[lesen] Komponente {name} ({len(code)} Zeichen)")
+    return f"Quellcode von custom-{name}:\n\n{code}"
 
 
 def tool_komponente_bauen(inp, r):
@@ -1078,7 +1391,10 @@ def tool_komponente_bauen(inp, r):
     name = inp.get("name", "").strip().lower()
     code = inp.get("jsx_code", "")
     test_props = inp.get("test_props") or {}
-    fmt = inp.get("format", "tiktok")
+    # Standard linkedin (16:9): Komponenten werden ueberwiegend fuer Querformat
+    # gebaut. Der frueherer tiktok-Default hat 16:9-Layouts im Testrender
+    # rechts abgeschnitten und dadurch falsche Bewertungen erzeugt.
+    fmt = inp.get("format", "linkedin")
 
     if not _re.fullmatch(r"[a-z0-9][a-z0-9\-]{1,40}", name or ""):
         return "Ungueltiger Name. Erlaubt: kleinbuchstaben, zahlen, bindestrich (2-41 Zeichen)."
@@ -1100,14 +1416,19 @@ def tool_komponente_bauen(inp, r):
     # Test-Render ueber den Render-Server
     rid = f"schmiede-{uuid.uuid4().hex[:8]}"
     komposition = f"custom-{name}-{fmt}"
-    auftrag = {"id": rid, "komposition": komposition, "props": test_props}
+    # Testrender IMMER als Vorschau: 40% Aufloesung, dadurch ~4x schneller.
+    # Es geht hier nur darum zu pruefen, OB die Komponente rendert und wie die
+    # Bewegung wirkt — nicht um finale Bildqualitaet.
+    auftrag = {"id": rid, "komposition": komposition, "props": test_props, "vorschau": True}
     try:
         r.rpush("bot:render:inbox", json.dumps(auftrag, ensure_ascii=False))
     except Exception as e:
         return f"Datei geschrieben, aber Test-Render konnte nicht gesendet werden: {e}"
 
     reply_q = f"bot:render:reply:{rid}"
-    for _ in range(72):  # bis 6 Min
+    for _ in range(180):  # bis 15 Min — 6 Min reichten bei laengeren Komponenten nicht,
+                          # der Bot hielt den Bau faelschlich fuer gescheitert und
+                          # baute dieselbe Komponente immer wieder neu (teuer!)
         try:
             res = r.blpop(reply_q, timeout=5)
         except Exception:
@@ -1134,7 +1455,10 @@ def tool_komponente_bauen(inp, r):
             return (f"Komponente '{name}' gebaut & getestet. Verfuegbar als Stil 'custom-{name}' "
                     f"in allen Formaten. Test-Video: {antwort}\n"
                     f"Aktuell verfuegbare custom-Komponenten (nutze sie direkt, ohne Neustart): {liste}")
-    return "Test-Render-Timeout — Status unklar. Spaeter pruefen."
+    return (f"Test-Render-Timeout nach 15 Minuten. Die Datei '{name}.jsx' IST geschrieben und "
+            f"vermutlich in Ordnung — der Render laeuft moeglicherweise noch. "
+            f"Baue die Komponente NICHT erneut (das war bisher eine teure Endlosschleife). "
+            f"Nutze stattdessen 'custom-{name}' direkt weiter oder pruefe spaeter mit video_pruefen.")
 
 
 def tool_sfx_generieren(inp):
@@ -1265,6 +1589,7 @@ def tool_post_entwurf(inp):
     try:
         resp = client.messages.create(model=MODEL, max_tokens=1600,
                                       messages=[{"role": "user", "content": anweisung}])
+        _erfasse(resp)
         text = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
     except Exception as e:
         return f"Caption-Generierung fehlgeschlagen: {type(e).__name__}: {e}"
@@ -1308,6 +1633,8 @@ def run_tool(name, inp, r=None):
         return tool_post_entwurf(inp)
     if name == "ui_aus_github":
         return tool_ui_aus_github(inp)
+    if name == "komponente_lesen":
+        return tool_komponente_lesen(inp)
     if name == "komponente_bauen":
         return tool_komponente_bauen(inp, r)
     if name == "sfx_generieren":
@@ -1336,15 +1663,109 @@ def think(history, user_text, bilder=None, r=None):
 
     final_text = ""
     tool_benutzt = False
-    pruef_zaehler = {"n": 0}  # Notbremse gegen endlose Review-Schleifen
-    for _ in range(MAX_TOOL_ROUNDS):
-        resp = client.messages.create(model=MODEL, max_tokens=MAX_TOKENS,
-                                      system=SYS_CACHED, tools=TOOLS_CACHED, messages=messages)
+    # Notbremse gegen endlose Review-Schleifen — zaehlt PRO VIDEO-BASIS, nicht
+    # global. Sonst verbraucht der Bot sein Kontingent schon beim Testen
+    # einzelner Komponenten (jeder komponente_bauen-Testrender wird geprueft)
+    # und wird mitten in der Produktion gestoppt, bevor das eigentliche
+    # Story-Video ueberhaupt existiert.
+    pruef_zaehler = {}
+    bau_zaehler = {}   # wie oft dieselbe Komponente schon gebaut wurde
+    _schubser = 0   # wie oft der Bot schon zurueck an die Arbeit geschickt wurde
+    for _runde in range(MAX_TOOL_ROUNDS):
+        # Wenn das Runden-Budget knapp wird, den Bot warnen — sonst laeuft er
+        # in die Begrenzung, WAEHREND er noch recherchiert/Assets baut, und der
+        # Auftrag endet ohne fertiges Video (genau das ist passiert: SFX+Musik
+        # fertig, aber story_video nie aufgerufen).
+        _rest = MAX_TOOL_ROUNDS - _runde
+        if _rest == 8 and tool_benutzt:
+            messages.append({"role": "user", "content": [{"type": "text", "text":
+                "HINWEIS (System): Dein Arbeitsbudget fuer diesen Auftrag geht zur Neige "
+                "(noch ca. 8 Schritte). Hoere JETZT mit Recherche/Vorbereitung auf und "
+                "stelle das Video fertig: Segmente definieren, story_video aufrufen, einmal "
+                "video_pruefen, dann Rui melden. Nichts Neues mehr anfangen."}]})
+        try:
+            resp = client.messages.create(model=MODEL, max_tokens=MAX_TOKENS,
+                                          system=SYS_CACHED, tools=TOOLS_CACHED, messages=messages)
+        except Exception as e:
+            # Frueher starb der Auftrag hier LAUTLOS: Exception nicht gefangen,
+            # keine Logzeile, keine Antwort in der Queue — der Bot stand
+            # einfach still. Jetzt wird der Fehler sichtbar und gemeldet.
+            log(f"[api-fehler] {type(e).__name__}: {e}")
+            final_text = (final_text or "") + f"\n\n(Abbruch durch API-Fehler: {type(e).__name__}: {e})"
+            break
+        _erfasse(resp)
         parts = [b.text for b in resp.content if b.type == "text"]
         t = "".join(parts).strip()
         if t:
             final_text = t
         if resp.stop_reason != "tool_use":
+            # DIAGNOSE: Bei jedem Abbruch protokollieren, WARUM das Modell
+            # aufgehoert hat. Ohne diese Info wurde bisher nur geraten.
+            # Entscheidend ist stop_reason:
+            #   "end_turn"   -> Modell hielt sich fuer fertig (Prompt-Problem)
+            #   "max_tokens" -> Antwort war zu lang und wurde abgeschnitten
+            #                   (dann reicht MAX_TOKENS nicht fuer die Aufgabe)
+            try:
+                _u = getattr(resp, "usage", None)
+                _in = getattr(_u, "input_tokens", "?") if _u else "?"
+                _out = getattr(_u, "output_tokens", "?") if _u else "?"
+                _cache = getattr(_u, "cache_read_input_tokens", 0) if _u else 0
+            except Exception:
+                _in = _out = "?"; _cache = 0
+            log(f"[diagnose] stop_reason={resp.stop_reason} | runde={_runde+1}/{MAX_TOOL_ROUNDS} "
+                f"| tokens_in={_in} (cache {_cache}) tokens_out={_out} "
+                f"| antwort_zeichen={len(t)} | bloecke={[b.type for b in resp.content]}")
+            # ANTI-ABBRUCH: Der Bot gibt manchmal mitten in der Arbeit einen
+            # ANKUENDIGUNGSTEXT aus ("Ich baue jetzt die Komponente ...") ohne
+            # Tool-Aufruf. Frueher galt das als fertige Antwort und der ganze
+            # Auftrag brach mittendrin ab. Wir erkennen solche Ankuendigungen
+            # und schubsen ihn zurueck an die Arbeit.
+            # Sonderfall: Antwort wurde wegen Laenge abgeschnitten. Dann hilft
+            # kein Zurueckschicken — er muss die Aufgabe kleiner schneiden.
+            if resp.stop_reason == "max_tokens" and _rest > 3 and _schubser < 3:
+                _schubser += 1
+                log(f"[diagnose] Antwort zu lang abgeschnitten -> Aufgabe verkleinern (#{_schubser})")
+                messages.append({"role": "assistant", "content": [{"type": "text", "text": t[:2000]}]})
+                messages.append({"role": "user", "content": [{"type": "text", "text":
+                    "Deine Antwort wurde abgeschnitten, weil sie zu lang war. Die Komponente, "
+                    "die du bauen willst, passt nicht in eine Antwort. Baue sie KLEINER: "
+                    "weniger Inhalt pro Komponente, kompakterer Code, keine langen Kommentare. "
+                    "Wenn noetig, baue erst eine reduzierte Fassung und erweitere sie danach "
+                    "mit einem zweiten komponente_bauen-Aufruf."}]})
+                continue
+
+            _t_low = t.lower()
+            # Robuste Erkennung: Ankuendigungen variieren stark in der
+            # Wortstellung ("ich baue jetzt" / "jetzt baue ich" / "ich habe
+            # genug gelesen, jetzt baue ich"). Deshalb pruefen wir auf
+            # Absichts-VERBEN in Kombination mit Zukunfts-/Jetzt-Signalen,
+            # statt auf feste Phrasen.
+            _verben = ("baue", "erstelle", "schreibe", "setze", "rendere",
+                       "starte", "lege", "generiere", "fuege", "füge")
+            _signale = ("jetzt", "nun", "als naechstes", "als nächstes",
+                        "gleich", "im naechsten", "im nächsten", "danach",
+                        "anschliessend", "anschließend", "dann")
+            _hat_verb = any(v in _t_low for v in _verben)
+            _hat_signal = any(s in _t_low for s in _signale)
+            # Kurze Texte ohne Ergebnis sind fast immer Ankuendigungen
+            _kurz = len(t) < 600
+            _ankuendigung = _hat_verb and _hat_signal and _kurz
+            # Nur einschreiten, wenn noch KEIN Video existiert (sonst ist der
+            # Auftrag ja tatsaechlich erledigt) und Budget uebrig ist.
+            _kein_video = "vault/videos/" not in t
+            if _ankuendigung and _kein_video and _rest > 3 and _schubser < 3:
+                _schubser += 1
+                log(f"[anti-abbruch] Ankuendigung ohne Tool-Aufruf (#{_schubser}) -> zurueck an die Arbeit")
+                # WICHTIG: Block-Format wie ueberall sonst. Ein reiner String
+                # als content fuehrte hier zu einem API-Fehler, der den
+                # Auftrag lautlos sterben liess.
+                messages.append({"role": "assistant", "content": [{"type": "text", "text": t}]})
+                messages.append({"role": "user", "content": [{"type": "text", "text":
+                    "Du hast nur ANGEKUENDIGT, was du tun willst, aber nichts getan. "
+                    "Keine Kommentare, keine Ankuendigungen: FUEHRE JETZT AUS. Rufe die "
+                    "noetigen Tools auf (komponente_bauen, story_video, video_pruefen) und "
+                    "melde dich erst, wenn das Video fertig gerendert ist und du den Pfad hast."}]})
+                continue
             break
         tool_benutzt = True
         a_content, t_results = [], []
@@ -1354,19 +1775,54 @@ def think(history, user_text, bilder=None, r=None):
             elif block.type == "tool_use":
                 a_content.append({"type": "tool_use", "id": block.id,
                                   "name": block.name, "input": block.input})
-                # NOTBREMSE: video_pruefen hoechstens 3x pro Auftrag. Danach
-                # Zwangs-Freigabe, damit der Loop nicht endlos dreht und Code
-                # kaputt-iteriert (siehe easing-Crash in Runde 4+).
-                if block.name == "video_pruefen":
-                    pruef_zaehler["n"] += 1
-                    if pruef_zaehler["n"] > 3:
-                        result = ("STOPP: Du hast bereits 3 Review-Runden gemacht. Keine weitere "
-                                  "Nachbesserung — das Ergebnis ist gut genug. Melde Rui JETZT das "
-                                  "aktuelle Video mit einem kurzen ehrlichen Fazit (was gut ist, was "
-                                  "in einer spaeteren Runde noch besser werden koennte). Keine Tools mehr.")
-                        log(f"[notbremse] video_pruefen #{pruef_zaehler['n']} -> Zwangs-Freigabe")
+                # NOTBREMSE: hoechstens 3 Review-Runden AM SELBEN Video-Motiv.
+                # Schluessel ist die gepruefte Datei (bzw. "aktuell", wenn der
+                # Bot ohne Dateiangabe das zuletzt gerenderte prueft) — so
+                # bremst nur echtes Im-Kreis-Drehen, kein normaler Fortschritt.
+                # NOTBREMSE 2: dieselbe Komponente immer wieder neu bauen.
+                # Passiert, wenn der Testrender keine klare Rueckmeldung gibt —
+                # der Bot haelt den Bau fuer gescheitert und wiederholt ihn.
+                # Das hat einen ganzen Auftrag lang Geld verbrannt.
+                if block.name == "komponente_bauen":
+                    _kn = ((block.input or {}).get("name") or "?").strip().lower()
+                    bau_zaehler[_kn] = bau_zaehler.get(_kn, 0) + 1
+                    if bau_zaehler[_kn] > 3:
+                        result = (f"STOPP: Du hast '{_kn}' bereits {bau_zaehler[_kn] - 1}x gebaut. "
+                                  "Die Datei ist geschrieben und nutzbar. Baue sie NICHT erneut — "
+                                  "nutze sie als 'custom-" + _kn + "' weiter oder melde Rui den Stand. "
+                                  "Wiederholtes Bauen kostet Geld ohne Nutzen.")
+                        log(f"[notbremse] komponente_bauen '{_kn}' #{bau_zaehler[_kn]} -> gestoppt")
                         t_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
                         continue
+
+                if block.name == "video_pruefen":
+                    _inp = block.input or {}
+                    _key = (_inp.get("datei") or "").strip()
+                    if not _key:
+                        _key = os.path.basename(_neuestes_video() or "aktuell")
+                    # Testrenders einzelner Komponenten zaehlen nicht mit —
+                    # die heissen custom-<name>-<format>.mp4 und sind Teil des
+                    # Bauens, nicht des finalen Videos.
+                    _ist_komponententest = "_custom-" in _key
+                    if not _ist_komponententest:
+                        # GESAMT zaehlen, nicht pro Dateiname: jeder neue Render
+                        # erzeugt einen neuen Zeitstempel-Namen, ein Zaehler pro
+                        # Datei kaeme daher nie ueber 1 und wuerde nie bremsen.
+                        pruef_zaehler["story"] = pruef_zaehler.get("story", 0) + 1
+                        if pruef_zaehler["story"] > 3:
+                            result = ("STOPP: Du hast dieses Video bereits 3x geprueft. Keine weitere "
+                                      "Nachbesserung an diesem Motiv — das Ergebnis ist gut genug. Melde Rui "
+                                      "JETZT das Video mit einem kurzen ehrlichen Fazit (was gut ist, was in "
+                                      "einer spaeteren Runde noch besser werden koennte). Keine Tools mehr.")
+                            log(f"[notbremse] Story-Review #{pruef_zaehler['story']} -> Zwangs-Freigabe")
+                            # Das ausgelieferte Video trotzdem im Dashboard sichtbar
+                            # machen (es wird ja an Rui gemeldet, auch ohne echtes
+                            # FREIGABE-Urteil aus der letzten Pruef-Runde).
+                            letztes = _neuestes_video()
+                            if letztes:
+                                _video_status_setzen(os.path.basename(letztes), "FREIGABE (Notbremse)")
+                            t_results.append({"type": "tool_result", "tool_use_id": block.id, "content": result})
+                            continue
                 result = run_tool(block.name, block.input or {}, r)
                 log(f"[tool] {block.name} -> {str(result)[:80]}")
                 t_results.append({"type": "tool_result", "tool_use_id": block.id,
@@ -1380,6 +1836,7 @@ def think(history, user_text, bilder=None, r=None):
                 "Fasse jetzt zusammen: das Konzept und die generierten Clips (mit URLs). Keine weiteren Tools."})
             resp2 = client.messages.create(model=MODEL, max_tokens=MAX_TOKENS,
                                            system=SYS_CACHED, messages=messages)
+            _erfasse(resp2)
             t2 = "".join(b.text for b in resp2.content if b.type == "text").strip()
             if t2:
                 final_text = t2

@@ -2,6 +2,16 @@
 
 Automatisch gepflegt von JARVIS aus den Commit-Messages. Nicht von Hand bearbeiten.
 
+## 2026-08-12
+- `f511876` Publishing-Entwuerfe (post_entwurf), E-17 custom-Liste-Fix, beispiel.jsx entfernt, Recorder retired
+- `823e0d2` Higgsfield-Hintergrundlayer: Download + Mount + OffthreadVideo-Loop in StorySequenz, Prompt-Regeln
+- `aced16a` 3 Bugs gefixt (Notbremse, Easing-Warnung, Format-Wahl) + ElevenLabs Musik-Lizenzregeln
+- `8c48721` Selbst-Review-Loop (video_pruefen) + Notbremse, 4 -pro Stile, Motion-Prinzipien, Marken-Schreibweise, Easing-Warnung, Format-Wahl
+- `1dc2fde` szenen echt angeschlossen (GlasPanel-Look), zahl/AussageSeg bekommen durchgehendes Leben — alle 5 Grundstile jetzt auf Niveau
+- `3bb27b0` Motion-Fix: formen/kinetic echt angeschlossen, Uebergaenge entkoppelt + getuned, durchgehendes Leben in allen Grundstilen
+
+Automatisch gepflegt von JARVIS aus den Commit-Messages. Nicht von Hand bearbeiten.
+
 ## 2026-08-11
 - `9e8f45b` Regie-Bot: Layout-Regeln fuer UI-Nachbau; tool-karten final
 - `cc4918f` Dashboard-Hero: Vollbild-Layout, Original-Fonts, neuer Hintergrund

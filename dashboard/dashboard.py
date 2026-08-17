@@ -17,7 +17,7 @@ import redis
 import requests
 import psycopg2
 import psycopg2.extras
-from fastapi import FastAPI, Body
+from fastapi import FastAPI, Body, UploadFile, File
 from fastapi.responses import HTMLResponse, JSONResponse, FileResponse, PlainTextResponse
 import uvicorn
 try:
@@ -82,6 +82,21 @@ BOTS = {
                      "lauf": "Tagesrecherche täglich (Uhrzeit aus SEO_DAILY_TIME, derzeit 19:00)",
                      "faehig": ["Relevanzfilter nach Themen", "Relevanzfilter", "Entwürfe in vault/seo/", "Postet selbst nichts — Rui gibt frei"],
                      "bib": False},
+    "regie":        {"label": "STUDIO / REGIE", "inbox": "bot:regie:inbox",     "reply": "bot:regie:reply:{id}",     "parent": "buroflow-ceo",       "desc": "Video-Studio, Motion-Regie", "history": "bot:regie:history",
+                     "rolle": "Kreativer Kopf des Video-Studios: baut komplette Motion-Videos (Story-Arc, custom-Komponenten, Higgsfield-Hintergründe, SFX/Musik), prüft sich selbst (video_pruefen) und erstellt Publishing-Entwürfe.",
+                     "lauf": "Arbeitet auf Auftrag (Studio-Reiter oder Redis)",
+                     "faehig": ["Motion-Videos bauen (story_video)", "custom-Komponenten bauen", "UI aus GitHub nachbauen", "Higgsfield-Hintergründe", "SFX/Musik generieren", "Selbst-Review", "Post-Entwürfe"],
+                     "bib": False},
+    "render":       {"label": "RENDER", "inbox": "bot:render:inbox",     "reply": "bot:render:reply:{id}",     "parent": "regie",       "desc": "Remotion-Render-Server", "history": "",
+                     "rolle": "Rendert die von der Regie geplanten Kompositionen mit Remotion zu fertigen MP4-Videos (60fps).",
+                     "lauf": "Arbeitet auf Render-Aufträge der Regie",
+                     "faehig": ["Remotion-Rendering (tiktok/linkedin/quadrat)", "custom-Komponenten", "Story-Sequenzen", "Higgsfield-Layer"],
+                     "bib": False, "kein_chat": True},
+    "camofox":      {"label": "CAMOFOX", "inbox": "", "reply": "", "parent": "regie", "desc": "Browser für Higgsfield", "history": "",
+                     "rolle": "Headless-Browser-Dienst, über den die Regie Higgsfield-Clips generiert und abruft.",
+                     "lauf": "Auf Zuruf der Regie",
+                     "faehig": ["Higgsfield-API über Browser", "Clip-Generierung"],
+                     "bib": False, "kein_chat": True},
 }
 
 app = FastAPI()
@@ -157,15 +172,19 @@ def count_listeners():
 @app.get("/api/stats")
 def stats():
     listeners = count_listeners()
+    # Studio-Bots (render/camofox) sind keine klassischen blpop-Chat-Listener —
+    # sie sollen die "X/Y online"-Zaehlung nicht verfaelschen. expected zaehlt
+    # nur echte Listener-Bots + Telegram-Bruecke.
+    listener_bots = sum(1 for b in BOTS.values() if not b.get("kein_listener") and not b.get("kein_chat"))
     # Die Telegram-Bruecke wartet ebenfalls mit blpop (auf Bot-Antworten) und
     # wird mitgezaehlt, ist aber kein Bot in BOTS. Ohne +1 stand hier dauerhaft
     # 6/5, obwohl alles korrekt lief.
-    out = {"listeners": listeners, "expected": len(BOTS) + 1,
+    out = {"listeners": listeners, "expected": listener_bots + 1,
            "today": 0.0, "month": 0.0, "total": 0.0,
            "requests": 0, "queue": 0, "bots": [], "log": []}
     try:
         r = rds()
-        out["queue"] = sum(r.llen(b["inbox"]) for b in BOTS.values())
+        out["queue"] = sum(r.llen(b["inbox"]) for b in BOTS.values() if b.get("inbox"))
     except Exception:
         pass
     known = {}
@@ -233,7 +252,7 @@ def stats():
         pass
 
     maxcost = max([k.get("cost", 0) for k in known.values()] + [0.0001])
-    online_all = listeners >= len(BOTS)
+    online_all = listeners >= listener_bots
     for key, meta in BOTS.items():
         k = known.get(key, {"cost": 0.0, "requests": 0, "last_seen": "-", "recent": False})
         out["bots"].append({"id": key, "label": meta["label"], "parent": meta["parent"],
@@ -257,6 +276,8 @@ def chat(payload: dict = Body(...)):
     text = (payload.get("text") or "").strip()
     if target not in BOTS:
         return JSONResponse({"error": f"Unbekanntes Ziel: {target}"}, status_code=400)
+    if BOTS[target].get("kein_chat"):
+        return JSONResponse({"error": f"{BOTS[target]['label']} nimmt keine Chat-Auftraege"}, status_code=400)
     bilder = payload.get("bilder") or []
     if not text and not bilder:
         return JSONResponse({"error": "Leere Nachricht"}, status_code=400)
@@ -659,11 +680,12 @@ def api_stream():
     try:
         conn = pg()
         with conn, conn.cursor() as cur:
-            cur.execute("""SELECT bot, aktion, to_char(created_at,'HH24:MI:SS') AS zeit,
+            cur.execute("""SELECT bot, aktion, ergebnis, datei, to_char(created_at,'HH24:MI:SS') AS zeit,
                                   EXTRACT(EPOCH FROM (now()-created_at)) AS alt
-                           FROM arbeit_log ORDER BY created_at DESC LIMIT 20""")
-            for bot, aktion, zeit, alt in cur.fetchall():
+                           FROM arbeit_log ORDER BY created_at DESC LIMIT 40""")
+            for bot, aktion, ergebnis, datei, zeit, alt in cur.fetchall():
                 events.append({"bot": bot, "aktion": (aktion or "")[:60],
+                               "ergebnis": (ergebnis or "")[:400], "datei": (datei or "")[:200],
                                "zeit": zeit, "alt": int(alt or 0)})
         conn.close()
     except Exception:
@@ -1055,6 +1077,225 @@ def vault_delete(payload: dict = Body(...)):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+# ═══ STUDIO (Video-Regie) ═══
+STUDIO_INBOX = "bot:regie:inbox"
+
+@app.post("/api/studio/verfeinern")
+def studio_verfeinern(payload: dict = Body(...)):
+    """Baut aus einer kurzen Idee ein vollstaendiges Briefing fuer das Video-
+    Studio — Thema, Kernbotschaft, Zielgruppe/Ton, Tool, Format, CTA. Legt
+    KEINEN Story-Arc/Segmentplan fest, das bleibt die kreative Freiheit der
+    Regie. Ergebnis kommt zurueck zum Pruefen/Bearbeiten, wird nicht automatisch
+    gesendet."""
+    if _anthropic is None:
+        return JSONResponse({"error": "Anthropic nicht verfuegbar"}, status_code=500)
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"error": "Leere Eingabe"}, status_code=400)
+    # Vorhandene Referenzvideos ermitteln, damit das Briefing sie nur dann
+    # erwaehnt, wenn es sie wirklich gibt.
+    ref_namen = []
+    try:
+        ref_dir = os.path.join(VAULT_DIR, "referenzen")
+        if os.path.isdir(ref_dir):
+            ref_namen = [f for f in os.listdir(ref_dir)
+                         if f.lower().endswith((".mp4", ".mov", ".webm", ".m4v"))][:5]
+    except Exception:
+        ref_namen = []
+    ref_hinweis = (f"\nVorhandene Referenzvideos im Studio: {', '.join(ref_namen)}. "
+                   "Erwaehne sie im Briefing als verbindliche Orientierung fuer Tempo, Schnitt "
+                   "und visuelle Dichte.\n") if ref_namen else "\nEs sind KEINE Referenzvideos vorhanden — erwaehne also auch keine.\n"
+    prompt = (
+        "Du hilfst, aus einer kurzen, vagen Videoidee ein vollstaendiges BRIEFING fuer ein "
+        "KI-Video-Studio zu bauen (Büroflow: deutsches KI-SaaS fuer Buerokram-Automatisierung — "
+        "die vier Tools heissen Mahnflow, Mailflow, Angebotsflow, E-Rechnungsflow; Zielgruppe "
+        "Selbststaendige/Freelancer/kleine Unternehmen; Marken-CTA: buroflow.de).\n\n"
+        f"Kurze Idee von Rui: \"{text}\"\n"
+        f"{ref_hinweis}\n"
+        "Schreibe daraus ein klares Briefing auf Deutsch in ZWEI Absaetzen (Fliesstext, keine "
+        "Ueberschriften/Markdown, wie ein Auftrag an ein Kreativteam):\n\n"
+        "ABSATZ 1 — Das inhaltliche Briefing:\n"
+        "- Thema/Anlass\n- Kernbotschaft (die EINE Sache, die haengen bleiben soll)\n"
+        "- Welches Tool im Fokus (falls erkennbar, sonst Büroflow als Gesamtplattform)\n"
+        "- Zielgruppe & Ton\n- Format (tiktok 9:16 / linkedin 16:9 / quadrat 1:1) mit kurzer Begruendung\n"
+        "- CTA (immer zu buroflow.de)\n\n"
+        "ABSATZ 2 — Produktionsvorgaben (technischer Rahmen, IMMER mit angeben):\n"
+        "- Passende Segmentzahl zur Videolaenge nennen (Faustregel: ca. 1 Segment pro 3-4 Sekunden, "
+        "also z.B. 'etwa 7-9 Segmente' bei 30 Sekunden), Motion-Design und UI im Wechsel\n"
+        "- Echtes Büroflow-UI als CODE-NACHBAU aus dem Repo (kein Screenshot, kein Mockup) — "
+        "vorhandene custom-Komponenten nutzen oder neue nach echtem Quellcode bauen\n"
+        "- Mit durchgehender Hintergrundmusik und SFX an den Uebergaengen\n"
+        "- Logo am Ende\n"
+        "- Abschliessender Hinweis: zuerst ALLE Segmente bauen und mit story_video zum kompletten "
+        "Video zusammensetzen, erst danach in die Review-Schleife fuers Gesamtergebnis — nicht "
+        "einzelne Komponenten endlos perfektionieren\n\n"
+        "WICHTIG: Lege KEINEN Story-Arc, keine konkreten Szenen und keine Stile fest — das "
+        "entscheidet das Regie-Team selbst kreativ. Absatz 2 ist nur der handwerkliche Rahmen. "
+        "Erfinde keine Features, die es nicht gibt. Markenname immer 'Büroflow' mit ü. "
+        "Halte beide Absaetze zusammen unter 220 Woertern."
+    )
+    try:
+        resp = _anthropic.messages.create(
+            model=HEALTH_MODELL, max_tokens=900,
+            messages=[{"role": "user", "content": prompt}])
+        txt = "".join(b.text for b in resp.content if getattr(b, "type", "") == "text").strip()
+        return JSONResponse({"text": txt})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.post("/api/studio/referenz_upload")
+async def studio_referenz_upload(datei: UploadFile = File(...)):
+    """Laedt ein Referenz-Video hoch (vault/referenzen/), das die Regie mit
+    'referenz_analysieren' (Bild-KI) auswerten kann, um dessen Motion-Sprache
+    nachzubauen."""
+    name = os.path.basename(datei.filename or "")
+    if not name.lower().endswith((".mp4", ".mov", ".webm", ".m4v")):
+        return JSONResponse({"error": "Nur Videodateien (.mp4/.mov/.webm/.m4v)"}, status_code=400)
+    ref_dir = os.path.join(VAULT_DIR, "referenzen")
+    os.makedirs(ref_dir, exist_ok=True)
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    safe_name = f"{ts}_{name}"
+    full = os.path.join(ref_dir, safe_name)
+    try:
+        with open(full, "wb") as f:
+            while True:
+                chunk = await datei.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse({"ok": True, "name": safe_name, "path": f"referenzen/{safe_name}"})
+
+
+@app.get("/api/studio/referenzen")
+def studio_referenzen():
+    """Listet vorhandene Referenz-Videos."""
+    ref_dir = os.path.join(VAULT_DIR, "referenzen")
+    out = []
+    try:
+        if os.path.isdir(ref_dir):
+            files = [f for f in os.listdir(ref_dir) if f.lower().endswith((".mp4", ".mov", ".webm", ".m4v"))]
+            files.sort(key=lambda f: os.path.getmtime(os.path.join(ref_dir, f)), reverse=True)
+            for f in files:
+                st = os.stat(os.path.join(ref_dir, f))
+                out.append({"name": f, "path": f"referenzen/{f}",
+                            "size_mb": round(st.st_size / 1048576, 1)})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse({"referenzen": out})
+
+
+@app.post("/api/studio/auftrag")
+def studio_auftrag(payload: dict = Body(...)):
+    """Schickt einen Video-Auftrag an den Regie-Bot (bot:regie:inbox)."""
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return JSONResponse({"error": "Leerer Auftrag"}, status_code=400)
+    fmt = (payload.get("format") or "").strip().lower()
+    if fmt in ("tiktok", "linkedin", "quadrat"):
+        text = f"[Format: {fmt}] {text}"
+    try:
+        r = rds()
+        req_id = str(uuid.uuid4())
+        auftrag = {"id": req_id, "text": text}
+        r.rpush(STUDIO_INBOX, json.dumps(auftrag, ensure_ascii=False))
+        return JSONResponse({"id": req_id, "queued": True})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
+@app.get("/api/studio/videos")
+def studio_videos(n: int = 12):
+    """Listet NUR die finalen, vom Selbst-Review freigegebenen Videos aus
+    vault/videos/. Der Regie-Bot markiert das Urteil je Datei in
+    vault/videos/_status.json (video_pruefen). Videos ohne FREIGABE-Markierung
+    (Testrunden, Nachbesserungen, Altbestand vor dem Feature) erscheinen
+    bewusst NICHT — das Archiv soll nur fertige Versionen zeigen."""
+    vdir = os.path.join(VAULT_DIR, "videos")
+    status_pfad = os.path.join(vdir, "_status.json")
+    status = {}
+    try:
+        if os.path.isfile(status_pfad):
+            with open(status_pfad, "r", encoding="utf-8") as f:
+                status = json.load(f)
+    except Exception:
+        status = {}
+    out = []
+    try:
+        if os.path.isdir(vdir):
+            mp4s = [os.path.join(vdir, f) for f in os.listdir(vdir) if f.lower().endswith(".mp4")]
+            mp4s.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            for p in mp4s:
+                st = os.stat(p)
+                if st.st_size < 2048:  # kaputte/leere Renders ausblenden
+                    continue
+                name = os.path.basename(p)
+                if "_vorschau" in name:
+                    continue  # Grob-Renders des Bots gehoeren nicht ins Archiv
+                eintrag = status.get(name)
+                if not eintrag or not str(eintrag.get("urteil", "")).upper().startswith("FREIGABE"):
+                    continue  # nur finale, freigegebene Videos
+                out.append({"name": name,
+                            "path": f"videos/{name}",
+                            "size_mb": round(st.st_size / 1048576, 1),
+                            "mtime": datetime.fromtimestamp(st.st_mtime).strftime("%d.%m. %H:%M")})
+                if len(out) >= n:
+                    break
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse({"videos": out})
+
+
+@app.get("/api/studio/posts")
+def studio_posts(n: int = 12):
+    """Listet nur die VIDEO-Publishing-Entwuerfe des Regie-Bots aus vault/posts/.
+    Erkennung ueber den INHALT: nur das Tool post_entwurf schreibt eine
+    '**Video:**'-Zeile mit Pfad zum gerenderten Video. Der Dateiname allein
+    reicht nicht — die Creatives des Marketing-Bots heissen teils genauso."""
+    pdir = os.path.join(VAULT_DIR, "posts")
+    out = []
+    try:
+        if os.path.isdir(pdir):
+            mds = [os.path.join(pdir, f) for f in os.listdir(pdir) if f.lower().endswith(".md")]
+            mds.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+            for p in mds:
+                try:
+                    with open(p, "r", encoding="utf-8", errors="ignore") as f:
+                        kopf = f.read(600)
+                except Exception:
+                    continue
+                if "**Video:**" not in kopf or "vault/videos/" not in kopf:
+                    continue  # kein Video-Entwurf -> gehoert nicht ins Studio
+                st = os.stat(p)
+                name = os.path.basename(p)
+                # Video-Dateiname aus dem Kopf ziehen (fuer die Anzeige)
+                video = ""
+                for zeile in kopf.splitlines():
+                    if "vault/videos/" in zeile:
+                        video = zeile.split("vault/videos/")[-1].strip().strip("`* ")
+                        break
+                out.append({"name": name,
+                            "path": f"posts/{name}",
+                            "video": video,
+                            "mtime": datetime.fromtimestamp(st.st_mtime).strftime("%d.%m. %H:%M")})
+                if len(out) >= n:
+                    break
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    return JSONResponse({"posts": out})
+
+
+@app.get("/api/studio/video")
+def studio_video(path: str = ""):
+    """Streamt ein Video aus dem Vault (fuer <video>-Tag im Studio-Reiter)."""
+    full = _safe_vault_path(path)
+    if not full or not os.path.isfile(full) or not full.lower().endswith(".mp4"):
+        return JSONResponse({"error": "Video nicht gefunden"}, status_code=404)
+    return FileResponse(full, media_type="video/mp4")
+
+
 @app.get("/", response_class=HTMLResponse)
 def index():
     # Kurs erst hier einsetzen, damit eine .env-Aenderung ohne Rebuild greift
@@ -1145,6 +1386,178 @@ HTML = """<!DOCTYPE html>
   .dot.on { background: var(--green); box-shadow: 0 0 9px rgba(93, 202, 165, .8); }
 
   /* Bueroflow-Reiter */
+  .studioView { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden;
+                scrollbar-width: thin; padding: 88px 26px 34px; z-index: 1; }
+  .stInner { max-width: 1120px; margin: 0 auto; }
+  .stTopline { display: flex; align-items: center; justify-content: space-between; margin-bottom: 18px; }
+  .stTitle { font-size: 16px; letter-spacing: .3em; color: #eaf9ff; font-weight: 600; }
+  .stSub { font-size: 10px; letter-spacing: .2em; color: var(--cyan); opacity: .55; margin-left: 12px; }
+  .stLive { display: flex; align-items: center; gap: 8px; font-size: 11px; letter-spacing: .12em;
+            color: #9fd8ee; padding: 6px 13px; border: 0.5px solid rgba(89,215,255,.25); border-radius: 20px;
+            background: rgba(89,215,255,.05); }
+  .stDot { width: 7px; height: 7px; border-radius: 50%; background: #59d7ff; box-shadow: 0 0 8px #59d7ff;
+           animation: stpulse 2s ease-in-out infinite; }
+  .stLive.busy .stDot { background: #ffd166; box-shadow: 0 0 8px #ffd166; }
+  .stLive.busy { border-color: rgba(255,209,102,.4); color: #ffe4a3; }
+  @keyframes stpulse { 0%,100%{opacity:1} 50%{opacity:.35} }
+
+  .stConsole { position: relative; border: 0.5px solid rgba(89,215,255,.3); border-radius: 16px;
+               padding: 18px 20px 16px; margin-bottom: 24px; overflow: hidden;
+               background: linear-gradient(160deg, rgba(89,215,255,.09), rgba(6,18,28,.72)); }
+  .stConsoleGlow { position: absolute; top: -60%; left: -10%; width: 60%; height: 200%;
+                   background: radial-gradient(ellipse, rgba(89,215,255,.14), transparent 60%);
+                   pointer-events: none; animation: stdrift 14s ease-in-out infinite alternate; }
+  @keyframes stdrift { 0%{transform:translateX(0)} 100%{transform:translateX(120%)} }
+  .stConsoleLabel { font-size: 9px; letter-spacing: .28em; color: var(--cyan); opacity: .7; margin-bottom: 9px; position: relative; }
+  .stTextarea { position: relative; width: 100%; min-height: 84px; max-height: 320px; resize: vertical;
+                background: rgba(0,8,14,.55);
+                border: 0.5px solid rgba(89,215,255,.22); border-radius: 10px; color: #e4f6ff;
+                font-family: inherit; font-size: 13.5px; line-height: 1.55; padding: 12px 14px; box-sizing: border-box;
+                overflow-y: auto; scrollbar-width: thin; }
+  .stTextarea::-webkit-scrollbar { width: 6px; }
+  .stTextarea::-webkit-scrollbar-thumb { background: rgba(89,215,255,.25); border-radius: 3px; }
+  .stTextarea:focus { outline: none; border-color: rgba(89,215,255,.55); box-shadow: 0 0 0 3px rgba(89,215,255,.08); }
+  .stAuftragBar { display: flex; align-items: center; gap: 12px; margin-top: 13px; position: relative;
+                  flex-wrap: wrap; }
+  .stFmtGroup { display: flex; gap: 4px; padding: 3px; border: 0.5px solid rgba(89,215,255,.2);
+                border-radius: 9px; background: rgba(0,8,14,.4); flex-shrink: 0; }
+  .stFmt { font-size: 11px; letter-spacing: .06em; color: #7fa8bd; padding: 6px 12px; border-radius: 7px;
+           cursor: pointer; transition: all .14s; white-space: nowrap; }
+  .stFmt:hover { color: #cfeeff; }
+  .stFmt.active { background: rgba(89,215,255,.2); color: #eaf9ff; box-shadow: inset 0 0 0 0.5px rgba(89,215,255,.4); }
+  .stBarSpacer { flex: 1; }
+  .stBtn { background: linear-gradient(135deg, rgba(89,215,255,.28), rgba(89,215,255,.14));
+           border: 0.5px solid rgba(89,215,255,.5); color: #eaf9ff; font-size: 12px; letter-spacing: .1em;
+           padding: 10px 22px; border-radius: 9px; cursor: pointer; font-family: inherit; font-weight: 600;
+           transition: all .15s; white-space: nowrap; flex-shrink: 0; }
+  .stBtn:hover { background: linear-gradient(135deg, rgba(89,215,255,.42), rgba(89,215,255,.22));
+                 box-shadow: 0 0 16px rgba(89,215,255,.25); }
+  .stBtn:disabled { opacity: .5; cursor: default; box-shadow: none; }
+  .stBtnGhost { background: rgba(89,215,255,.06); border-color: rgba(89,215,255,.28); font-weight: 400; }
+  .stBtnGhost:hover { background: rgba(89,215,255,.14); box-shadow: none; }
+  .stUploadBtn { font-size: 11px; letter-spacing: .05em; color: #9fd4e8; padding: 8px 13px;
+                 border: 0.5px dashed rgba(89,215,255,.35); border-radius: 8px; cursor: pointer;
+                 transition: all .15s; white-space: nowrap; }
+  .stUploadBtn:hover { border-color: rgba(89,215,255,.6); color: #eaf9ff; background: rgba(89,215,255,.06); }
+  .stRefList { display: flex; flex-wrap: wrap; gap: 7px; margin-top: 10px; }
+  .stRefChip { font-size: 10px; color: #8fd4ec; padding: 5px 10px; border-radius: 20px;
+               border: 0.5px solid rgba(89,215,255,.22); background: rgba(89,215,255,.05); }
+  .stStatus { font-size: 11px; color: #8fd4ec; opacity: .9; line-height: 1.4; max-width: 260px;
+              text-align: right; }
+
+  .stStageHd { font-size: 10px; letter-spacing: .24em; color: var(--cyan); margin: 4px 0 12px;
+               display: flex; justify-content: space-between; align-items: center; }
+  .stRefresh { cursor: pointer; opacity: .55; font-size: 14px; }
+  .stRefresh:hover { opacity: 1; }
+  .stMain { display: grid; grid-template-columns: 1fr 290px; gap: 12px; margin-bottom: 4px; align-items: stretch; }
+  .stSide { min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+  .stFeed { border: 0.5px solid rgba(89,215,255,.16); border-radius: 12px;
+            background: rgba(9,22,33,.4); flex: 1 1 0; min-height: 0;
+            overflow-y: auto; scrollbar-width: thin; }
+  .stFeed::-webkit-scrollbar { width: 6px; }
+  .stFeed::-webkit-scrollbar-thumb { background: rgba(89,215,255,.25); border-radius: 3px; }
+  @media (max-width: 1000px) { .stMain { grid-template-columns: 1fr; } }
+  .stMonitor { min-width: 0; display: flex; flex-direction: column; min-height: 0; }
+  .stFeedRow { display: flex; align-items: baseline; gap: 9px; padding: 9px 13px;
+               border-left: 2px solid rgba(89,215,255,.35); border-bottom: 0.5px solid rgba(89,215,255,.07);
+               transition: background .14s, border-left-color .14s; }
+  .stFeedRow.klick { cursor: pointer; }
+  .stFeedRow.klick:hover { background: rgba(89,215,255,.08); border-left-color: rgba(89,215,255,.9); }
+  .stFeedRow.klick:hover .stFeedGo { opacity: 1; transform: translateX(0); }
+  .stFeedGo { margin-left: auto; font-size: 11px; color: var(--cyan); opacity: 0;
+              transform: translateX(-4px); transition: opacity .14s, transform .14s; }
+  .stFeedRow:last-child { border-bottom: none; }
+  .stFeedTime { font-size: 10px; color: #6f9bb0; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .stFeedTxt { font-size: 11px; color: #cfe8f5; line-height: 1.4; }
+  .stHeroBar { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 11px; align-items: center; }
+  .stTag { font-size: 10px; letter-spacing: .05em; color: #9fd4e8; padding: 5px 11px; border-radius: 6px;
+           border: 0.5px solid rgba(89,215,255,.22); background: rgba(89,215,255,.06); }
+  .stTag.ok { color: #9ff5c8; border-color: rgba(93,202,165,.4); background: rgba(93,202,165,.1); }
+  .stArchivHd { font-size: 9px; letter-spacing: .26em; color: #6f9bb0; margin: 24px 0 11px;
+                display: flex; align-items: center; gap: 10px; }
+  .stArchivHd::after { content: ''; flex: 1; height: 1px;
+                       background: linear-gradient(90deg, rgba(89,215,255,.18), transparent); }
+  .stArchivCount { color: var(--cyan); opacity: .7; }
+  .stStrip { display: flex; gap: 11px; overflow-x: auto; padding-bottom: 10px; scrollbar-width: thin; }
+  .stStrip::-webkit-scrollbar { height: 6px; }
+  .stStrip::-webkit-scrollbar-thumb { background: rgba(89,215,255,.2); border-radius: 3px; }
+  .stStripItem { flex: 0 0 168px; border: 0.5px solid rgba(89,215,255,.14); border-radius: 10px;
+                 overflow: hidden; cursor: pointer; background: rgba(9,22,33,.45);
+                 transition: border-color .16s, transform .16s; }
+  .stStripItem:hover { border-color: rgba(89,215,255,.5); transform: translateY(-2px); }
+  .stPostGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 11px; }
+  .stPostCard { border: 0.5px solid rgba(89,215,255,.16); border-radius: 11px; padding: 13px 15px;
+                background: linear-gradient(160deg, rgba(89,215,255,.05), rgba(9,22,33,.5));
+                cursor: pointer; transition: border-color .16s, transform .16s; }
+  .stPostCard:hover { border-color: rgba(89,215,255,.45); transform: translateY(-2px); }
+  .stPostTitle { font-size: 12px; color: #e4f6ff; margin-bottom: 5px; word-break: break-word; }
+  .stPostMeta { font-size: 10px; color: #6f9bb0; display: flex; justify-content: space-between; align-items: center; }
+  .stPostBadge { font-size: 9px; letter-spacing: .1em; color: #9ff5c8; padding: 3px 8px; border-radius: 5px;
+                 border: 0.5px solid rgba(93,202,165,.35); background: rgba(93,202,165,.08); }
+  .stStage { margin-bottom: 26px; }
+  .stWork { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 20px; text-align: center; }
+  .stWorkRing { width: 46px; height: 46px; border-radius: 50%;
+                border: 2px solid rgba(89,215,255,.16); border-top-color: var(--cyan);
+                animation: stspin 1.1s linear infinite; }
+  @keyframes stspin { to { transform: rotate(360deg); } }
+  .stWorkTxt { font-size: 13px; color: #e4f6ff; letter-spacing: .04em; }
+  .stWorkSub { font-size: 11px; color: #6f9bb0; }
+  .stHero { position: relative; border: 0.5px solid rgba(89,215,255,.28); border-radius: 14px;
+            overflow: hidden; background: #050d14; cursor: pointer; width: 100%;
+            aspect-ratio: 16/9; max-height: 400px; display: flex; align-items: center; justify-content: center;
+            transition: border-color .15s; }
+  .stHero:hover { border-color: rgba(89,215,255,.55); }
+  .stHero video, .stHero .stHeroThumb { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .stHeroOverlay { position: absolute; left: 0; right: 0; bottom: 0; padding: 14px 16px;
+                   background: linear-gradient(transparent, rgba(2,10,16,.9)); pointer-events: none; }
+  .stHeroName { font-size: 12px; color: #eaf9ff; }
+  .stHeroMeta { font-size: 10px; color: #8fb8cc; margin-top: 3px; }
+  .stHeroPlay { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+                width: 54px; height: 54px; border-radius: 50%; background: rgba(89,215,255,.22);
+                border: 0.5px solid rgba(89,215,255,.5); display: flex; align-items: center; justify-content: center;
+                font-size: 18px; color: #eaf9ff; backdrop-filter: blur(4px); }
+  .stGrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); gap: 14px; }
+  .stCard { border: 0.5px solid rgba(89,215,255,.14); border-radius: 12px; overflow: hidden;
+            background: linear-gradient(165deg, rgba(89,215,255,.04), rgba(9,22,33,.5));
+            cursor: pointer; transition: border-color .18s, transform .18s, box-shadow .18s; }
+  .stCard:hover { border-color: rgba(89,215,255,.5); transform: translateY(-3px);
+                  box-shadow: 0 10px 28px rgba(0,0,0,.4), 0 0 22px rgba(89,215,255,.1); }
+  .stCardBody { padding: 10px 12px 11px; }
+  .stCardName { font-size: 11px; color: #dff3ff; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stCardMeta { font-size: 9.5px; color: #6f9bb0; margin-top: 3px; letter-spacing: .04em; }
+  .stCardThumb { aspect-ratio: 16/9; background: rgba(0,8,14,.6); display: flex; align-items: center;
+                 justify-content: center; color: rgba(89,215,255,.4); font-size: 20px; position: relative;
+                 overflow: hidden; }
+  .stCardThumb video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .stCardPlay { position: absolute; top: 50%; left: 50%; transform: translate(-50%,-50%);
+                width: 26px; height: 26px; border-radius: 50%; background: rgba(0,8,14,.55);
+                border: 0.5px solid rgba(89,215,255,.4); display: flex; align-items: center;
+                justify-content: center; font-size: 10px; color: #eaf9ff; pointer-events: none; }
+  .stCardBody { padding: 8px 10px; }
+  .stCardName { font-size: 10.5px; color: #cfe8f5; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .stCardMeta { font-size: 9px; color: #6f9bb0; margin-top: 2px; }
+
+  .stPostsWrap { margin-bottom: 10px; }
+  .stPostList { display: flex; flex-direction: column; gap: 8px; }
+  .stItem { border: 0.5px solid rgba(89,215,255,.18); border-radius: 10px; padding: 11px 14px;
+            background: rgba(9,22,33,.4); cursor: pointer; transition: border-color .15s, background .15s;
+            display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+  .stItem:hover { border-color: rgba(89,215,255,.42); background: rgba(89,215,255,.06); }
+  .stItemName { font-size: 12px; color: #dff3ff; word-break: break-all; }
+  .stItemMeta { font-size: 10px; color: #7fa8bd; white-space: nowrap; }
+
+  .stModal { position: fixed; inset: 0; background: rgba(0,6,12,.75); backdrop-filter: blur(5px);
+             z-index: 200; display: flex; align-items: center; justify-content: center; padding: 40px; }
+  .stModalBox { width: 100%; max-width: 860px; max-height: 86vh; overflow: hidden; display: flex; flex-direction: column;
+                border: 0.5px solid rgba(89,215,255,.35); border-radius: 14px; background: rgba(6,16,24,.97);
+                box-shadow: 0 20px 60px rgba(0,0,0,.5); }
+  .stModalHd { display: flex; justify-content: space-between; align-items: center; padding: 13px 18px;
+               border-bottom: 0.5px solid rgba(89,215,255,.2); font-size: 12px; color: #eaf9ff; letter-spacing: .06em; }
+  .stModalBody { overflow-y: auto; padding: 16px 18px; }
+  .stModalBody video { width: 100%; max-height: 70vh; border-radius: 8px; display: block;
+                        background: #000; object-fit: contain; }
+  .stModalBody pre { white-space: pre-wrap; word-break: break-word; font-family: inherit; font-size: 12px;
+                     line-height: 1.6; color: #cfe8f5; margin: 0; }
   .bfView { position: absolute; inset: 0; overflow-y: auto; overflow-x: hidden;
             scrollbar-width: thin; padding: 88px 26px 34px; z-index: 1; }
   .bfInner { max-width: 1080px; margin: 0 auto; }
@@ -1192,10 +1605,12 @@ HTML = """<!DOCTYPE html>
            border-radius: 12px; padding: 16px 18px; color: #ffd6da; font-size: 11px; line-height: 1.7; }
   .bfErr b { color: #ff9aa4; font-weight: 400; }
 
-  /* Agenten-Reiter: Org-Chart auf eigenem, blickdichtem Grund (keine Kugel im Hintergrund) */
+  /* Agenten-Reiter: Org-Chart auf eigenem, blickdichtem Grund (keine Kugel im Hintergrund).
+     overflow:visible (statt hidden) — Open-Space-Pan/Zoom, Karten/Linien duerfen
+     ueber den sichtbaren Rand hinaus verschoben werden, ohne abgeschnitten zu werden. */
   .agentsView { position: absolute; inset: 0; overflow: hidden;
                 display: flex; padding: 90px 26px 30px; z-index: 1; }
-  #agChart { transform-origin: 0 0; }
+  #agChart { transform-origin: 0 0; overflow: visible; }
   .agAurora { position: fixed; inset: 0; pointer-events: none; z-index: 0; }
   .agAurora i { position: absolute; border-radius: 50%; filter: blur(70px); opacity: .16; }
   .agAurora i:nth-child(1) { width: 560px; height: 560px; left: 8%; top: 12%;
@@ -1206,7 +1621,7 @@ HTML = """<!DOCTYPE html>
     background: radial-gradient(circle, #4a3a70, transparent 65%); animation: adrift1 37s ease-in-out infinite alternate-reverse; }
   @keyframes adrift1 { from { transform: translate(0, 0) scale(1); } to { transform: translate(70px, -50px) scale(1.15); } }
   @keyframes adrift2 { from { transform: translate(0, 0) scale(1.1); } to { transform: translate(-80px, 60px) scale(.95); } }
-  .agInner { max-width: 1040px; width: 100%; margin: auto; }
+  .agInner { max-width: 1040px; width: 100%; margin: auto; overflow: visible; flex: 1; position: relative; }
   .agSvg { position: absolute; top: 0; left: 0; pointer-events: none; }
   .botModal { position: fixed; top: 50%; left: 50%; width: min(560px, 92vw); max-height: 82vh;
               transform: translate(-50%, -50%) scale(.97); opacity: 0; pointer-events: none;
@@ -1236,8 +1651,10 @@ HTML = """<!DOCTYPE html>
   .bmZahl { }
   .bmZahl .v { font-size: 18px; color: #f2fbff; font-weight: 600; }
   .bmZahl .k { font-size: 8.5px; letter-spacing: .2em; color: var(--dim); }
-  .agZoom { position: absolute; right: 22px; bottom: 26px; display: flex; flex-direction: column;
-            gap: 8px; z-index: 6; }
+  /* rechts liegt das Live-Strom-Panel (218px + 20px Abstand) — die Zoom-Buttons
+     muessen davor sitzen, sonst verschwinden sie darunter. */
+  .agZoom { position: absolute; right: 258px; bottom: 26px; display: flex; flex-direction: column;
+            gap: 8px; z-index: 12; }
   .agZbtn { width: 38px; height: 38px; display: flex; align-items: center; justify-content: center;
             font-size: 17px; color: var(--cyan); cursor: pointer; user-select: none;
             background: rgba(9, 22, 33, .72); backdrop-filter: blur(10px);
@@ -1280,7 +1697,9 @@ HTML = """<!DOCTYPE html>
   .agLive::before { content:''; width:6px; height:6px; border-radius:50%; background: var(--green);
                     box-shadow: 0 0 8px var(--green); animation: agBlink 1.4s infinite; }
   @keyframes agBlink { 0%,100%{opacity:1} 50%{opacity:.3} }
-  #agStreamList { flex: 1; overflow: hidden; }
+  #agStreamList { flex: 1; overflow-y: auto; scrollbar-width: thin; min-height: 0; }
+  #agStreamList::-webkit-scrollbar { width: 5px; }
+  #agStreamList::-webkit-scrollbar-thumb { background: rgba(89,215,255,.22); border-radius: 3px; }
   .agEv { font-size: 9.5px; padding: 5px 7px; margin-bottom: 3px; border-left: 2px solid;
           border-radius: 0 4px 4px 0; background: rgba(255,255,255,.015);
           display: flex; gap: 7px; animation: agRowIn .4s ease; }
@@ -1951,6 +2370,7 @@ HTML = """<!DOCTYPE html>
     <div class="viewtabs">
       <span class="vt active" data-view="0">CORE</span>
       <span class="vt" data-view="2">AGENTEN</span>
+      <span class="vt" data-view="5">STUDIO</span>
       <span class="vt" data-view="3">BÜROFLOW</span>
       <span class="vt" data-view="1">GEHIRN</span>
       <span class="vt" data-view="4">HEALTH</span>
@@ -1987,6 +2407,63 @@ HTML = """<!DOCTYPE html>
 
   <div class="bfView" id="bfView" style="display:none">
     <div class="bfInner" id="bfInner"><div class="empty">Lade Kennzahlen …</div></div>
+  </div>
+
+  <div class="studioView" id="studioView" style="display:none">
+    <div class="stInner">
+      <div class="stTopline">
+        <div class="stTitle">VIDEO-STUDIO<span class="stSub">// REGIE-PULT</span></div>
+        <div class="stLive" id="stLive"><span class="stDot"></span><span id="stLiveText">Bereit</span></div>
+      </div>
+
+      <div class="stConsole">
+        <div class="stConsoleGlow"></div>
+        <div class="stConsoleLabel">AUFTRAG AN DAS STUDIO</div>
+        <textarea id="stText" class="stTextarea" placeholder="Beschreibe das Video … z.B. 'LinkedIn-Video: Hook wortpop „Weniger Bürokram", dann Dashboard-Hero, CTA szenen. Mit Musik.'"></textarea>
+        <div class="stAuftragBar">
+          <div class="stFmtGroup" id="stFmtGroup">
+            <span class="stFmt active" data-fmt="">Automatisch</span>
+            <span class="stFmt" data-fmt="tiktok">TikTok / Reels</span>
+            <span class="stFmt" data-fmt="linkedin">LinkedIn</span>
+            <span class="stFmt" data-fmt="quadrat">Instagram</span>
+          </div>
+          <label class="stUploadBtn" for="stRefUpload" id="stUploadLabel">+ Referenz-Video</label>
+          <input type="file" id="stRefUpload" accept="video/*" style="display:none">
+          <div class="stBarSpacer"></div>
+          <span id="stStatus" class="stStatus"></span>
+          <button id="stRefine" class="stBtn stBtnGhost">✎ VERFEINERN</button>
+          <button id="stSend" class="stBtn">▶ SENDEN</button>
+        </div>
+        <div id="stRefList" class="stRefList"></div>
+      </div>
+
+      <div class="stMain">
+        <div class="stMonitor">
+          <div class="stStageHd"><span>PRODUKTIONS-MONITOR</span><span class="stRefresh" id="stVidRefresh">\u21ba</span></div>
+          <div class="stHero" id="stHero"><div class="empty">Noch kein Video.</div></div>
+          <div class="stHeroBar" id="stHeroBar"></div>
+        </div>
+        <div class="stSide">
+          <div class="stStageHd"><span>STUDIO-AKTIVITÄT</span></div>
+          <div class="stFeed" id="stFeed"><div class="empty">—</div></div>
+        </div>
+      </div>
+
+      <div class="stArchivHd"><span>ARCHIV</span><span class="stArchivCount" id="stArchivCount"></span></div>
+      <div class="stStrip" id="stVideos"></div>
+
+      <div class="stPostsWrap">
+        <div class="stStageHd"><span>POST-ENTWÜRFE</span><span class="stRefresh" id="stPostRefresh">\u21ba</span></div>
+        <div id="stPosts" class="stPostGrid"><div class="empty">Lade …</div></div>
+      </div>
+    </div>
+
+    <div class="stModal" id="stModal" style="display:none">
+      <div class="stModalBox">
+        <div class="stModalHd"><span id="stModalTitle"></span><span class="vclose" id="stModalClose">\u2715</span></div>
+        <div class="stModalBody" id="stModalBody"></div>
+      </div>
+    </div>
   </div>
 
   <div class="agentsView" id="agentsView" style="display:none">
@@ -2185,6 +2662,24 @@ var energyTarget = 0;
 var bolts = [];
 var lastBolt = 0;
 function setEnergy(v) { energyTarget = v; }
+var studioBusy = false;
+// Globale Aktivitaetserkennung: Die Kugel reagierte bisher NUR auf eigene
+// Chat-Nachrichten. Aufträge, die im Hintergrund laufen (Studio-Panel, Redis,
+// geplante Läufe), liessen sie unberührt. Wir pollen daher den Live-Strom:
+// gab es in den letzten ~90 Sekunden Bot-Aktivität, laeuft die Kugel mit.
+function pruefeBotAktivitaet() {
+  if (typeof busy !== 'undefined' && busy) return;  // eigene Chat-Anfrage hat Vorrang
+  fetch('/api/stream').then(function(r){return r.json();}).then(function(d){
+    var evts = (d && d.events) || [];
+    var frisch = evts.length && (evts[0].alt || 999) < 90;
+    if (frisch) { setEnergy(0.85); studioBusy = true; }
+    else if (studioBusy) { setEnergy(0); studioBusy = false; }
+  }).catch(function(){});
+}
+window.addEventListener('load', function() {
+  pruefeBotAktivitaet();
+  setInterval(pruefeBotAktivitaet, 12000);
+});
 
 function spawnBolt() {
   var start = Math.floor(Math.random() * N);
@@ -3000,7 +3495,7 @@ document.getElementById('bdclose').addEventListener('click', function() {
   document.getElementById('braindetail').style.display = 'none';
 });
 
-var VIEW_ORDER = [0, 2, 3, 1];
+var VIEW_ORDER = [0, 2, 5, 3, 1];
 function setView(v) {
   currentView = v;
   document.body.className = document.body.className.replace(/\\bview-\\d\\b/g, "").trim() + " view-" + v;
@@ -3011,7 +3506,8 @@ function setView(v) {
   var agentMode = (v === 2);
   var bfMode = (v === 3);
   var healthMode = (v === 4);
-  var overlay = (brainMode || agentMode || bfMode || healthMode);
+  var studioMode = (v === 5);
+  var overlay = (brainMode || agentMode || bfMode || healthMode || studioMode);
   brainCanvas.style.display = (brainMode || agentMode) ? 'block' : 'none';
   canvas.style.display = overlay ? 'none' : 'block';
   document.querySelector('.col-left').style.display = overlay ? 'none' : 'flex';
@@ -3020,6 +3516,8 @@ function setView(v) {
   document.getElementById('bfView').style.display = bfMode ? 'block' : 'none';
   document.getElementById('agentsView').style.display = agentMode ? 'block' : 'none';
   document.getElementById('healthView').style.display = healthMode ? 'block' : 'none';
+  document.getElementById('studioView').style.display = studioMode ? 'block' : 'none';
+  if (studioMode) { loadStudioVideos(); loadStudioPosts(); loadStudioReferenzen(); loadStudioFeed(); }
   if (agentMode) { document.getElementById('agChart').innerHTML = ''; agLastHash = ''; renderAgents(lastBots); }
   document.getElementById('brainlegend').style.display = brainMode ? 'flex' : 'none';
   if (!brainMode) document.getElementById('braindetail').style.display = 'none';
@@ -3066,6 +3564,268 @@ document.querySelectorAll('.vt').forEach(function(t) {
   t.addEventListener('click', function() { setView(parseInt(t.getAttribute('data-view'))); });
 });
 
+// ═══ STUDIO ═══
+function stEsc(s) { return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+var stFormat = '';
+var stLetztesVideo = '';
+function loadStudioVideos() {
+  var hero = document.getElementById('stHero');
+  var grid = document.getElementById('stVideos');
+  var bar = document.getElementById('stHeroBar');
+  fetch('/api/studio/videos').then(function(r){return r.json();}).then(function(d){
+    var vids = (d && d.videos) || [];
+    if (!vids.length) {
+      // Kein freigegebenes Video: wenn das Studio gerade arbeitet, den
+      // aktuellen Arbeitsschritt zeigen statt eines leeren Felds.
+      var live = document.getElementById('stLive');
+      var arbeitet = live && live.classList.contains('busy');
+      hero.removeAttribute('data-path');
+      hero.innerHTML = arbeitet
+        ? '<div class="stWork"><div class="stWorkRing"></div>' +
+          '<div class="stWorkTxt" id="stWorkTxt">Studio arbeitet …</div>' +
+          '<div class="stWorkSub">Das fertige Video erscheint hier nach der Freigabe.</div></div>'
+        : '<div class="empty">Noch kein freigegebenes Video.</div>';
+      grid.innerHTML = ''; if (bar) bar.innerHTML = '';
+      var cnt0 = document.getElementById('stArchivCount'); if (cnt0) cnt0.textContent = '';
+      return;
+    }
+    var top = vids[0];
+    // Neues Video da -> Studio ist fertig, Status zuruecksetzen
+    var liveEl = document.getElementById('stLive');
+    if (liveEl && liveEl.classList.contains('busy') && stLetztesVideo && top.name !== stLetztesVideo) {
+      liveEl.classList.remove('busy');
+      document.getElementById('stLiveText').textContent = 'Bereit';
+    }
+    stLetztesVideo = top.name;
+    hero.setAttribute('data-path', top.path); hero.setAttribute('data-name', top.name);
+    hero.innerHTML = '<video src="/api/studio/video?path=' + encodeURIComponent(top.path) + '#t=0.1" preload="metadata" muted playsinline></video>' +
+      '<div class="stHeroPlay">▶</div>';
+    // Info-Leiste statt Overlay im Bild
+    if (bar) {
+      var fmt = /linkedin/i.test(top.name) ? 'LinkedIn 16:9' : (/tiktok/i.test(top.name) ? 'TikTok 9:16' : (/quadrat/i.test(top.name) ? 'Quadrat 1:1' : 'Format ?'));
+      bar.innerHTML = '<span class="stTag ok">✓ Freigegeben</span>' +
+                      '<span class="stTag">' + fmt + '</span>' +
+                      '<span class="stTag">' + top.size_mb + ' MB</span>' +
+                      '<span class="stTag">' + top.mtime + '</span>';
+    }
+    grid.innerHTML = vids.slice(1).map(function(v){
+      return '<div class="stStripItem" data-kind="video" data-path="' + stEsc(v.path) + '" data-name="' + stEsc(v.name) + '">' +
+             '<div class="stCardThumb">' +
+               '<video src="/api/studio/video?path=' + encodeURIComponent(v.path) + '#t=0.1" preload="metadata" muted playsinline></video>' +
+               '<span class="stCardPlay">▶</span>' +
+             '</div>' +
+             '<div class="stCardBody"><div class="stCardName">' + stEsc(v.name) + '</div>' +
+             '<div class="stCardMeta">' + v.mtime + ' · ' + v.size_mb + ' MB</div></div></div>';
+    }).join('');
+    var cnt = document.getElementById('stArchivCount');
+    if (cnt) cnt.textContent = vids.length > 1 ? (vids.length - 1) + ' Videos' : '';
+  }).catch(function(){ hero.innerHTML = '<div class="empty">Fehler beim Laden.</div>'; });
+}
+function loadStudioPosts() {
+  var el = document.getElementById('stPosts');
+  fetch('/api/studio/posts').then(function(r){return r.json();}).then(function(d){
+    var posts = (d && d.posts) || [];
+    if (!posts.length) { el.innerHTML = '<div class="empty">Noch keine Entwürfe.</div>'; return; }
+    el.innerHTML = posts.map(function(p){
+      // Titel aus dem zugehoerigen Video ableiten (aussagekraeftiger als der Dateiname)
+      var thema = (p.video || '').replace(/^\\d{4}-\\d{2}-\\d{2}T[\\d-]+_/, '').replace(/\\.mp4$/, '').replace(/[-_]/g, ' ');
+      if (!thema) thema = 'Publishing-Entwurf';
+      thema = thema.charAt(0).toUpperCase() + thema.slice(1);
+      return '<div class="stPostCard" data-kind="post" data-path="' + stEsc(p.path) + '" data-name="' + stEsc(p.name) + '">' +
+             '<div class="stPostTitle">' + stEsc(thema) + '</div>' +
+             '<div class="stPostMeta"><span>' + p.mtime + '</span><span class="stPostBadge">ENTWURF</span></div></div>';
+    }).join('');
+  }).catch(function(){ el.innerHTML = '<div class="empty">Fehler beim Laden.</div>'; });
+}
+function loadStudioFeed() {
+  var el = document.getElementById('stFeed');
+  if (!el) return;
+  fetch('/api/stream').then(function(r){return r.json();}).then(function(d){
+    var evts = (d && d.events) || [];
+    var mine = evts.filter(function(e){
+      var b = (e.bot || '').toLowerCase();
+      return b === 'regie' || b.indexOf('regie') >= 0 || b === 'render';
+    }).slice(0, 20);
+    // Fallback: wenn (noch) nichts vom Studio da ist, alle Ereignisse zeigen,
+    // statt ein leeres Panel — so sieht man wenigstens, dass etwas laeuft.
+    if (!mine.length) mine = evts.slice(0, 20);
+    if (!mine.length) { el.innerHTML = '<div class="empty" style="padding:14px">Noch keine Aktivität.</div>'; return; }
+    el.innerHTML = mine.map(function(e){
+      var akt = e.aktion || '';
+      return '<div class="stFeedRow klick" data-aktion="' + stEsc(akt) + '" data-zeit="' + stEsc(e.zeit || '') +
+             '" data-ergebnis="' + stEsc(e.ergebnis || '') + '" data-datei="' + stEsc(e.datei || '') + '">' +
+             '<span class="stFeedTime">' + stEsc(e.zeit || '') + '</span>' +
+             '<span class="stFeedTxt">' + stEsc(akt) + '</span>' +
+             '<span class="stFeedGo">→</span></div>';
+    }).join('');
+    // Juengste Aktion in den Produktions-Monitor spiegeln, solange gearbeitet wird
+    var wt = document.getElementById('stWorkTxt');
+    if (wt && mine[0]) wt.textContent = mine[0].aktion || 'Studio arbeitet …';
+  }).catch(function(){});
+}
+function openStudioVideo(path, name) {
+  document.getElementById('stModalTitle').textContent = name;
+  // muted ist noetig, damit Browser Autoplay ueberhaupt erlauben — ohne das
+  // blieb das Video schwarz/eingefroren ("buggt"), weil Autoplay mit Ton
+  // stillschweigend blockiert wird. playsinline fuer Mobile.
+  document.getElementById('stModalBody').innerHTML =
+    '<video controls autoplay muted playsinline preload="auto" src="/api/studio/video?path=' + encodeURIComponent(path) + '"></video>';
+  document.getElementById('stModal').style.display = 'flex';
+}
+function openStudioPost(path, name) {
+  document.getElementById('stModalTitle').textContent = name;
+  document.getElementById('stModalBody').innerHTML = '<pre>Lade …</pre>';
+  document.getElementById('stModal').style.display = 'flex';
+  fetch('/api/vault/file?path=' + encodeURIComponent(path)).then(function(r){return r.text();}).then(function(t){
+    document.getElementById('stModalBody').innerHTML = '<pre>' + stEsc(t) + '</pre>';
+  });
+}
+function loadStudioReferenzen() {
+  var box = document.getElementById('stRefList');
+  if (!box) return;
+  fetch('/api/studio/referenzen').then(function(r){return r.json();}).then(function(d){
+    var refs = (d && d.referenzen) || [];
+    box.innerHTML = refs.map(function(r){ return '<span class="stRefChip">🎞 ' + stEsc(r.name) + '</span>'; }).join('');
+  }).catch(function(){});
+}
+(function(){
+  // Format-Segmente
+  var fg = document.getElementById('stFmtGroup');
+  if (fg) fg.addEventListener('click', function(ev){
+    var f = ev.target.closest('.stFmt'); if (!f) return;
+    fg.querySelectorAll('.stFmt').forEach(function(x){ x.classList.remove('active'); });
+    f.classList.add('active'); stFormat = f.getAttribute('data-fmt') || '';
+  });
+  var sendBtn = document.getElementById('stSend');
+  var refineBtn = document.getElementById('stRefine');
+  var refUpload = document.getElementById('stRefUpload');
+  if (refUpload) refUpload.addEventListener('change', function(){
+    var f = refUpload.files && refUpload.files[0];
+    if (!f) return;
+    var st = document.getElementById('stStatus');
+    var label = document.getElementById('stUploadLabel');
+    label.textContent = 'Lade hoch …';
+    var fd = new FormData(); fd.append('datei', f);
+    fetch('/api/studio/referenz_upload', { method: 'POST', body: fd })
+      .then(function(r){return r.json();}).then(function(d){
+        label.textContent = '+ Referenz-Video';
+        refUpload.value = '';
+        if (d && d.ok) { st.textContent = '✓ Referenz „' + d.name + '" hochgeladen — die Regie kann sie mit referenz_analysieren auswerten.';
+          loadStudioReferenzen(); }
+        else { st.textContent = 'Fehler: ' + ((d && d.error) || 'Upload fehlgeschlagen'); }
+      }).catch(function(){ label.textContent = '+ Referenz-Video'; st.textContent = 'Netzwerkfehler beim Upload.'; });
+  });
+  loadStudioReferenzen();
+  // Klick auf video-bezogene Feed-Eintraege -> aktuelles Monitor-Video oeffnen
+  var feedBox = document.getElementById('stFeed');
+  if (feedBox) feedBox.addEventListener('click', function(ev){
+    var row = ev.target.closest('.stFeedRow.klick');
+    if (!row) return;
+    var akt = row.getAttribute('data-aktion') || '';
+    var zeit = row.getAttribute('data-zeit') || '';
+    var erg = row.getAttribute('data-ergebnis') || '';
+    var datei = row.getAttribute('data-datei') || '';
+    // Wenn die Aktion eine konkrete Videodatei nennt -> direkt abspielen
+    if (/\\.mp4$/i.test(datei)) {
+      var vp = datei.indexOf('videos/') === 0 ? datei : 'videos/' + datei.replace(/^.*\\//, '');
+      openStudioVideo(vp, datei.replace(/^.*\\//, ''));
+      return;
+    }
+    var body = '<div style="font-size:11px;color:#6f9bb0;letter-spacing:.1em;margin-bottom:8px">' + stEsc(zeit) + '</div>' +
+               '<div style="font-size:15px;color:#e4f6ff;line-height:1.5;margin-bottom:14px">' + stEsc(akt) + '</div>';
+    if (erg) {
+      body += '<div style="font-size:9px;letter-spacing:.24em;color:#6f9bb0;margin-bottom:6px">ERGEBNIS</div>' +
+              '<div style="font-size:12.5px;color:#cfe8f5;line-height:1.6;white-space:pre-wrap">' + stEsc(erg) + '</div>';
+    }
+    if (datei) {
+      body += '<div style="font-size:9px;letter-spacing:.24em;color:#6f9bb0;margin:14px 0 6px">DATEI</div>' +
+              '<div style="font-size:12px;color:#9fd4e8;word-break:break-all">' + stEsc(datei) + '</div>';
+    }
+    if (!erg && !datei) {
+      body += '<div style="font-size:11px;color:#6f9bb0">Keine weiteren Details protokolliert.</div>';
+    }
+    document.getElementById('stModalTitle').textContent = 'Studio-Aktivität';
+    document.getElementById('stModalBody').innerHTML = body;
+    document.getElementById('stModal').style.display = 'flex';
+  });
+  // Auto-Aktualisierung: solange der Studio-Reiter offen ist, Feed und
+  // Videoliste regelmaessig nachladen (der Bot arbeitet im Hintergrund weiter).
+  setInterval(function(){
+    if (typeof currentView !== 'undefined' && currentView === 5 &&
+        !document.getElementById('stModal').style.display.match(/flex/)) {
+      loadStudioFeed();
+      loadStudioVideos();
+    }
+  }, 10000);
+  if (refineBtn) refineBtn.addEventListener('click', function(){
+    var ta = document.getElementById('stText');
+    var txt = ta.value.trim();
+    var st = document.getElementById('stStatus');
+    if (!txt) { st.textContent = 'Erst eine kurze Idee eingeben.'; return; }
+    refineBtn.disabled = true; sendBtn.disabled = true; st.textContent = 'Verfeinere …';
+    fetch('/api/studio/verfeinern', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ text: txt }) })
+      .then(function(r){return r.json();}).then(function(d){
+        refineBtn.disabled = false; sendBtn.disabled = false;
+        if (d && d.text) {
+          ta.value = d.text;
+          // Hoehe an den neuen Inhalt anpassen (bis max-height), damit das
+          // Briefing sichtbar ist statt abgeschnitten im Feld zu stecken.
+          ta.style.height = 'auto';
+          ta.style.height = Math.min(ta.scrollHeight + 4, 320) + 'px';
+          st.textContent = 'Briefing erstellt — pruefen & ggf. anpassen, dann senden.';
+        }
+        else { st.textContent = 'Fehler: ' + ((d && d.error) || 'unbekannt'); }
+      }).catch(function(){ refineBtn.disabled = false; sendBtn.disabled = false; st.textContent = 'Netzwerkfehler.'; });
+  });
+  if (sendBtn) sendBtn.addEventListener('click', function(){
+    var txt = document.getElementById('stText').value.trim();
+    var st = document.getElementById('stStatus');
+    if (!txt) { st.textContent = 'Bitte Auftrag eingeben.'; return; }
+    sendBtn.disabled = true; st.textContent = 'Sende …';
+    fetch('/api/studio/auftrag', { method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ text: txt, format: stFormat }) })
+      .then(function(r){return r.json();}).then(function(d){
+        sendBtn.disabled = false;
+        if (d && d.queued) {
+          st.textContent = '✓ In Warteschlange — das Studio arbeitet (mehrere Minuten).';
+          document.getElementById('stText').value = '';
+          var live = document.getElementById('stLive');
+          live.classList.add('busy'); document.getElementById('stLiveText').textContent = 'Studio arbeitet …';
+          // JARVIS-Kugel im CORE-Reiter mitlaufen lassen (sie reagierte bisher
+          // nur auf Chat-Nachrichten, nicht auf Studio-Auftraege).
+          if (typeof setEnergy === 'function') setEnergy(1);
+          if (typeof studioBusy !== 'undefined') studioBusy = true;
+        } else { st.textContent = 'Fehler: ' + ((d && d.error) || 'unbekannt'); }
+      }).catch(function(){ sendBtn.disabled = false; st.textContent = 'Netzwerkfehler.'; });
+  });
+  // Hero-Klick
+  var hero = document.getElementById('stHero');
+  if (hero) hero.addEventListener('click', function(){
+    var p = hero.getAttribute('data-path'), n = hero.getAttribute('data-name');
+    if (p) openStudioVideo(p, n);
+  });
+  // Kacheln + Posts (Event-Delegation)
+  ['stVideos','stPosts'].forEach(function(id){
+    var box = document.getElementById(id);
+    if (!box) return;
+    box.addEventListener('click', function(ev){
+      var item = ev.target.closest('[data-kind]');
+      if (!item) return;
+      var path = item.getAttribute('data-path'), name = item.getAttribute('data-name');
+      if (item.getAttribute('data-kind') === 'video') openStudioVideo(path, name);
+      else openStudioPost(path, name);
+    });
+  });
+  var mc = document.getElementById('stModalClose');
+  if (mc) mc.addEventListener('click', function(){ document.getElementById('stModal').style.display = 'none';
+    document.getElementById('stModalBody').innerHTML = ''; });
+  var vr = document.getElementById('stVidRefresh');
+  if (vr) vr.addEventListener('click', loadStudioVideos);
+  var pr = document.getElementById('stPostRefresh');
+  if (pr) pr.addEventListener('click', loadStudioPosts);
+})();
+
 var agStreamTimer = null, agClockTimer = null;
 var AG_KURZ = { 'buroflow-ceo':'CEO', 'marketing':'SOCIAL', 'seo':'SEO', 'immo':'IMMO',
                 'jarvis':'JARVIS', 'telegram':'TG' };
@@ -3075,7 +3835,7 @@ function loadStream() {
     var list = document.getElementById('agStreamList');
     var plan = document.getElementById('agStreamPlan');
     if (list) {
-      list.innerHTML = (d.events || []).slice(0, 9).map(function(e) {
+      list.innerHTML = (d.events || []).slice(0, 20).map(function(e) {
         var kurz = AG_KURZ[e.bot] || (e.bot || '').toUpperCase().slice(0,6);
         return '<div class="agEv" style="border-left-color:' + agColor(e.bot) + '">' +
                '<span class="et">' + esc((e.zeit||'').slice(0,5)) + '</span>' +
@@ -3168,8 +3928,25 @@ function agZoomAt(mx, my, factor) {
 }
 var agPan = null;
 
+// agCustomPos-Version: erhoeht sich, wenn sich die Baum-Struktur aendert
+// (neue Bots wie regie/render/camofox kamen dazu). Alte gespeicherte
+// Drag-Positionen aus VORHERIGEN Baum-Versionen wuerden sonst die frisch
+// berechnete Position ueberschreiben und Knoten "durchs Bild fliegen"
+// lassen (genau das war der Bugreport: REGIE/RENDER/CAMOFOX ohne sichtbare
+// Verbindung). Bei Versionswechsel wird der gespeicherte Stand verworfen.
+var AG_POS_VERSION = 3;
 var agCustomPos = {};
-try { agCustomPos = JSON.parse(localStorage.getItem('jarvis_agpos') || '{}'); } catch (e) {}
+try {
+  var _saved = JSON.parse(localStorage.getItem('jarvis_agpos') || '{}');
+  if (_saved.__version === AG_POS_VERSION) { agCustomPos = _saved; delete agCustomPos.__version; }
+  else { localStorage.removeItem('jarvis_agpos'); }
+} catch (e) {}
+function agSpeicherPos() {
+  try {
+    var out = Object.assign({}, agCustomPos, { __version: AG_POS_VERSION });
+    localStorage.setItem('jarvis_agpos', JSON.stringify(out));
+  } catch (e) {}
+}
 var agMeta = null;
 var agDrag = null;
 var agDragMoved = false;
@@ -3178,6 +3955,22 @@ function buildAgSvg(pos) {
   var defs = '<defs>';
   var paths = '';
   var busy = window.agBusy || [];
+  // SVG-Flaeche dynamisch aus den TATSAECHLICHEN Kartenpositionen bestimmen.
+  // Vorher war sie fix auf Container-Breite/Berechnungs-Hoehe begrenzt —
+  // sobald man eine Karte darueber hinaus zog, endete die Verbindungslinie
+  // abrupt am unsichtbaren SVG-Rand (der "Linien hoeren irgendwo auf"-Bug).
+  var minX = 0, minY = 0, maxX = agMeta.W, maxY = agMeta.totalH;
+  Object.keys(pos).forEach(function(id) {
+    var p = pos[id];
+    if (!p) return;
+    if (p.x < minX) minX = p.x;
+    if (p.y < minY) minY = p.y;
+    if (p.x + agMeta.CW > maxX) maxX = p.x + agMeta.CW;
+    if (p.y + agMeta.CH > maxY) maxY = p.y + agMeta.CH;
+  });
+  var pad = 80;
+  minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+  var svgW = maxX - minX, svgH = maxY - minY;
   agMeta.bots.forEach(function(b, bi) {
     if (!b.parent || !pos[b.parent] || !pos[b.id]) return;
     var a = pos[b.parent], c = pos[b.id];
@@ -3202,7 +3995,8 @@ function buildAgSvg(pos) {
     paths += '<circle r="' + rad + '" fill="' + col + '" opacity="' + op + '"><animateMotion dur="' + dur + '" repeatCount="indefinite" path="' + path + '"/></circle>';
     if (aktiv) paths += '<circle r="1.6" fill="' + colP + '" opacity=".8"><animateMotion dur="' + dur + '" begin="0.65s" repeatCount="indefinite" path="' + path + '"/></circle>';
   });
-  return '<svg class="agSvg" width="' + agMeta.W + '" height="' + agMeta.totalH + '" viewBox="0 0 ' + agMeta.W + ' ' + agMeta.totalH + '">' + defs + '</defs>' + paths + '</svg>';
+  return '<svg class="agSvg" width="' + svgW + '" height="' + svgH + '" viewBox="' + minX + ' ' + minY + ' ' + svgW + ' ' + svgH +
+         '" style="left:' + minX + 'px; top:' + minY + 'px;">' + defs + '</defs>' + paths + '</svg>';
 }
 
 function agDomPositions() {
@@ -3278,15 +4072,49 @@ function renderAgents(bots) {
       });
     });
   } else {
-    levels.forEach(function(lv, d) {
-      var n = lv.length;
-      var rowW = n * CW + (n - 1) * GAPX;
-      var startX = Math.max(0, (W - rowW) / 2);
-      lv.forEach(function(b, i) {
-        pos[b.id] = { x: startX + i * (CW + GAPX), y: d * (CH + GAPY), w: CW };
+    // ECHTES Baumlayout: Kinder werden UNTER ihrem Elternteil zentriert
+    // platziert (rekursiv), statt alle Knoten einer Tiefe stumpf in einer
+    // global zentrierten Reihe zu verteilen. Der alte Ansatz sah nur bei
+    // gleich vielen Kindern pro Zweig zufaellig richtig aus — sobald ein
+    // Zweig (z.B. Studio mit 2 Kindern) neben einem kinderlosen Zweig
+    // (Immo) haengt, gerieten die Kinder durcheinander (siehe Bugreport:
+    // RENDER sprang quer durchs Bild). subtreeWidth/place loesen das durch
+    // "Slot"-Rechnung: jeder Blattknoten = 1 Slot breit, ein Elternteil ist
+    // so breit wie die Summe seiner Kinder und wird ueber ihnen zentriert.
+    var slot = {};
+    function subtreeWidth(id) {
+      var kids = children[id];
+      if (!kids || !kids.length) return 1;
+      return kids.reduce(function(s, k) { return s + subtreeWidth(k.id); }, 0);
+    }
+    function place(id, leftSlot, depth) {
+      var kids = children[id] || [];
+      if (!kids.length) {
+        slot[id] = { center: leftSlot + 0.5, depth: depth };
+        return leftSlot + 1;
+      }
+      var cursor = leftSlot;
+      var centers = [];
+      kids.forEach(function(k) {
+        cursor = place(k.id, cursor, depth + 1);
+        centers.push(slot[k.id].center);
       });
+      slot[id] = { center: (centers[0] + centers[centers.length - 1]) / 2, depth: depth };
+      return cursor;
+    }
+    var cursor2 = 0;
+    (children['root'] || []).forEach(function(rootBot) {
+      cursor2 = place(rootBot.id, cursor2, 0);
+    });
+    var unit = CW + GAPX;
+    var totalW = Math.max(unit, cursor2 * unit - GAPX);
+    var offsetX = Math.max(0, (W - totalW) / 2);
+    Object.keys(slot).forEach(function(id) {
+      var s = slot[id];
+      pos[id] = { x: offsetX + s.center * unit - unit / 2, y: s.depth * (CH + GAPY), w: CW };
     });
   }
+  // Gespeicherte Drag-Positionen anwenden (freies Verschieben bleibt erhalten).
   Object.keys(agCustomPos).forEach(function(id) {
     if (pos[id]) { pos[id].x = agCustomPos[id].x; pos[id].y = agCustomPos[id].y; }
   });
@@ -3535,7 +4363,7 @@ function loadHealth() {
       return '<div class="hlItem"><div class="ig"><b>'+esc(m.gericht)+'</b>'+
         '<span>'+esc(m.zeit)+' · '+Math.round(m.protein_g)+'g P · '+Math.round(m.kh_g)+'g KH · '+Math.round(m.fett_g)+'g F</span></div>'+
         '<span class="ik">'+m.kcal+'</span>'+
-        '<span class="idel" data-hlid="'+m.id+'">\\u2715</span></div>';
+        '<span class="idel" data-hlid="'+m.id+'">✕</span></div>';
     }).join('');
   });
 }
@@ -3856,7 +4684,10 @@ input.addEventListener('keydown', async function(ev) {
     setTimeout(function() { ladeVerlauf(target); }, 400);
   }
   busy = false;
-  setEnergy(0);
+  // Energie nur zuruecknehmen, wenn nicht parallel ein Hintergrund-Auftrag
+  // (z.B. Studio-Video) laeuft — sonst waere die Kugel faelschlich ruhig.
+  if (!studioBusy) setEnergy(0); else setEnergy(0.85);
+  if (typeof pruefeBotAktivitaet === 'function') setTimeout(pruefeBotAktivitaet, 1500);
   document.body.classList.remove('thinking');
   document.querySelectorAll('.agNode.busy').forEach(function(n) {
     n.classList.remove('busy');
@@ -3958,8 +4789,10 @@ document.addEventListener('mousemove', function(ev) {
   var dx = (ev.clientX - agDrag.startX) / agView.zoom, dy = (ev.clientY - agDrag.startY) / agView.zoom;
   if (Math.abs(dx) + Math.abs(dy) > 4) agDragMoved = true;
   if (!agDragMoved) return;
-  var nx = Math.max(-300, agDrag.origX + dx);
-  var ny = Math.max(-300, agDrag.origY + dy);
+  // Open-Space: keine Begrenzung mehr — Karten duerfen frei verschoben werden
+  // (vorher Math.max(-300, ...), das kappte die Bewegung hart bei -300px).
+  var nx = agDrag.origX + dx;
+  var ny = agDrag.origY + dy;
   agDrag.card.style.left = nx + 'px';
   agDrag.card.style.top = ny + 'px';
   agUpdateSvgLive();
@@ -3970,9 +4803,12 @@ document.addEventListener('mouseup', function() {
   card.style.zIndex = '';
   card.style.transition = '';
   if (agDragMoved) {
+    // Freies Verschieben: Position uebernehmen und merken. Die SVG-Flaeche
+    // waechst dynamisch mit (siehe buildAgSvg), daher reissen die
+    // Verbindungslinien auch bei weit verschobenen Karten nicht mehr ab.
     agCustomPos[card.getAttribute('data-bot')] = {
       x: parseFloat(card.style.left) || 0, y: parseFloat(card.style.top) || 0 };
-    try { localStorage.setItem('jarvis_agpos', JSON.stringify(agCustomPos)); } catch (e) {}
+    agSpeicherPos();
     agLastHash = '';
   }
   agDrag = null;
@@ -4080,7 +4916,7 @@ document.getElementById('agChart').addEventListener('dblclick', function(ev) {
   var card = ev.target.closest('.agNode');
   if (!card) return;
   delete agCustomPos[card.getAttribute('data-bot')];
-  try { localStorage.setItem('jarvis_agpos', JSON.stringify(agCustomPos)); } catch (e) {}
+  agSpeicherPos();
   agLastHash = '';
   document.getElementById('agChart').innerHTML = '';
   renderAgents(lastBots);
