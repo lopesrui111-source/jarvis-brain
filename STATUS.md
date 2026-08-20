@@ -1,71 +1,63 @@
-<!-- automatisch erzeugt am 13.08.2026 07:02 — nicht von Hand bearbeiten -->
+<!-- automatisch erzeugt am 18.08.2026 07:01 — nicht von Hand bearbeiten -->
 
 # STATUS
 
 ## Was das System ist
 
-Multi-Bot-System auf Hetzner CX23 (195.201.7.109), läuft in Docker Compose unter Ubuntu.
-JARVIS (orchestrator/core.py) ist der zentrale Orchestrator mit Gedächtnis (PostgreSQL + pgvector), Mail- und Kalender-Lesezugriff, Web-Recherche und Aufgabenverwaltung.
-Spezialisierte Bots: CEO (Strategie, Bueroflow), MARKETING (48 Skills + 345 Anleitungen, Bildgen), SEO (Gutefrage-Recherche, Entwürfe), IMMO (Rendite-Analysen), TELEGRAM (Durchreiche-Schicht), RENDER (Video-Produktion), REGIE (Automation), RECORDER (deprecated).
+Multi-Bot-System auf Hetzner CX23 (195.201.7.109) mit JARVIS als Orchestrator. JARVIS delegiert spezialisierte Aufgaben an CEO (Strategie), MARKETING (Creatives), SEO (Recherche), IMMO (Immobilien-Analyse) und TELEGRAM (Messaging-Bridge). Alle Bots laufen in Docker Compose, speichern Gedächtnis in PostgreSQL 16 mit pgvector, Zwischenergebnisse im Vault.
 
 ## Infrastruktur
 
-**Server:** Hetzner CX23, Ubuntu, Docker Compose  
-**Repo-Wurzel:** `/opt/jarvis-brain/`  
-**Datenbank:** PostgreSQL 16 mit pgvector, DB `jarvis_brain`, User `jarvis`  
-**Datenquellen (read-only):** Google iCal (Kalender), IMAP (IONOS + Gmail), gutefrage.net, GitHub  
-**Laufende Container:** redis, postgres, adminer, watchtower, dashboard, jarvis-core, jarvis-ceo, jarvis-marketing, jarvis-recorder, jarvis-seo, jarvis-telegram, jarvis-immo, jarvis-regie, jarvis-render, camofox  
-**Zeitzone (alle Dockerfiles):** Europe/Berlin  
-**Bildgen:** MuAPI (MARKETING delegiert an Render/MuAPI)
+- **Server**: Hetzner CX23, Ubuntu, Docker Compose
+- **Repo-Wurzel**: `/opt/jarvis-brain/` (nicht `/opt/jarvis/`)
+- **Datenbank**: PostgreSQL 16, pgvector-Extension, DB `jarvis_brain`, User `jarvis`
+- **Cache/Queue**: Redis
+- **Dienste**: postgres, redis, adminer, watchtower, dashboard, jarvis-core, jarvis-ceo, jarvis-marketing, jarvis-recorder, jarvis-regie, jarvis-render, camofox, jarvis-immo, jarvis-seo, jarvis-telegram
+- **Zeitzone**: Europe/Berlin (in allen Dockerfiles gesetzt)
+- **Deploy**: docker-compose.yml mit manuellen Block-Einfügungen, keine Skripte
 
 ## Aktueller Stand je Komponente
 
-| Komponente | Zeilen | Funktion | Zuletzt geändert |
-|---|---|---|---|
-| **orchestrator/core.py** | 3434 | Orchestrator, Mail/Kalender, Gedächtnis, Aufgaben, Morgen-Durchgang, Doku-Lauf | Routing, Delegation, Aufgaben-Parsing |
-| **dashboard/dashboard.py** | 4713 | Web-UI, Echtzeit-Log, Aufgaben-Panel, Kosten-Track, Vault-Browser | Dashboard-Erweiterungen |
-| **bots/ceo/bot.py** | 777 | Strategie, Bueroflow, CEO-Review (Marketing-Entwürfe) | Review-Logik |
-| **bots/marketing/bot.py** | 1261 | 48 Skills, 345 Anleitungen, Text/Bild-Creatives, MuAPI-Integration | Skill-Ausführung, Entwurf-Management |
-| **bots/seo/bot.py** | 1563 | Gutefrage-Recherche, Entwurf-Ablage im Vault | Entwürfe (1 wartend) |
-| **bots/immo/bot.py** | 1092 | Rendite-Analysen, Plausibilitätsprüfung, Telegram-Hinweise | Analyse-Logic (8 ungeprueft) |
-| **bots/telegram/bridge.py** | 350 | Durchreiche-Schicht zu Telegram | Datenfluss |
-| **bots/render** | — | Video-Produktion: Higgsfield-Layer, StorySequenz, Motion-Tuning | Motion-Fix, Easing, Notbremse, Selbst-Review (video_pruefen) |
-| **bots/regie** | — | Automation | — |
+| Datei | Zeilen | Letzte Änderung |
+|-------|--------|-----------------|
+| orchestrator/core.py | 3434 | Morgen-Durchgang, Lagebild-Tool, Auftrags-System |
+| dashboard/dashboard.py | 4959 | Web-UI für Aufgaben, Mails, Kalender, Gedächtnis |
+| bots/ceo/bot.py | 777 | CEO-Review für Marketing-Entwürfe |
+| bots/marketing/bot.py | 1261 | 48 Skills + 345 Anleitungen, MuAPI-Bildgen |
+| bots/seo/bot.py | 1563 | gutefrage.net-Recherche, Entwürfe im Vault (Quora deaktiviert) |
+| bots/immo/bot.py | 1092 | Rendite-Analysen, Plausibilität, Telegram-Hinweise |
+| bots/telegram/bridge.py | 350 | Durchreiche-Schicht, kein Gedächtnis |
 
-**Kosten (30 Tage):** jarvis $10.21, marketing $7.43, ceo $1.54, seo $1.51, immo $0.96  
-**Offene Aufgaben:** 10
+**JARVIS-Fähigkeiten**: Gedächtnis (pgvector), Mail lesen (IMAP IONOS + Gmail), Kalender lesen (Google iCal, read-only), Web-Recherche, GitHub lesen, Auftrags-System, Aufgabenverwaltung, Morgen-Durchgang (07:00), Lagebild-Tool, Doku-System. Delegiert spezialisierte Arbeiten.
 
 ## Zuletzt gebaut
 
-- **Publishing-Entwürfe & Recorder-Stilllegung:** post_entwurf-Infrastruktur, E-17 custom-Liste-Fix, beispiel.jsx entfernt, Recorder retired
-- **Higgsfield-Integration:** Download + Mount + OffthreadVideo-Loop in StorySequenz, Prompt-Regeln für Video-Stil
-- **Video-QA & Notbremse:** Selbst-Review-Loop (video_pruefen), Notbremse, 4-Pro-Stile, Motion-Prinzipien, Marken-Schreibweise, Easing-Warnung, Format-Wahl
-- **Motion & Szenen:** formen/kinetic angeschlossen, Uebergaenge entkoppelt + getuned, durchgehendes Leben in allen 5 Grundstilen, GlasPanel-Look in Szenen
-- **Bug-Fixes:** 3 Bugs (Notbremse, Easing-Warnung, Format-Wahl), ElevenLabs Musik-Lizenzregeln
+- **Motion-Referenzbibliothek**: 10 Komponenten dokumentiert (Vorschau-Renders, Bewegungsprüfung, Typografie, Anti-Abbruch), README mit Verwendungsanleitung
+
+## Systemlage (Momentaufnahme)
+
+- Offene Aufgaben: 9
+- SEO-Entwürfe wartend: 0
+- Immo-Treffer ungeprueft: 18
+- Kosten 30 Tage: regie $12.34, jarvis $11.42, marketing $7.75, seo $1.83, buroflow-ceo $1.65, immo $1.07
 
 ## Offene Punkte
 
-- SEO: 1 Entwurf wartend auf Ueberprüfung/Publication
-- IMMO: 8 Treffer ungeprueft
-- Quora: derzeit ABGESCHALTET (Cloudflare-Schutz)
-- MARKETING postet NICHTS selbst — legt Dateien im Vault ab
-- SEO postet NIEMALS — Rui kuemmert sich um Publication von Hand
-- RENDER: Motion-Tuning und ElevenLabs-Integration stabil, Selbst-Review in Produktion
+Keine kritischen Blockaden dokumentiert.
 
 ## Arbeitsweise mit Rui
 
-- **Dateien:** Komplette Ersetzungsdateien statt Patches
-- **Shell:** CMD statt PowerShell
-- **Sprache:** Deutsche Antworten, kurz und direkt
-- **Deployment:** Schritt für Schritt, nach jedem Deploy `wc -l` auf betroffene Dateien prüfen
-- **Konsistenz:** Alle Aenderungen gegen STATUS.md validieren
+- **Dateiaustausch**: Vollständige Ersetzungsdateien, nicht Patches
+- **Shell**: `CMD` (Bash), nie PowerShell
+- **Sprache**: Deutsche Antworten, sachlich, kurz und direkt
+- **Deployment**: Nach jedem Deploy `wc -l` auf geänderte Dateien prüfen
+- **Schrittweise**: Ein Änderungsschritt pro Request, dann warten
 
 ## Kritische Regeln
 
-- **.env wird NIE angefasst** — Secrets und Credentials sind tabu
-- **docker-compose.yml:** Nur komplette, fertige Bloecke zum manuellen Einfuegen; KEINE Skripte zum automatischen Patchen
-- **JavaScript/Video-Output:** Ausgelieferter Code (Dashboard, Render-Prompts, Video-Ausgaben) VOR Auslieferung IMMER pruefen
-- **Schreibweise:** Marken-Namen (ElevenLabs, MuAPI, Higgsfield) korrekt halten
-- **API-Kosten:** Vor jedem Deploy aktuelle Kostenraten bestaetigen
-- **Gedaechtnis (pgvector):** Taeglich um 03:00 konsolidiert, nicht manuell faeddeln
-- **Morgen-Durchgang:** 07:00, Mails + Kalender → Aufgaben, dann automatisch Doku-Lauf
+- **`.env` unantastbar**: Wird nie angefasst, nie im Repo commitet
+- **`docker-compose.yml`**: Nur fertige Blöcke zum manuellen Einfügen liefern, keine Automatisierungs-Skripte
+- **JavaScript vor Auslieferung**: Prüfung auf Syntax und Kompatibilität
+- **Mail/Kalender**: JARVIS liest nur; Änderungen von Hand durch Rui
+- **SEO-Posts**: Keine automatische Veröffentlichung; Entwürfe gehen in den Vault, Rui postet von Hand
+- **pgvector-Queries**: Achte auf embedding_model und similarity-Schwellenwerte

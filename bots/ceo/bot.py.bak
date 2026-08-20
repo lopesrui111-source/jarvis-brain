@@ -172,24 +172,9 @@ def tool_remember(inp):
     content = (inp.get("content") or "").strip()
     project = (inp.get("project") or "buroflow").strip().lower()
     title   = (inp.get("title") or "").strip()
-    geheim  = bool(inp.get("geheim"))
     if not content:
         return "Fehler: leerer Inhalt."
-
-    # GEHEIME EINTRAEGE: verschluesselt speichern, KEIN Embedding.
-    # Ohne Embedding kann kein anderer Bot per Aehnlichkeitssuche auch nur
-    # erkennen, dass ein Eintrag zu diesem Thema existiert.
-    if geheim:
-        if _mc is None or not _mc.hat_schluessel():
-            return ("Fehler: Dieser Bot hat keinen Verschluesselungs-Schluessel "
-                    "(MEMORY_KEY fehlt). Sensible Daten werden NICHT im Klartext "
-                    "gespeichert. Bitte den Schluessel in der .env setzen.")
-        content = _mc.verschluesseln(content)
-        if content is None:
-            return "Fehler: Verschluesselung fehlgeschlagen. Nichts gespeichert."
-        v = None
-    else:
-        v = embed(f"{title}\n{content}")
+    v = embed(f"{title}\n{content}")
     try:
         conn = pg_conn()
         with conn, conn.cursor() as cur:
@@ -203,7 +188,7 @@ def tool_remember(inp):
                             (BOT_NAME, project, title, content))
             mid = cur.fetchone()[0]
         conn.close()
-        return f"Gespeichert (#{mid}, {project}{', verschluesselt' if geheim else ''}): {title}"
+        return f"Gespeichert (#{mid}, {project}): {title}"
     except Exception as e:
         return f"Fehler beim Speichern: {e}"
 
@@ -234,11 +219,8 @@ def tool_recall(inp, k=5):
         conn.close()
         if not rows:
             return "Keine Treffer im Gedaechtnis."
-        def _inhalt(r):
-            c = r["content"]
-            return _mc.lesbar_machen(c) if _mc else c
         return "\n".join(f"[#{r['id']} | {r['project']} | {r['created_at'].strftime('%d.%m.%Y')}] "
-                         f"{r['title']}: {_inhalt(r)}" for r in rows)
+                         f"{r['title']}: {r['content']}" for r in rows)
     except Exception as e:
         return f"Fehler bei der Suche: {e}"
 
@@ -373,20 +355,10 @@ def tool_read_mail(inp):
 
 TOOLS = [
     {"name": "remember",
-     "description": ("Speichert wichtige Fakten/Entscheidungen dauerhaft im gemeinsamen Gedaechtnis. "
-                     "Setze 'geheim': true bei SENSIBLEN Daten — Bankverbindungen, Kartennummern, IBAN, "
-                     "Zugangsdaten, Passwoerter, Ausweis- und Steuernummern, Gesundheitsdaten. Solche "
-                     "Eintraege werden verschluesselt abgelegt und sind nur fuer JARVIS und den CEO-Bot "
-                     "lesbar; alle anderen Bots sehen nur einen Platzhalter. Im Zweifel lieber geheim "
-                     "setzen — das kostet nichts ausser der semantischen Suche."),
+     "description": "Speichert wichtige Fakten/Entscheidungen dauerhaft im gemeinsamen Gedaechtnis.",
      "input_schema": {"type": "object", "properties": {
          "content": {"type": "string"}, "project": {"type": "string", "description": "Standard: buroflow"},
-         "title": {"type": "string"},
-         "geheim": {"type": "boolean", "description": ("true = verschluesselt speichern, nur fuer JARVIS "
-                    "und CEO lesbar. Pflicht bei Bank-/Karten-/Zugangsdaten. Hinweis: geheime Eintraege "
-                    "haben kein Embedding, sind also nur ueber die Zeitsortierung auffindbar, nicht "
-                    "ueber die semantische Suche — nenne den Titel deshalb praezise.")}},
-         "required": ["content", "title"]}},
+         "title": {"type": "string"}}, "required": ["content", "title"]}},
     {"name": "recall",
      "description": "Durchsucht das gemeinsame Langzeitgedaechtnis semantisch (auch JARVIS-Eintraege und 'Schreibstil buroflow').",
      "input_schema": {"type": "object", "properties": {
@@ -574,14 +546,6 @@ client = Anthropic(api_key=CLAUDE_KEY)
 
 # Prompt-Caching: System-Prompt + Tools werden serverseitig gecacht (90% billiger ab 2. Aufruf)
 import copy as _copy
-
-# Verschluesselung fuer sensible Gedaechtnis-Eintraege
-import sys as _sys
-_sys.path.insert(0, '/app')
-try:
-    import memory_crypto as _mc
-except Exception:
-    _mc = None
 SYS_CACHED = [{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}]
 TOOLS_CACHED = _copy.deepcopy(TOOLS)
 if TOOLS_CACHED:

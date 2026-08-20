@@ -2528,19 +2528,7 @@ MORGEN_GESPERRT = ("ask_ceo", "ask_immo", "ask_seo", "ask_marketing",
                    "mail_senden", "mail_entwurf")
 
 
-# ── Sicherheitsnetz: sensible Daten nie im Klartext speichern ──────
-# Greift auch dann, wenn das Modell 'geheim' vergisst oder die
-# Zwangs-Speicherung remember ohne Ruecksicht aufruft.
-_SENSIBEL_MUSTER = [
-    re.compile(r"\b[A-Z]{2}\d{2}[\s]?[\dA-Z]{4}[\s]?[\dA-Z]{4}", re.I),   # IBAN
-    re.compile(r"\b(?:\d[ -]?){13,19}\b"),                                  # Kartennummer
-    re.compile(r"\bcvc\b|\bcvv\b|\bprüfziffer\b", re.I),
-    re.compile(r"\bpasswort\b|\bpassword\b|\bapi[_-]?key\b", re.I),
-    re.compile(r"\bsteuer[- ]?id\b|\bsteuernummer\b", re.I),
-]
-
 def run_tool(name: str, inp: dict) -> str:
-    inp = _sensibel_pruefen(name, inp)
     if MORGEN_LAEUFT["ja"] and name in MORGEN_GESPERRT:
         print(f"  [morgen] {name} blockiert (keine Delegation im Durchgang)", flush=True)
         return ("Im Morgen-Durchgang nicht erlaubt. Beauftrage keine anderen Bots — "
@@ -3018,6 +3006,16 @@ try:
 except Exception:
     _mc = None
 
+# ── Sicherheitsnetz: sensible Daten nie im Klartext speichern ──────
+# Greift auch dann, wenn das Modell 'geheim' vergisst oder die
+# Zwangs-Speicherung remember ohne Ruecksicht aufruft.
+_SENSIBEL_MUSTER = [
+    re.compile(r"\b[A-Z]{2}\d{2}[\s]?[\dA-Z]{4}[\s]?[\dA-Z]{4}", re.I),   # IBAN
+    re.compile(r"\b(?:\d[ -]?){13,19}\b"),                                  # Kartennummer
+    re.compile(r"\bcvc\b|\bcvv\b|\bprüfziffer\b", re.I),
+    re.compile(r"\bpasswort\b|\bpassword\b|\bapi[_-]?key\b", re.I),
+    re.compile(r"\bsteuer[- ]?id\b|\bsteuernummer\b", re.I),
+]
 
 def _sensibel_pruefen(name, inp):
     """Setzt geheim=true, wenn ein remember-Aufruf sensible Muster enthaelt."""

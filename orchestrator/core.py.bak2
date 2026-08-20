@@ -837,24 +837,9 @@ def tool_remember(inp: dict) -> str:
     content = inp.get("content", "").strip()
     project = inp.get("project", "sonstiges").strip().lower()
     title   = inp.get("title", "").strip()
-    geheim  = bool(inp.get("geheim"))
     if not content:
         return "Fehler: leerer Inhalt."
-
-    # GEHEIME EINTRAEGE: verschluesselt und OHNE Embedding. Ohne Embedding
-    # kann kein anderer Bot per Aehnlichkeitssuche erkennen, dass es einen
-    # Eintrag zu diesem Thema ueberhaupt gibt.
-    if geheim:
-        if _mc is None or not _mc.hat_schluessel():
-            return ("Fehler: Kein Verschluesselungs-Schluessel (MEMORY_KEY fehlt). "
-                    "Sensible Daten werden NICHT im Klartext gespeichert. "
-                    "Nichts wurde abgelegt.")
-        content = _mc.verschluesseln(content)
-        if content is None:
-            return "Fehler: Verschluesselung fehlgeschlagen. Nichts gespeichert."
-        v = None
-    else:
-        v = embed(f"{title}\n{content}")
+    v = embed(f"{title}\n{content}")
     try:
         conn = pg_conn()
         with conn, conn.cursor() as cur:
@@ -2528,19 +2513,7 @@ MORGEN_GESPERRT = ("ask_ceo", "ask_immo", "ask_seo", "ask_marketing",
                    "mail_senden", "mail_entwurf")
 
 
-# ── Sicherheitsnetz: sensible Daten nie im Klartext speichern ──────
-# Greift auch dann, wenn das Modell 'geheim' vergisst oder die
-# Zwangs-Speicherung remember ohne Ruecksicht aufruft.
-_SENSIBEL_MUSTER = [
-    re.compile(r"\b[A-Z]{2}\d{2}[\s]?[\dA-Z]{4}[\s]?[\dA-Z]{4}", re.I),   # IBAN
-    re.compile(r"\b(?:\d[ -]?){13,19}\b"),                                  # Kartennummer
-    re.compile(r"\bcvc\b|\bcvv\b|\bprüfziffer\b", re.I),
-    re.compile(r"\bpasswort\b|\bpassword\b|\bapi[_-]?key\b", re.I),
-    re.compile(r"\bsteuer[- ]?id\b|\bsteuernummer\b", re.I),
-]
-
 def run_tool(name: str, inp: dict) -> str:
-    inp = _sensibel_pruefen(name, inp)
     if MORGEN_LAEUFT["ja"] and name in MORGEN_GESPERRT:
         print(f"  [morgen] {name} blockiert (keine Delegation im Durchgang)", flush=True)
         return ("Im Morgen-Durchgang nicht erlaubt. Beauftrage keine anderen Bots — "
@@ -3012,12 +2985,16 @@ client = Anthropic(api_key=CLAUDE_KEY)
 # Prompt-Caching: System-Prompt + Tools werden serverseitig gecacht (90% billiger ab 2. Aufruf)
 import copy as _copy
 
-# Verschluesselung fuer sensible Gedaechtnis-Eintraege
-try:
-    import memory_crypto as _mc
-except Exception:
-    _mc = None
-
+# ── Sicherheitsnetz: sensible Daten nie im Klartext speichern ──────
+# Greift auch dann, wenn das Modell 'geheim' vergisst oder die
+# Zwangs-Speicherung remember ohne Ruecksicht aufruft.
+_SENSIBEL_MUSTER = [
+    re.compile(r"\b[A-Z]{2}\d{2}[\s]?[\dA-Z]{4}[\s]?[\dA-Z]{4}", re.I),   # IBAN
+    re.compile(r"\b(?:\d[ -]?){13,19}\b"),                                  # Kartennummer
+    re.compile(r"\bcvc\b|\bcvv\b|\bprüfziffer\b", re.I),
+    re.compile(r"\bpasswort\b|\bpassword\b|\bapi[_-]?key\b", re.I),
+    re.compile(r"\bsteuer[- ]?id\b|\bsteuernummer\b", re.I),
+]
 
 def _sensibel_pruefen(name, inp):
     """Setzt geheim=true, wenn ein remember-Aufruf sensible Muster enthaelt."""

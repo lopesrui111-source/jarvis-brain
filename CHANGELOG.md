@@ -2,6 +2,12 @@
 
 Automatisch gepflegt von JARVIS aus den Commit-Messages. Nicht von Hand bearbeiten.
 
+## 2026-08-17
+- `4e7af67` Motion-Referenzbibliothek gesichert (10 Komponenten + README)
+- `9e358d1` Motion-Referenzbibliothek: Vorschau-Renders, Bewegungspruefung, Typografie, Anti-Abbruch
+
+Automatisch gepflegt von JARVIS aus den Commit-Messages. Nicht von Hand bearbeiten.
+
 ## 2026-08-12
 - `f511876` Publishing-Entwuerfe (post_entwurf), E-17 custom-Liste-Fix, beispiel.jsx entfernt, Recorder retired
 - `823e0d2` Higgsfield-Hintergrundlayer: Download + Mount + OffthreadVideo-Loop in StorySequenz, Prompt-Regeln

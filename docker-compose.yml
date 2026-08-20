@@ -82,7 +82,9 @@ services:
     build: ./orchestrator
     container_name: jarvis-core
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - .env
+      - .env.secret
     volumes:
       - ./skills-lib:/app/skills-lib:ro
       - ./vault:/app/vault
@@ -99,7 +101,9 @@ services:
     build: ./bots/ceo
     container_name: jarvis-ceo
     restart: unless-stopped
-    env_file: .env
+    env_file:
+      - .env
+      - .env.secret
     volumes:
       - ./vault:/app/vault
       - ./skills-lib:/app/skills-lib:ro

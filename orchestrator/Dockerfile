@@ -9,6 +9,6 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY protokoll.py core.py cli.py ./
+COPY protokoll.py core.py cli.py memory_crypto.py ./
 
 CMD ["python", "core.py"]

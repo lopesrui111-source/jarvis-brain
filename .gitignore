@@ -7,3 +7,4 @@ skills-repo/
 skills-lib/
 .env.backup*
 .env.bak
+.env.secret
